@@ -80,6 +80,16 @@ class StudioConfig:
 
     # M6.2.3 Phase B managed sessions. Serena's active project is process-scoped,
     # so each durable managed session owns a dedicated loopback Serena process.
+    # Computer Use / Web VNC shared loopback desktop.
+    computer_use_enabled: bool = False
+    computer_vnc_host: str = "127.0.0.1"
+    computer_vnc_port: int = 5902
+    computer_websockify_host: str = "127.0.0.1"
+    computer_websockify_port: int = 6080
+    computer_cdp_port: int = 9222
+    computer_novnc_dir: str = "/usr/share/novnc"
+    computer_auth_token: str | None = None
+
     managed_session_enabled: bool = False
     managed_session_require_binding_for_tools: bool = True
     managed_session_workspace_roots: list[str] = field(default_factory=list)
@@ -154,6 +164,25 @@ class StudioConfig:
     slo_oauth_refresh_failures_max: int = 0
     slo_orphan_events_max: int = 0
 
+    def __post_init__(self) -> None:
+        if not self.computer_use_enabled:
+            return
+        for label, host in (
+            ("computer_vnc_host", self.computer_vnc_host),
+            ("computer_websockify_host", self.computer_websockify_host),
+        ):
+            if not _is_loopback_strict(host):
+                raise ValueError(f"studio.{label} must be loopback only (got {host!r})")
+        if not (1024 <= self.computer_vnc_port <= 65535):
+            raise ValueError("studio.computer_vnc_port must be between 1024 and 65535")
+        if not (1024 <= self.computer_websockify_port <= 65535):
+            raise ValueError("studio.computer_websockify_port must be between 1024 and 65535")
+        if not (1024 <= self.computer_cdp_port <= 65535):
+            raise ValueError("studio.computer_cdp_port must be between 1024 and 65535")
+        if self.computer_auth_token and len(self.computer_auth_token) < 8:
+            raise ValueError("studio.computer_auth_token must be at least 8 characters when set")
+
+
 
 @dataclass(slots=True)
 class ServerConfig:
@@ -194,6 +223,12 @@ class Settings:
 def _dataclass_kwargs(cls: type, values: dict[str, Any]) -> dict[str, Any]:
     allowed = set(cls.__dataclass_fields__)
     return {k: v for k, v in values.items() if k in allowed}
+
+
+
+def _is_loopback_strict(host: str) -> bool:
+    """Accept only explicit loopback addresses for Computer Use backends."""
+    return (host or "").strip().lower() in {"127.0.0.1", "::1"}
 
 
 def load_settings(path: str | Path) -> Settings:

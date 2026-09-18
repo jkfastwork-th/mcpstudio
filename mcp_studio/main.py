@@ -1,15 +1,20 @@
 from __future__ import annotations
 
-import os
+import asyncio
 import html
+import os
+from typing import Any
+
+import websockets
 from urllib.parse import parse_qs
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.websockets import WebSocketDisconnect
 
 from .db import Database, LeaseConflict
 from .gateway import GatewaySessionManager, make_gateway_router
@@ -32,6 +37,7 @@ from .connectivity import ConnectivityManager
 from .oauth import OAuthManager, OAuthError
 from .operations import OperationsManager
 from .observability import ObservabilityManager
+from .computer import ComputerUseManager
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -51,6 +57,7 @@ managed_sessions = ManagedSessionManager(settings, db)
 gateway_sessions = GatewaySessionManager(settings, db, oauth, managed_sessions)
 operations = OperationsManager(settings, db)
 observability = ObservabilityManager(settings, db)
+computer = ComputerUseManager(settings.studio, db)
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
 
 
@@ -75,6 +82,7 @@ async def lifespan(app: FastAPI):
     await observability.stop()
     await operations.stop()
     await managed_sessions.stop()
+    await computer.stop()
     await herdr.stop()
     await health.stop()
     await workers.stop()
@@ -82,6 +90,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="MCP Studio", version="0.9.10", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
+
+_computer_novnc_dir = Path(settings.studio.computer_novnc_dir or "")
+if _computer_novnc_dir.is_dir() and (_computer_novnc_dir / "vnc.html").is_file():
+    app.mount(
+        "/computer/novnc",
+        StaticFiles(directory=str(_computer_novnc_dir)),
+        name="computer-novnc",
+    )
+
 app.include_router(make_gateway_router(settings, db, gateway_sessions))
 
 
@@ -1263,3 +1280,99 @@ async def clear_fault(work_id: str):
     if settings.studio.production_mode:
         raise HTTPException(status_code=404, detail="Not found")
     return await execution.clear_fault(work_id)
+
+# --------------------------------------------------------------------------
+# Computer Use / Web VNC
+# --------------------------------------------------------------------------
+
+def _computer_token_ok(websocket: WebSocket) -> bool:
+    expected = settings.studio.computer_auth_token
+    if not expected:
+        return True
+    auth = websocket.headers.get("authorization", "")
+    if auth.startswith("Bearer ") and auth[7:] == expected:
+        return True
+    return websocket.query_params.get("token") == expected
+
+
+@app.get("/api/computer/status")
+async def computer_status():
+    return await computer.status()
+
+
+@app.get("/api/computer/descriptor/{managed_session_id}")
+async def computer_descriptor(managed_session_id: str):
+    try:
+        return await computer.descriptor(managed_session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown managed session")
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/computer")
+async def computer_view():
+    return RedirectResponse(url="/#computer", status_code=307)
+
+
+@app.websocket("/api/computer/vnc/ws/{managed_session_id}")
+async def computer_vnc_ws(websocket: WebSocket, managed_session_id: str):
+    if not _computer_token_ok(websocket):
+        await websocket.accept()
+        await websocket.close(code=4401, reason="Computer auth token required")
+        return
+
+    try:
+        await computer.descriptor(managed_session_id)
+        target = computer.websocket_target()
+    except KeyError:
+        await websocket.accept()
+        await websocket.close(code=4404, reason="Unknown managed session")
+        return
+    except (RuntimeError, ValueError):
+        await websocket.accept()
+        await websocket.close(code=1011, reason="Computer runtime unavailable")
+        return
+
+    await websocket.accept()
+
+    async def client_to_upstream(upstream):
+        try:
+            while True:
+                event = await websocket.receive()
+                event_type = event.get("type")
+                if event_type == "websocket.disconnect":
+                    return
+                if event_type != "websocket.receive":
+                    continue
+                if event.get("bytes") is not None:
+                    await upstream.send(event["bytes"])
+                elif event.get("text") is not None:
+                    await upstream.send(event["text"])
+        except WebSocketDisconnect:
+            return
+
+    async def upstream_to_client(upstream):
+        async for message in upstream:
+            if isinstance(message, str):
+                await websocket.send_text(message)
+            else:
+                await websocket.send_bytes(message)
+
+    try:
+        async with websockets.connect(target, max_size=None) as upstream:
+            tasks = {
+                asyncio.create_task(client_to_upstream(upstream)),
+                asyncio.create_task(upstream_to_client(upstream)),
+            }
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*done, *pending, return_exceptions=True)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        try:
+            await websocket.close(code=1011, reason="VNC bridge unavailable")
+        except Exception:
+            pass

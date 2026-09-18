@@ -28,6 +28,7 @@
 <a data-help="Capsule work, session state and handoff history." data-view="sessions" href="#sessions"><span>◉</span>Capsules</a>
 <a data-help="Claude, Codex and Hermes runtime availability and lane status." data-view="agents" href="#agents"><span>◈</span>Agents</a>
 <a data-help="Approved project folders, managed sessions and workspace safety." data-view="workspaces" href="#workspaces"><span>▢</span>Workspaces</a>
+<a data-help="Shared browser desktop for OAuth, login and consent screens." data-view="computer" href="#computer"><span>▤</span>Computer</a>
 <a data-help="Appearance, system controls and advanced diagnostics." data-view="system" href="#system"><span>⚙</span>Settings</a>
 </nav>
 <div class="sidebar-footer">
@@ -274,6 +275,78 @@
 </div>
 </details>
 </section>
+
+<section class="view-page" data-page="computer">
+<div class="page-section-head focus-page-head">
+<div><span class="eyebrow">COMPUTER USE</span><h2>Shared browser desktop</h2><p>Use a loopback noVNC desktop for OAuth, login and consent screens. MCP Studio only brokers the websockify path; it never stores passwords or PINs.</p></div>
+<div class="toolbar">
+<button class="button secondary small" id="computerDisconnectedInfoBtn" type="button">What is this?</button>
+</div>
+</div>
+<div class="computer-layout">
+<div class="computer-head-panel">
+<div class="computer-status-block">
+<div class="computer-status-head"><span class="computer-status-pill" id="computerStatusPill">checking</span></div>
+<div class="computer-status-body">
+<div class="computer-status-line"><span>WebVNC bridge</span><strong id="computerBridgeLine">—</strong></div>
+<div class="computer-status-line"><span>noVNC assets</span><strong id="computerNovncLine">—</strong></div>
+<div class="computer-status-line"><span>Token required</span><strong id="computerTokenLine">—</strong></div>
+</div>
+</div>
+<form class="computer-control-form">
+<div class="computer-field">
+<label for="computerSessionSelect"><span>Managed session</span></label>
+<select id="computerSessionSelect" required>
+<option value="">Choose a session…</option>
+</select>
+</div>
+<div class="computer-field">
+<label for="computerTokenInput"><span>Computer token <small>optional, not stored</small></span></label>
+<input id="computerTokenInput" type="password" autocomplete="off" placeholder="Not stored">
+</div>
+<div class="computer-actions">
+<button class="button primary" id="computerConnectBtn" type="button">Connect</button>
+<button class="button secondary" id="computerReconnectBtn" type="button">Reconnect</button>
+<button class="button secondary" id="computerDisconnectBtn" type="button">Disconnect</button>
+<button class="button secondary" id="computerFullscreenBtn" type="button">Fullscreen</button>
+</div>
+</form>
+</div>
+<div class="computer-message computer-message-state" id="computerMessage">Loading computer status…</div>
+<div class="computer-viewer-shell" id="computerViewerShell">
+<iframe id="computerViewer" title="MCP Studio shared desktop" src="about:blank" allow="clipboard-read; clipboard-write; fullscreen" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+</div>
+</div>
+</section>
+
+<section class="view-page computer-view" data-page="computer">
+  <div class="computer-head">
+    <div>
+      <span class="eyebrow">COMPUTER USE</span>
+      <h2>Shared browser desktop</h2>
+      <p>Use this desktop for OAuth approval, login and consent screens. Passwords and OTPs are never stored by MCP Studio.</p>
+    </div>
+    <div class="computer-status-card" id="computerStatusCard">
+      <strong id="computerStatusTitle">Checking...</strong>
+      <small id="computerStatusDetail">Reading local VNC bridge status.</small>
+    </div>
+  </div>
+  <div class="computer-toolbar">
+    <label class="computer-field"><span>Managed session</span><select id="computerSessionSelect"><option value="">Choose a session...</option></select></label>
+    <label class="computer-field"><span>Computer token <small>(optional, not stored)</small></span><input id="computerTokenInput" type="password" autocomplete="off" placeholder="Not stored"></label>
+    <div class="computer-actions">
+      <button class="button primary" id="computerConnectBtn" type="button">Connect</button>
+      <button class="button secondary" id="computerReconnectBtn" type="button">Reconnect</button>
+      <button class="button secondary" id="computerDisconnectBtn" type="button">Disconnect</button>
+      <button class="button secondary" id="computerFullscreenBtn" type="button">Fullscreen</button>
+    </div>
+  </div>
+  <div class="computer-message" id="computerMessage">Select a managed session, then connect.</div>
+  <div class="computer-viewer-shell" id="computerViewerShell">
+    <iframe id="computerViewer" title="MCP Studio Computer" src="about:blank" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
+  </div>
+</section>
+
 </main>
 </div>
 </div>
@@ -282,6 +355,7 @@
 <a data-view="sessions" href="#sessions"><span>◉</span><small>Capsules</small></a>
 <a data-view="agents" href="#agents"><span>◈</span><small>Agents</small></a>
 <a data-view="workspaces" href="#workspaces"><span>▢</span><small>Workspaces</small></a>
+<a data-view="computer" href="#computer"><span>▤</span><small>Computer</small></a>
 <a data-view="system" href="#system"><span>⚙</span><small>Settings</small></a>
 </nav>
 <div class="help-tooltip" hidden="" id="helpTooltip" role="tooltip"></div>

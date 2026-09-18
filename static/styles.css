@@ -792,3 +792,25 @@ html,body{max-width:100%;overflow-x:hidden}
 
 
 /* MCP_STUDIO_COMPUTER_USE_MVP */
+
+/* MCP_STUDIO_COMPUTER_USE_MVP */
+.computer-view{gap:18px}
+.computer-head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px}
+.computer-head h2{margin:4px 0 8px}
+.computer-head p{max-width:780px;margin:0;color:var(--muted,#8993a4)}
+.computer-status-card{min-width:220px;padding:14px 16px;border:1px solid var(--line,rgba(127,127,127,.25));border-radius:16px;background:var(--panel,rgba(255,255,255,.04));display:flex;flex-direction:column;gap:4px}
+.computer-status-card[data-state="ready"] strong{color:#32c48d}
+.computer-status-card[data-state="warning"] strong{color:#e8a838}
+.computer-toolbar{display:grid;grid-template-columns:minmax(220px,1fr) minmax(220px,1fr) auto;gap:12px;align-items:end}
+.computer-field{display:flex;flex-direction:column;gap:6px;font-size:.86rem}
+.computer-field select,.computer-field input{min-height:42px;width:100%;border-radius:10px;border:1px solid var(--line,rgba(127,127,127,.28));background:var(--panel,rgba(255,255,255,.04));color:inherit;padding:8px 10px}
+.computer-actions{display:flex;flex-wrap:wrap;gap:8px}
+.computer-message{padding:11px 14px;border:1px solid var(--line,rgba(127,127,127,.22));border-radius:12px;background:var(--panel,rgba(255,255,255,.035))}
+.computer-message[data-kind="error"]{border-color:rgba(220,75,75,.5)}
+.computer-message[data-kind="warning"]{border-color:rgba(232,168,56,.5)}
+.computer-message[data-kind="good"]{border-color:rgba(50,196,141,.5)}
+.computer-viewer-shell{position:relative;width:100%;min-height:520px;height:min(72vh,900px);overflow:hidden;border:1px solid var(--line,rgba(127,127,127,.24));border-radius:16px;background:#0b0d10}
+.computer-viewer-shell:fullscreen{width:100vw;height:100vh;border-radius:0}
+#computerViewer{display:block;width:100%;height:100%;min-height:520px;border:0;background:#0b0d10}
+@media(max-width:900px){.computer-head{flex-direction:column}.computer-status-card{width:100%;min-width:0}.computer-toolbar{grid-template-columns:1fr}.computer-viewer-shell,#computerViewer{min-height:420px;height:62vh}}
+@media(max-width:560px){.computer-actions .button{flex:1 1 calc(50% - 8px)}.computer-viewer-shell,#computerViewer{min-height:360px;height:56vh}}

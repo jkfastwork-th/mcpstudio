@@ -157,6 +157,18 @@ servers:
       - herdr_prompt_agent
     enabled: true
 
+  # M6.2.5 Computer Use (shared desktop). Keep disabled until a shared
+  # loopback VNC desktop is available. When enabled, Studio only brokers the
+  # websockify -> browser path; it never starts Xtigervnc itself.
+  # computer_use_enabled: false
+  # computer_vnc_host: 127.0.0.1
+  # computer_vnc_port: 5902
+  # computer_websockify_host: 127.0.0.1
+  # computer_websockify_port: 6080
+  # computer_cdp_port: 9222
+  # computer_novnc_dir: /usr/share/novnc
+  # computer_auth_token: ""
+
 tunnels:
   - id: local-serena
     provider: local
