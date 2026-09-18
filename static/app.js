@@ -331,6 +331,7 @@ function setView(view, updateHash=true){
   document.getElementById('viewTitle').textContent=tr(title);
   document.getElementById('viewSubtitle').textContent=tr(sub);
   if(updateHash && location.hash !== `#${view}`) history.replaceState(null,'',`#${view}`);
+  if(view==='computer') setTimeout(refreshComputerView,0);
   window.scrollTo({top:0,behavior:'smooth'});
 }
 
@@ -838,7 +839,7 @@ setInterval(load,5000);
 
 
 /* MCP_STUDIO_COMPUTER_USE_MVP */
-const computerUiState={descriptor:null};
+const computerUiState={descriptor:null,sessions:[],selectedSessionId:null,status:null};
 
 function computerMessage(text,kind=''){
   const el=document.getElementById('computerMessage');
@@ -847,59 +848,102 @@ function computerMessage(text,kind=''){
   el.dataset.kind=kind;
 }
 
+function computerMonitorSvg(){
+  return '<svg viewBox="0 0 64 52" aria-hidden="true"><rect x="6" y="5" width="52" height="34" rx="5" fill="none" stroke="currentColor" stroke-width="3"/><path d="M25 46h14M32 39v7" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><circle cx="52" cy="11" r="2" fill="currentColor"/></svg>';
+}
+
+function renderComputerSessions(sessions){
+  const grid=document.getElementById('computerSessionGrid');
+  const count=document.getElementById('computerSessionCount');
+  if(!grid)return;
+  computerUiState.sessions=sessions;
+  if(count)count.textContent=sessions.length+' session'+(sessions.length===1?'':'s');
+  if(!sessions.length){
+    grid.innerHTML='<div class="computer-session-empty">No managed sessions are available yet.</div>';
+    return;
+  }
+  const accents=['#5f8cff','#9b72ff','#32c48d','#e8a838','#e86f8f','#46b8d8'];
+  grid.innerHTML=sessions.map(function(s,index){
+    const id=esc(s.id);
+    const name=esc(s.workspace_key||s.name||s.id);
+    const workspace=esc((s.name&&s.name!==s.workspace_key)?s.name:(s.project_path||'Managed session'));
+    const status=esc(s.status||'unknown');
+    const selected=s.id===computerUiState.selectedSessionId;
+    const accent=accents[index%accents.length];
+    return '<button class="computer-session-card'+(selected?' selected':'')+'" style="--session-accent:'+accent+'" type="button" data-computer-session="'+id+'" data-status="'+status+'" aria-pressed="'+(selected?'true':'false')+'">'
+      +'<span class="computer-monitor-icon">'+computerMonitorSvg()+'<span class="computer-monitor-glow"></span></span>'
+      +'<span class="computer-session-copy"><strong>'+name+'</strong><small>'+workspace+'</small></span>'
+      +'<span class="computer-session-status"><i></i>'+status+'</span>'
+      +'</button>';
+  }).join('');
+}
+
+function updateComputerStatus(status){
+  const pill=document.getElementById('computerStatusPill');
+  const bridge=document.getElementById('computerBridgeLine');
+  const novnc=document.getElementById('computerNovncLine');
+  const token=document.getElementById('computerTokenLine');
+  const tokenWrap=document.getElementById('computerTokenWrap');
+  const ready=!!(status.enabled&&status.configured&&status.websockify_reachable&&status.novnc_available);
+  if(pill){pill.textContent=ready?'ready':(status.enabled?'needs setup':'disabled');pill.dataset.state=ready?'ready':'warning';}
+  if(bridge)bridge.textContent=status.websockify_reachable?'online':'offline';
+  if(novnc)novnc.textContent=status.novnc_available?'available':'missing';
+  if(token)token.textContent=status.auth_required?'yes':'no';
+  if(tokenWrap)tokenWrap.hidden=!status.auth_required;
+  return ready;
+}
+
 async function refreshComputerView(){
   if((location.hash||'#home')!=='#computer')return;
-  const title=document.getElementById('computerStatusTitle');
-  const detail=document.getElementById('computerStatusDetail');
-  const select=document.getElementById('computerSessionSelect');
-  if(!title||!detail||!select)return;
   try{
     const data=await Promise.all([getJson('/api/computer/status'),getJson('/api/managed/sessions')]);
     const status=data[0]||{};
-    const managed=data[1]||{};
-    const sessions=managed.sessions||[];
-    const old=select.value;
-    select.innerHTML='<option value="">Choose a session...</option>'+sessions.map(function(s){
-      const label=esc(s.name||s.workspace_key||s.id);
-      const st=esc(s.status||'unknown');
-      return '<option value="'+esc(s.id)+'">'+label+' - '+st+'</option>';
-    }).join('');
-    if(sessions.some(function(s){return s.id===old;}))select.value=old;
-    const ready=!!(status.enabled&&status.configured&&status.websockify_reachable&&status.novnc_available);
-    title.textContent=ready?'Ready':(status.enabled?'Needs setup':'Disabled');
-    detail.textContent='websockify '+(status.websockify_reachable?'online':'offline')+' - noVNC '+(status.novnc_available?'available':'missing')+(status.auth_required?' - token required':'');
-    document.getElementById('computerStatusCard').dataset.state=ready?'ready':'warning';
+    const sessions=(data[1]&&data[1].sessions)||[];
+    computerUiState.status=status;
+    const ready=updateComputerStatus(status);
+    renderComputerSessions(sessions);
     if(!status.enabled)computerMessage('Computer Use is disabled in MCP Studio config.','warning');
-    else if(!status.novnc_available)computerMessage('Local noVNC assets are missing. Install noVNC locally; MCP Studio does not use a CDN.','warning');
-    else if(!status.websockify_reachable)computerMessage('Local websockify bridge is offline. Start the loopback VNC to WebSocket bridge.','warning');
-    else computerMessage('Computer desktop is ready. Choose a managed session and connect.','good');
+    else if(!status.novnc_available)computerMessage('Local noVNC assets are missing.','warning');
+    else if(!status.websockify_reachable)computerMessage('Local websockify bridge is offline.','warning');
+    else if(!sessions.length)computerMessage('Computer desktop is ready, but no managed sessions are available.','warning');
+    else if(ready)computerMessage('Choose a monitor to open that session desktop.','good');
   }catch(err){
-    title.textContent='Unavailable';
-    detail.textContent=err.message;
+    updateComputerStatus({enabled:false});
+    renderComputerSessions([]);
     computerMessage('Computer status failed: '+err.message,'error');
   }
 }
 
-async function connectComputerView(){
-  const select=document.getElementById('computerSessionSelect');
-  const id=select&&select.value;
+async function connectComputerView(id){
   if(!id){computerMessage('Choose a managed session first.','warning');return;}
   try{
-    const status=await getJson('/api/computer/status');
+    const status=computerUiState.status||await getJson('/api/computer/status');
     if(!status.enabled)throw new Error('Computer Use is disabled');
     if(!status.novnc_available)throw new Error('Local noVNC assets are missing');
     if(!status.websockify_reachable)throw new Error('Local websockify bridge is offline');
     const descriptor=await getJson('/api/computer/descriptor/'+encodeURIComponent(id));
     computerUiState.descriptor=descriptor;
+    computerUiState.selectedSessionId=id;
+    renderComputerSessions(computerUiState.sessions);
+    const session=computerUiState.sessions.find(function(s){return s.id===id;})||{};
+    const name=document.getElementById('computerSelectedSessionName');
+    const meta=document.getElementById('computerSelectedSessionMeta');
+    if(name)name.textContent=session.name||session.workspace_key||id;
+    if(meta)meta.textContent=(session.workspace_key||'managed session')+' · '+(session.status||'unknown');
     let path='api/computer/vnc/ws/'+encodeURIComponent(id);
-    const token=(document.getElementById('computerTokenInput').value||'').trim();
+    const tokenInput=document.getElementById('computerTokenInput');
+    const token=(tokenInput&&tokenInput.value||'').trim();
     if(token)path+='?token='+encodeURIComponent(token);
     const url=new URL(descriptor.viewer_url||'/computer/novnc/vnc.html',location.origin);
     url.searchParams.set('autoconnect','true');
     url.searchParams.set('resize','scale');
     url.searchParams.set('path',path);
-    document.getElementById('computerViewer').src=url.pathname+url.search;
-    computerMessage('Connected. Complete login/OAuth in the desktop below; credentials remain in the browser profile.','good');
+    const panel=document.getElementById('computerViewerPanel');
+    const iframe=document.getElementById('computerViewer');
+    if(panel)panel.hidden=false;
+    if(iframe)iframe.src=url.pathname+url.search;
+    if(panel)panel.scrollIntoView({behavior:'smooth',block:'start'});
+    computerMessage('Opened '+(session.name||session.workspace_key||'session')+' desktop.','good');
   }catch(err){
     computerMessage('Could not connect: '+err.message,'error');
   }
@@ -907,9 +951,13 @@ async function connectComputerView(){
 
 function disconnectComputerView(){
   const iframe=document.getElementById('computerViewer');
+  const panel=document.getElementById('computerViewerPanel');
   if(iframe)iframe.src='about:blank';
+  if(panel)panel.hidden=true;
   computerUiState.descriptor=null;
-  computerMessage('Viewer disconnected. The underlying VNC/browser session remains running.','');
+  computerUiState.selectedSessionId=null;
+  renderComputerSessions(computerUiState.sessions);
+  computerMessage('Viewer disconnected. Choose another monitor when ready.','');
 }
 
 async function fullscreenComputerView(){
@@ -922,9 +970,11 @@ async function fullscreenComputerView(){
 }
 
 document.addEventListener('click',function(event){
+  const sessionCard=event.target.closest&&event.target.closest('[data-computer-session]');
+  if(sessionCard){connectComputerView(sessionCard.dataset.computerSession);return;}
   const target=event.target.closest&&event.target.closest('button');
   if(!target)return;
-  if(target.id==='computerConnectBtn'||target.id==='computerReconnectBtn')connectComputerView();
+  if(target.id==='computerReconnectBtn')connectComputerView(computerUiState.selectedSessionId);
   else if(target.id==='computerDisconnectBtn')disconnectComputerView();
   else if(target.id==='computerFullscreenBtn')fullscreenComputerView();
 });
