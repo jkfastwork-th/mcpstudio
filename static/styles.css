@@ -903,6 +903,7 @@ html,body{max-width:100%;overflow-x:hidden}
 .computer-viewer-title small{color:var(--muted)}
 .computer-live-dot{width:9px;height:9px;border-radius:50%;background:#32c48d;box-shadow:0 0 0 4px rgba(50,196,141,.12)}
 .computer-token-inline{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:calc(8px * var(--font-scale))}
+.computer-token-inline[hidden]{display:none!important}
 .computer-token-inline input{width:160px}
 .computer-viewer-actions{display:flex;gap:8px;flex-wrap:wrap}
 .computer-viewer-panel .computer-viewer-shell{margin:0;border:0;border-radius:0;height:min(72vh,900px)}

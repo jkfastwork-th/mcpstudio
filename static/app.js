@@ -930,10 +930,13 @@ async function connectComputerView(id){
     const meta=document.getElementById('computerSelectedSessionMeta');
     if(name)name.textContent=session.name||session.workspace_key||id;
     if(meta)meta.textContent=(session.workspace_key||'managed session')+' · '+(session.status||'unknown');
-    let path='api/computer/vnc/ws/'+encodeURIComponent(id);
+    const websocketPath=descriptor.websocket_path||('/api/computer/vnc/ws/'+encodeURIComponent(id));
+    // noVNC resolves its `path` setting relative to vnc.html. The viewer is
+    // mounted at /computer/novnc/, so climb back to the application root first.
+    let path='../..'+websocketPath;
     const tokenInput=document.getElementById('computerTokenInput');
     const token=(tokenInput&&tokenInput.value||'').trim();
-    if(token)path+='?token='+encodeURIComponent(token);
+    if(token)path+=(path.includes('?')?'&':'?')+'token='+encodeURIComponent(token);
     const url=new URL(descriptor.viewer_url||'/computer/novnc/vnc.html',location.origin);
     url.searchParams.set('autoconnect','true');
     url.searchParams.set('resize','scale');
@@ -943,7 +946,7 @@ async function connectComputerView(id){
     if(panel)panel.hidden=false;
     if(iframe)iframe.src=url.pathname+url.search;
     if(panel)panel.scrollIntoView({behavior:'smooth',block:'start'});
-    computerMessage('Opened '+(session.name||session.workspace_key||'session')+' desktop.','good');
+    computerMessage('Opened '+(session.name||session.workspace_key||'session')+' desktop. If noVNC asks for credentials, enter the existing VNC password.','good');
   }catch(err){
     computerMessage('Could not connect: '+err.message,'error');
   }

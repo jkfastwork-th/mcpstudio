@@ -29,3 +29,16 @@ def test_computer_monitor_gallery_contract() -> None:
     assert ".computer-session-card" in css
     assert ".computer-monitor-icon" in css
     assert ".computer-viewer-panel[hidden]" in css
+
+
+def test_novnc_websocket_path_resolves_to_app_root() -> None:
+    js = (ROOT / "static" / "app.js").read_text()
+    assert "const websocketPath=descriptor.websocket_path" in js
+    assert "let path='../..'+websocketPath;" in js
+    assert "let path='api/computer/vnc/ws/'" not in js
+
+    from urllib.parse import urljoin
+    viewer = "https://studio.example/computer/novnc/vnc.html"
+    websocket_path = "/api/computer/vnc/ws/ms-test"
+    resolved = urljoin(viewer, "../.." + websocket_path)
+    assert resolved == "https://studio.example/api/computer/vnc/ws/ms-test"
