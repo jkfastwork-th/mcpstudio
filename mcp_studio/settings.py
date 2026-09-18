@@ -110,6 +110,8 @@ class StudioConfig:
     managed_session_cutover_enabled: bool = False
     managed_session_cutover_block_legacy_tools: bool = True
 
+    slo_orphan_events_max: int = 0
+
     # M6.2.5 Computer Use / Web VNC MVP. Shared loopback VNC desktop bridged
     # through Studio's authenticated web app. No raw VNC port is exposed to
     # remote clients; the only path in is the Studio websocket route which
