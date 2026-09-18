@@ -1,0 +1,193 @@
+studio:
+  production_mode: false
+  bind_host: 0.0.0.0
+  bind_port: 8100
+  database: ./data/mcp-studio.sqlite3
+  poll_interval_seconds: 15
+  request_timeout_seconds: 8
+  gateway_enabled: false
+  gateway_auth_mode: bearer
+  gateway_token_env: MCP_STUDIO_GATEWAY_TOKEN
+  gateway_allowed_servers:
+    - serena-8001
+
+  max_workers: 4
+  worker_server_id: serena-8001
+  worker_heartbeat_timeout_seconds: 45
+  worker_monitor_interval_seconds: 5
+  herdr_poll_interval_seconds: 30
+
+  scheduler_interval_seconds: 1.0
+  scheduler_max_queue: 1000
+
+  # M3 execution supervisor. Keep automatic dispatch disabled until live
+  # certification passes. Manual/explicit dispatch remains available.
+  execution_enabled: false
+  execution_interval_seconds: 2.0
+  execution_stall_seconds: 180
+  execution_max_recoveries: 6
+  execution_read_result: true
+  execution_safe_redispatch: false
+
+  # M4 parallel execution. Keep resilience_test_mode false in normal use;
+  # enable it only while running scripts/certify-m4.sh.
+  execution_parallelism: 4
+  resilience_test_mode: false
+
+  # M5 connectivity plane. This supervisor never restarts Serena or stops work.
+  connectivity_enabled: true
+  connectivity_interval_seconds: 5.0
+  connectivity_auto_reconnect: true
+  tunnel_restart_backoff_seconds: 10
+  session_stale_seconds: 45
+  connectivity_test_mode: false
+
+  # M5.2/M5.3 client-session continuity. A stable Studio session survives client
+  # transport reconnects; upstream MCP session ids are virtualized at gateway.
+  gateway_session_enabled: true
+  gateway_session_stale_seconds: 120
+  gateway_session_auto_reconnect: true
+  gateway_session_replay_on_404: true
+  gateway_session_test_mode: false
+
+  # M5.3 OpenAI/ChatGPT compatibility observation. Bearer-derived identity is
+  # connector-scoped, not a conversation id. Keep connector reclaim enabled
+  # for transport continuity; do not use it as chat-level authorization.
+  openai_compatibility_enabled: true
+  openai_connector_reclaim_enabled: true
+
+  # M6.2.3 Phase A: local-only ingress for OpenAI Secure MCP Tunnel.
+  # Point tunnel-client at http://127.0.0.1:8100/ingress/openai/serena-8001
+  # after local certification. Public/LAN callers are rejected.
+  openai_local_ingress_enabled: false
+  openai_local_ingress_id: openai-serena
+  openai_local_ingress_allowed_hosts:
+    - 127.0.0.1
+    - ::1
+
+  # M6.2.3 Phase B: durable isolated project sessions. Serena's active
+  # project is process-scoped, so Studio starts one loopback Serena process per
+  # managed session. Keep disabled until the pool certification passes.
+  managed_session_enabled: false
+  managed_session_require_binding_for_tools: true
+  managed_session_workspace_roots:
+    - /home/alfred/projects
+    - /home/alfred/ghq/github.com
+    - /data
+  managed_session_workspaces:
+    flowpilot-ai: /home/alfred/projects/flowpilot-ai
+  managed_session_serena_executable: /home/alfred/ghq/github.com/oraios/serena/.venv/bin/serena
+  managed_session_serena_working_directory: /home/alfred/ghq/github.com/oraios/serena
+  managed_session_context: chatgpt
+  managed_session_port_start: 8210
+  managed_session_port_end: 8299
+  managed_session_start_timeout_seconds: 30
+  managed_session_stop_timeout_seconds: 8
+  managed_session_monitor_interval_seconds: 5
+  managed_session_auto_restore: true
+  managed_session_auto_restart: true
+  managed_session_require_existing_path: true
+  managed_session_home: /home/alfred
+  managed_session_path: /home/alfred/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+  managed_session_log_dir: ./data/managed-sessions
+  managed_session_blocked_tools:
+    - activate_project
+  # M6.2.4 lifecycle. 0 = disabled; set e.g. 1800 to auto-stop idle
+  # managed Serena processes that have no connected transports.
+  managed_session_idle_stop_seconds: 0
+  managed_session_history_limit: 100
+
+  # M6.2.3 Phase C: production session cutover. The base Serena :8001
+  # remains discovery/control-only; all Serena tools/call requests require a
+  # pinned managed session and route to its dedicated Serena process.
+  managed_session_cutover_enabled: false
+  managed_session_cutover_block_legacy_tools: true
+
+  # M5.3.1 OAuth facade for ChatGPT custom MCP apps. Use a user-defined
+  # public OAuth client with PKCE S256 and token endpoint auth method "none".
+  oauth_enabled: false
+  oauth_issuer: https://serena.example.com
+  oauth_resource_url: https://serena.example.com/mcp/serena-8001
+  oauth_resource_server_id: serena-8001
+  oauth_signing_secret_env: MCP_STUDIO_OAUTH_SIGNING_SECRET
+  oauth_owner_token_env: MCP_STUDIO_OAUTH_OWNER_TOKEN
+  oauth_require_pkce: true
+  oauth_access_token_ttl_seconds: 3600
+  oauth_refresh_token_ttl_seconds: 2592000
+  oauth_authorization_code_ttl_seconds: 300
+  oauth_owner_session_ttl_seconds: 2592000
+  oauth_scopes_supported:
+    - mcp:serena
+    - offline_access
+  oauth_default_scopes:
+    - mcp:serena
+    - offline_access
+
+  # M6.1 operations hardening. Reconciliation never claims that an upstream
+  # action was cancelled unless Studio knows it was never dispatched.
+  operations_enabled: true
+  operations_interval_seconds: 15
+  cancel_pending_detach_seconds: 300
+  operations_alerts_enabled: true
+  operations_ephemera_retention_days: 7
+  audit_retention_days: 90
+
+  # M6.2 observability + SLO. Metrics are local and low-cardinality.
+  observability_enabled: true
+  observability_interval_seconds: 60
+  observability_window_minutes: 60
+  observability_retention_days: 30
+  observability_alerts_enabled: true
+  slo_availability_target_percent: 99.9
+  slo_mcp_success_target_percent: 99.5
+  slo_queue_p95_limit_ms: 5000
+  slo_worker_saturation_warn_percent: 85
+  slo_reconnect_rate_warn_per_100_requests: 5
+  slo_oauth_refresh_failures_max: 0
+  slo_orphan_events_max: 0
+
+servers:
+  - id: serena-8001
+    name: Serena 8001
+    url: http://127.0.0.1:8001/mcp
+    protocol_version: "2025-06-18"
+    expected_tools:
+      - herdr_list_agents
+      - herdr_list_panes
+      - herdr_prompt_agent
+    enabled: true
+
+tunnels:
+  - id: local-serena
+    provider: local
+    name: Local Serena
+    endpoint: http://127.0.0.1:8001/mcp
+    origin: http://127.0.0.1:8001/mcp
+    enabled: true
+
+  # Named Cloudflare tunnel example. Studio can supervise the cloudflared
+  # process after the tunnel/credentials have already been provisioned.
+  # Secrets/tokens are intentionally not stored in MCP Studio config.
+  # - id: cf-serena-primary
+  #   provider: cloudflare
+  #   name: Serena Primary
+  #   endpoint: https://serena.example.com/mcp/serena-8001
+  #   origin: http://127.0.0.1:8100
+  #   managed: true
+  #   autostart: false
+  #   auto_reconnect: true
+  #   tunnel_name: serena-primary
+  #   config_file: /home/alfred/.cloudflared/config.yml
+  #   executable: cloudflared
+  #   metadata:
+  #     path_scoped: true
+  #     server_id: serena-8001
+  #   enabled: true
+
+  # OpenAI-facing endpoints are external/inventory connectivity, not a local
+  # process that MCP Studio starts or stops.
+  # - id: openai-mcp
+  #   provider: openai
+  #   name: OpenAI-facing MCP endpoint
+  #   endpoint: https://serena.example.com/mcp/serena-8001
+  #   enabled: true

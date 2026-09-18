@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1" name="viewport"/>
+<meta content="light dark" name="color-scheme"/>
+<meta content="#ffffff" name="theme-color"/>
+<title>MCP Studio · Production</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+<link href="/static/styles.css" rel="stylesheet"/>
+</head>
+<body>
+<div class="app-shell focus-shell">
+<aside class="sidebar focus-sidebar">
+<div class="brand">
+<div aria-hidden="true" class="brand-mark">M</div>
+<div><strong>MCP Studio</strong><small>Production</small></div>
+</div>
+<div class="environment-card compact-env">
+<span class="status-beacon"></span>
+<div><strong>Live</strong><small>All ingress through Studio</small></div>
+</div>
+<nav aria-label="Primary navigation" class="primary-nav focus-nav">
+<a class="active" data-help="Quick view of what is active, connected, and needs attention." data-view="home" href="#home"><span>⌂</span>Home</a>
+<a data-help="Create and manage isolated project sessions. Each session keeps its project pinned." data-view="sessions" href="#sessions"><span>◎</span>Sessions</a>
+<a data-help="Register approved project folders and inspect ownership or write leases." data-view="workspaces" href="#workspaces"><span>▦</span>Workspaces</a>
+<a data-help="Start here to learn how to use MCP Studio from ChatGPT, then see setup and troubleshooting guidance." data-view="guide" href="#guide"><span>?</span>Guide</a>
+<a data-help="Health, alerts, tunnels, and advanced diagnostics for troubleshooting." data-view="system" href="#system"><span>⚙</span>System</a>
+</nav>
+<div class="sidebar-footer">
+<div class="release-row"><span class="release-dot"></span><div><strong>v0.9.9</strong><small>Production isolated</small></div></div>
+</div>
+</aside>
+<div class="workspace">
+<header class="topbar focus-topbar">
+<div>
+<div class="breadcrumb">MCP Studio <span>/</span> <strong id="viewBreadcrumb">Home</strong></div>
+<div class="title-line"><h1 id="viewTitle">Production</h1><span class="environment-badge">LIVE</span></div>
+<p id="viewSubtitle">Only what matters right now.</p>
+</div>
+<div class="header-actions focus-actions">
+<span class="muted" id="lastUpdated">Waiting…</span>
+<div class="language-control" data-help="Change interface language. Your choice is saved in this browser."><label class="language-label" for="languageSelect">Language</label><select aria-label="Interface language" class="language-select" id="languageSelect"><option value="en">English</option><option value="th">ไทย</option></select></div><div aria-label="Color theme" class="theme-control" data-help="Switch between Light and Dark. Your choice is saved in this browser." role="group">
+<button aria-label="Use light theme" class="theme-button" data-help="Use the light Google-inspired color theme." id="themeLightBtn" type="button"><span aria-hidden="true">☀</span><span>Light</span></button>
+<button aria-label="Use dark theme" class="theme-button" data-help="Use the dark Google-inspired color theme." id="themeDarkBtn" type="button"><span aria-hidden="true">☾</span><span>Dark</span></button>
+</div>
+<div aria-label="Text size" class="font-size-control" data-help="Adjust UI text size. This setting is saved in your browser." role="group">
+<button aria-label="Decrease text size" class="font-size-button" data-help="Decrease text size." id="fontDecreaseBtn" type="button">A−</button>
+<button aria-label="Reset text size" class="font-size-button font-size-reset" data-help="Reset text size to the default 112%." id="fontResetBtn" type="button"><span id="fontScaleLabel">112%</span></button>
+<button aria-label="Increase text size" class="font-size-button" data-help="Increase text size." id="fontIncreaseBtn" type="button">A+</button>
+</div>
+<button class="button secondary" data-help="Reload current MCP Studio status from the server." id="refreshBtn">Refresh</button>
+<div class="pill unknown" data-help="Overall MCP Studio health. HEALTHY means the control plane is responding normally." id="studioStatus" tabindex="0">UNKNOWN</div>
+</div>
+</header>
+<main class="dashboard focus-dashboard">
+<section class="view-page active" data-page="home">
+<div class="hero-status" id="heroStatus"></div>
+<div class="overview-grid focus-overview-grid" id="overviewCards"></div>
+<div class="focus-main-grid home-session-grid">
+<article class="panel-card focus-primary-card">
+<div class="panel-head">
+<div><span class="eyebrow">ACTIVE NOW</span><h2>Project sessions <span class="help-dot" data-help="Each project session stays pinned to one workspace and uses its own isolated Serena instance." tabindex="0">?</span></h2></div>
+<button class="button small" data-go-view="sessions">Manage sessions</button>
+</div>
+<div id="activeSessionsPanel"></div>
+</article>
+</div>
+</section>
+<section class="view-page" data-page="sessions">
+<div class="page-section-head focus-page-head">
+<div><span class="eyebrow">PROJECT SESSIONS</span><h2>Sessions</h2><p>Create one session per project. Project pinning and Serena isolation are automatic.</p></div>
+<div class="toolbar">
+<button class="button secondary small" data-help="Show sessions that have been stopped but can still be resumed." id="managedHistoryToggle">Show stopped</button>
+<button class="button small" data-help="Create a new isolated Serena session for one registered workspace." id="newManagedSessionBtn">+ New session</button>
+</div>
+</div>
+<form class="managed-form focus-create-form" hidden="" id="managedSessionForm">
+<label><span>Session name</span><input id="managedSessionName" placeholder="Oriverse Dev" required=""/></label>
+<label><span>Project / workspace</span><select id="managedSessionWorkspace" required=""></select></label>
+<button class="button" type="submit">Create session</button>
+<button class="button secondary" id="cancelManagedSessionBtn" type="button">Cancel</button>
+</form>
+<div class="mini-stats focus-mini-stats" id="managedSessionSummary"></div>
+<div class="panel-card flush" id="managedSessionsPanel"></div>
+<div class="panel-card session-history-panel" hidden="" id="managedSessionHistoryPanel"></div>
+<details class="advanced-box session-advanced">
+<summary>Client transport details</summary>
+<div class="advanced-content">
+<div class="advanced-heading transport-heading"><div><h3>Client transports</h3><p>Normally you do not need to manage these manually.</p></div><div class="toolbar"><select class="filter-select" id="sessionTunnelFilter"><option value="">All ingress</option></select><button class="button secondary small" id="sessionHistoryToggle">Show history</button></div></div>
+<div class="mini-stats" id="sessionSummary"></div>
+<div class="panel-card flush" id="sessionsPanel"></div>
+</div>
+</details>
+</section>
+<section class="view-page" data-page="workspaces">
+<div class="page-section-head focus-page-head">
+<div><span class="eyebrow">PROJECT REGISTRY</span><h2>Workspaces</h2><p>Register the projects that MCP Studio is allowed to isolate and manage.</p></div>
+<div class="toolbar"><button class="button small" data-help="Add an approved project path so MCP Studio can create isolated sessions for it." id="registerWorkspaceBtn">+ Register workspace</button></div>
+</div>
+<div class="mini-stats focus-mini-stats" id="workspaceSummary"></div>
+<div class="workspace-management-grid">
+<article class="panel-card workspace-registry-card">
+<div class="panel-head"><div><span class="eyebrow">APPROVED</span><h3>Workspace registry <span class="help-dot" data-help="Approved project folders. Only registered workspaces can be used to create managed sessions." tabindex="0">?</span></h3></div></div>
+<div id="managedWorkspacesPanel"></div>
+</article>
+<div class="workspace-side-stack">
+<article class="panel-card">
+<div class="panel-head"><div><span class="eyebrow">ACTIVE</span><h3>Workspace ownership <span class="help-dot" data-help="Shows which worker/session currently has affinity with each workspace. This is not necessarily a write lock." tabindex="0">?</span></h3></div></div>
+<div id="workspacesPanel"></div>
+</article>
+<article class="panel-card">
+<div class="panel-head"><div><span class="eyebrow">WRITE SAFETY</span><h3>Active write leases <span class="help-dot" data-help="A write lease is the real exclusive write lock. It exists only while protected work is active." tabindex="0">?</span></h3></div></div>
+<div id="leasesPanel"></div>
+</article>
+</div>
+</div>
+</section>
+<section class="view-page" data-page="guide">
+<div class="page-section-head focus-page-head">
+<div><span class="eyebrow">HOW TO USE</span><h2>Guide</h2><p>Quick start for daily work, plus setup and troubleshooting when you need it.</p></div>
+</div>
+
+<div class="chatgpt-guide-hero panel-card">
+<div class="chatgpt-guide-copy">
+<span class="eyebrow">START HERE · CHATGPT</span>
+<h3>Work from ChatGPT first</h3>
+<p>Start by choosing a workspace in ChatGPT. MCP Studio will find or resume its managed session, keep the project pinned, and route you to the isolated Serena instance.</p>
+<div class="command-box primary-command">
+<div><span class="command-label">Try this in ChatGPT</span><code id="quickWorkspaceCommand" data-command-en="Use workspace nova-oracle" data-command-th="ใช้ workspace nova-oracle">Use workspace nova-oracle</code></div>
+<button class="button small" data-copy-source="quickWorkspaceCommand" data-copy-text="Copy command" data-help="Copy this example command and paste it into ChatGPT." type="button">Copy command</button>
+</div>
+<p class="guide-subnote">After the workspace is selected, continue talking naturally. You do not need to call <code>activate_project</code> yourself.</p>
+</div>
+<div class="chatgpt-flow" aria-label="ChatGPT to workspace flow">
+<div class="flow-node"><strong>ChatGPT</strong><small>Your working surface</small></div>
+<span class="flow-arrow">↓</span>
+<div class="flow-node"><strong>MCP Studio</strong><small>Session routing</small></div>
+<span class="flow-arrow">↓</span>
+<div class="flow-node"><strong>Managed Session</strong><small>Project Pin 🔒</small></div>
+<span class="flow-arrow">↓</span>
+<div class="flow-node"><strong>Dedicated Serena</strong><small>Isolated workspace</small></div>
+</div>
+</div>
+
+<div class="guide-grid chatgpt-guide-grid">
+<article class="panel-card guide-card command-guide-card">
+<div class="guide-icon blue">⌁</div><h3>Keep working naturally</h3>
+<p>After selecting a workspace, stay in the same ChatGPT conversation and ask for the next task normally.</p>
+<div class="command-list">
+<div class="command-row"><code id="cmdStatusNova" data-command-en="Check the latest Nova development status" data-command-th="ตรวจสถานะ development ล่าสุดของ Nova">Check the latest Nova development status</code><button class="text-button copy-command" data-copy-source="cmdStatusNova" data-copy-text="Copy command" type="button">Copy command</button></div>
+<div class="command-row"><code id="cmdPanes" data-command-en="List panes" data-command-th="list panes">List panes</code><button class="text-button copy-command" data-copy-source="cmdPanes" data-copy-text="Copy command" type="button">Copy command</button></div>
+<div class="command-row"><code id="cmdGit" data-command-en="Check git status" data-command-th="ตรวจ git status">Check git status</code><button class="text-button copy-command" data-copy-source="cmdGit" data-copy-text="Copy command" type="button">Copy command</button></div>
+<div class="command-row"><code id="cmdTestNoCommit" data-command-en="Fix this, run tests first, and do not commit yet" data-command-th="แก้งานนี้แล้วรัน test ก่อน ห้าม commit">Fix this, run tests first, and do not commit yet</code><button class="text-button copy-command" data-copy-source="cmdTestNoCommit" data-copy-text="Copy command" type="button">Copy command</button></div>
+</div>
+</article>
+
+<article class="panel-card guide-card switch-workspace-card">
+<div class="guide-icon green">⇄</div><h3>Switch workspace</h3>
+<p>Tell ChatGPT the workspace name. Studio moves you to that workspace's managed session without changing project inside a shared Serena process.</p>
+<div class="command-box">
+<div><span class="command-label">Example</span><code id="switchWorkspaceCommand" data-command-en="Switch to workspace earth-616" data-command-th="สลับไป workspace earth-616">Switch to workspace earth-616</code></div>
+<button class="button secondary small" data-copy-source="switchWorkspaceCommand" data-copy-text="Copy command" type="button">Copy command</button>
+</div>
+<div class="guide-note">Each workspace keeps its own managed session and isolated Serena instance.</div>
+</article>
+</div>
+
+<div class="panel-card guide-usage-split">
+<div class="panel-head"><div><span class="eyebrow">DAILY USE</span><h3>ChatGPT for work · Studio UI for control</h3></div></div>
+<div class="usage-columns">
+<div class="usage-column chatgpt-column"><h4>Use ChatGPT for</h4><ul><li>Work with code</li><li>Read or send pane messages</li><li>Run tests</li><li>Fix bugs</li><li>Review and commit changes</li></ul></div>
+<div class="usage-column studio-column"><h4>Use MCP Studio UI for</h4><ul><li>See or resume sessions</li><li>Register workspaces</li><li>Check ingress and client binding</li><li>Inspect alerts or conflicts</li></ul></div>
+</div>
+</div>
+
+<details class="advanced-box guide-admin-setup">
+<summary>Admin setup · register a new project</summary>
+<div class="advanced-content">
+<div class="guide-start admin-guide-start">
+<div class="guide-start-copy"><span class="eyebrow">ONE-TIME SETUP</span><h3>Only for a new project</h3><p>Daily work starts in ChatGPT. Do this once when a project has never been registered.</p></div>
+<div class="guide-steps">
+<article class="guide-step"><span class="guide-step-number">1</span><div><strong>Register the project</strong><p>Add its folder in Workspaces.</p><button class="text-button" data-go-view="workspaces">Open Workspaces →</button></div></article>
+<article class="guide-step"><span class="guide-step-number">2</span><div><strong>Create a session</strong><p>Create one isolated session for that workspace.</p><button class="text-button" data-go-view="sessions">Open Sessions →</button></div></article>
+<article class="guide-step"><span class="guide-step-number">3</span><div><strong>Return to ChatGPT</strong><p>Select that workspace and continue working.</p><button class="text-button" data-go-view="home">Check active sessions →</button></div></article>
+</div>
+</div>
+</div>
+</details>
+
+<details class="advanced-box guide-reference"><summary>Status reference</summary><div class="advanced-content"><div class="guide-status-grid">
+<div><span class="pill healthy">ACTIVE</span><p>Session is running and available.</p></div>
+<div><span class="pill healthy">IDLE</span><p>Session is healthy but not currently busy.</p></div>
+<div><span class="pill unknown">STOPPED</span><p>Session is preserved and can be resumed.</p></div>
+<div><span class="pill busy">WRITE ACTIVE</span><p>Exclusive write lease is currently held.</p></div>
+<div><span class="pill degraded">UNBOUND</span><p>Client reached Studio but has not selected a managed session.</p></div>
+<div><span class="pill down">ERROR</span><p>Open System and inspect the alert or session detail.</p></div>
+</div></div></details>
+<div class="guide-tip panel-card">
+<div class="guide-tip-mark">?</div>
+<div><strong>Need context?</strong><p>Hover or focus a ? marker and key controls to see a short explanation.</p></div>
+</div>
+</section>
+<section class="view-page" data-page="system">
+<div class="page-section-head focus-page-head">
+<div><span class="eyebrow">SYSTEM</span><h2>System health</h2><p>Use this page only when something needs investigation.</p></div>
+<div class="toolbar"><button class="button secondary small" data-help="Run an immediate health poll of registered MCP servers." id="pollBtn">Poll health</button><button class="button secondary small" data-help="Refresh Herdr agent and pane inventory." id="herdrBtn">Refresh Herdr</button></div>
+</div>
+<div class="system-essentials">
+<article class="panel-card"><div class="panel-head"><div><span class="eyebrow">INGRESS</span><h3>Tunnels</h3></div></div><div class="tunnel-grid" id="tunnelsPanel"></div></article>
+<article class="panel-card"><div class="panel-head"><div><span class="eyebrow">RELIABILITY</span><h3>Alerts &amp; SLO</h3></div></div><div id="sloPanel"></div></article>
+</div>
+<details class="advanced-box" id="advancedDiagnostics">
+<summary data-help="Detailed worker, queue, audit, telemetry and compatibility data. Usually not needed for normal operation.">Advanced diagnostics</summary>
+<div class="advanced-content diagnostics-stack">
+<section><div class="advanced-heading"><div><h3>Workers &amp; work queue</h3></div></div><div class="panel-card flush" id="workersPanel"></div><div class="panel-card flush advanced-gap" id="workPanel"></div></section>
+<section><div class="advanced-heading"><div><h3>Operations</h3></div></div><div class="panel-card flush" id="operationsPanel"></div><div class="panel-card flush advanced-gap" id="connectivityPanel"></div></section>
+<section><div class="advanced-heading"><div><h3>Activity &amp; audit</h3></div></div><div class="panel-card flush" id="eventsPanel"></div><div class="panel-card flush advanced-gap" id="auditPanel"></div></section>
+<section class="debug-grid">
+<article><div class="advanced-heading"><div><h3>Execution</h3></div></div><div class="panel-card flush" id="executionPanel"></div></article>
+<article><div class="advanced-heading"><div><h3>Herdr</h3></div></div><div class="panel-card flush" id="herdrPanel"></div></article>
+</section>
+<section><div class="advanced-heading"><div><h3>Servers</h3><small id="serverCount"></small></div></div><div class="server-grid" id="serversGrid"></div></section>
+<section><div class="advanced-heading"><div><h3>Telemetry</h3></div></div><div class="panel-card flush" id="telemetryPanel"></div></section>
+<section><div class="advanced-heading"><div><h3>OpenAI compatibility</h3></div></div><div class="panel-card flush" id="openaiPanel"></div></section>
+</div>
+</details>
+</section>
+</main>
+</div>
+</div>
+<nav aria-label="Mobile navigation" class="mobile-nav">
+<a class="active" data-view="home" href="#home"><span aria-hidden="true">⌂</span><small>Home</small></a>
+<a data-view="sessions" href="#sessions"><span aria-hidden="true">◎</span><small>Sessions</small></a>
+<a data-view="workspaces" href="#workspaces"><span aria-hidden="true">▦</span><small>Workspaces</small></a>
+<a data-view="guide" href="#guide"><span aria-hidden="true">?</span><small>Guide</small></a>
+<a data-view="system" href="#system"><span aria-hidden="true">⚙</span><small>System</small></a>
+</nav>
+<div class="help-tooltip" hidden="" id="helpTooltip" role="tooltip"></div>
+<dialog aria-labelledby="appDialogTitle" class="app-dialog" id="appDialog">
+<div class="dialog-card">
+<div aria-hidden="true" class="dialog-icon" id="appDialogIcon">✓</div>
+<div class="dialog-copy">
+<h2 id="appDialogTitle">Confirm action</h2>
+<p id="appDialogMessage"></p>
+</div>
+<div class="dialog-fields" id="appDialogFields"></div>
+<div class="dialog-actions">
+<button class="button secondary" id="appDialogCancel" type="button">Cancel</button>
+<button class="button" id="appDialogConfirm" type="button">Continue</button>
+</div>
+</div>
+</dialog>
+<script src="/static/app.js"></script>
+</body>
+</html>

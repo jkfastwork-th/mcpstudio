@@ -1,0 +1,22 @@
+[Unit]
+Description=MCP Studio Linux Control Plane
+After=network-online.target serena-herdr-mcp.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=alfred
+WorkingDirectory=/home/alfred/mcp-studio
+Environment=MCP_STUDIO_CONFIG=/home/alfred/mcp-studio/config.yaml
+EnvironmentFile=-/home/alfred/.config/mcp-studio/gateway.env
+ExecStart=/home/alfred/mcp-studio/scripts/run-dev.sh
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/alfred/mcp-studio/data
+
+[Install]
+WantedBy=multi-user.target

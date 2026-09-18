@@ -1,0 +1,41 @@
+[Unit]
+Description=MCP Studio Production Control Plane
+After=network-online.target serena-herdr-mcp.service
+Wants=network-online.target serena-herdr-mcp.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=alfred
+Group=alfred
+WorkingDirectory=/home/alfred/mcp-studio
+Environment=MCP_STUDIO_CONFIG=/home/alfred/mcp-studio/config.yaml
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/mcp-studio/mcp-studio.env
+ExecStartPre=/home/alfred/mcp-studio/.venv/bin/python /home/alfred/mcp-studio/scripts/production-preflight.py
+ExecStart=/home/alfred/mcp-studio/scripts/run-prod.sh
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=30
+TimeoutStopSec=30
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/home/alfred/mcp-studio/data /home/alfred/mcp-studio/backups
+
+[Install]
+WantedBy=multi-user.target

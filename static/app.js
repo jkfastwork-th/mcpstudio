@@ -1,0 +1,609 @@
+let currentView = (location.hash || '#home').slice(1);
+let sessionTunnelFilter = '';
+let showSessionHistory = false;
+let showManagedHistory = false;
+let latestData = null;
+
+
+const SUPPORTED_LANGUAGES=['en','th'];
+const I18N_TH={
+  'Production':'โปรดักชัน','Live':'ใช้งานจริง','All ingress through Studio':'ทุกช่องทางเข้าใช้งานผ่าน Studio',
+  'Home':'หน้าหลัก','Sessions':'เซสชัน','Workspaces':'เวิร์กสเปซ','Guide':'คู่มือ','System':'ระบบ',
+  'Production isolated':'แยกโปรดักชันแล้ว','Only what matters right now.':'แสดงเฉพาะสิ่งที่สำคัญตอนนี้',
+  'Waiting…':'กำลังรอ…','Light':'สว่าง','Dark':'มืด','Refresh':'รีเฟรช','UNKNOWN':'ไม่ทราบ',
+  'ACTIVE NOW':'กำลังใช้งาน','Project sessions':'เซสชันโปรเจกต์','Every project here has its own pinned Serena instance.':'แต่ละโปรเจกต์มี Serena instance ที่ถูก pin แยกของตัวเอง',
+  'Manage sessions':'จัดการเซสชัน','INGRESS':'ช่องทางเข้า','Connections':'การเชื่อมต่อ','ATTENTION':'ต้องตรวจสอบ','Needs attention':'รายการที่ต้องตรวจสอบ',
+  'PROJECT SESSIONS':'เซสชันโปรเจกต์','Create one session per project. Project pinning and Serena isolation are automatic.':'สร้างหนึ่งเซสชันต่อหนึ่งโปรเจกต์ ระบบจะ pin โปรเจกต์และแยก Serena ให้อัตโนมัติ',
+  'Show stopped':'แสดงที่หยุดแล้ว','Hide stopped':'ซ่อนที่หยุดแล้ว','+ New session':'+ เซสชันใหม่','Session name':'ชื่อเซสชัน','Project / workspace':'โปรเจกต์ / เวิร์กสเปซ',
+  'Create session':'สร้างเซสชัน','Cancel':'ยกเลิก','Client transport details':'รายละเอียด client transport','Client transports':'Client transports','Normally you do not need to manage these manually.':'ปกติไม่จำเป็นต้องจัดการส่วนนี้ด้วยตนเอง',
+  'All ingress':'ทุกช่องทางเข้า','Show history':'แสดงประวัติ','Hide history':'ซ่อนประวัติ','PROJECT REGISTRY':'ทะเบียนโปรเจกต์','Register the projects that MCP Studio is allowed to isolate and manage.':'ลงทะเบียนโปรเจกต์ที่ MCP Studio ได้รับอนุญาตให้แยกและจัดการ',
+  '+ Register workspace':'+ ลงทะเบียนเวิร์กสเปซ','APPROVED':'อนุมัติแล้ว','Workspace registry':'ทะเบียนเวิร์กสเปซ','ACTIVE':'ใช้งาน','Workspace ownership':'ผู้ถือครองเวิร์กสเปซ','WRITE SAFETY':'ความปลอดภัยการเขียน','Active write leases':'write lease ที่ใช้งานอยู่',
+  'HOW TO USE':'วิธีใช้งาน','The shortest path from a project folder to a safe ChatGPT coding session.':'ขั้นตอนสั้นที่สุดจากโฟลเดอร์โปรเจกต์ไปสู่ ChatGPT coding session ที่ปลอดภัย',
+  'START HERE':'เริ่มตรงนี้','Three steps for normal use':'3 ขั้นตอนสำหรับการใช้งานทั่วไป','You normally only need Workspaces and Sessions. MCP Studio handles project pinning, Serena isolation, ingress attribution and reconnects automatically.':'โดยทั่วไปใช้แค่ Workspaces และ Sessions ส่วน project pinning, Serena isolation, ingress attribution และ reconnect ให้ MCP Studio จัดการอัตโนมัติ',
+  'Register the project':'ลงทะเบียนโปรเจกต์','Add the project folder once in Workspaces.':'เพิ่มโฟลเดอร์โปรเจกต์ครั้งเดียวใน Workspaces','Open Workspaces →':'เปิด Workspaces →','Create a session':'สร้างเซสชัน','Create one isolated session for that workspace. Its project is pinned.':'สร้าง isolated session หนึ่งตัวให้เวิร์กสเปซนั้น โปรเจกต์จะถูก pin ไว้','Open Sessions →':'เปิด Sessions →',
+  'Use it from ChatGPT':'ใช้งานจาก ChatGPT','Choose/use that managed session. Reconnects stay attached to the pinned project.':'เลือก managed session นั้น เมื่อ reconnect จะยังผูกกับโปรเจกต์ที่ pin ไว้','Check active sessions →':'ดูเซสชันที่กำลังใช้งาน →',
+  'A session is your safe unit of work. One session → one project → one isolated Serena process.':'เซสชันคือหน่วยงานที่ปลอดภัย: 1 เซสชัน → 1 โปรเจกต์ → 1 Serena process ที่แยกออกมา',
+  'Use when':'ใช้เมื่อ','Starting work on Nova, Earth-616, Oriverse, or any other project.':'เริ่มทำงานกับ Nova, Earth-616, Oriverse หรือโปรเจกต์อื่น','Do not switch project inside Serena. Create or select another managed session instead.':'อย่าสลับโปรเจกต์ภายใน Serena ให้สร้างหรือเลือก managed session อื่นแทน',
+  'A workspace is an approved project folder that Studio is allowed to manage.':'Workspace คือโฟลเดอร์โปรเจกต์ที่อนุมัติให้ Studio จัดการ','Register once':'ลงทะเบียนครั้งเดียว','Give it a short key such as':'กำหนด key สั้น ๆ เช่น','and an absolute project path.':'และ absolute project path','Workspace ownership is affinity. WRITE ACTIVE is the exclusive write lock.':'Workspace ownership คือ affinity ส่วน WRITE ACTIVE คือ write lock แบบ exclusive',
+  'Ingress':'ช่องทางเข้า','OpenAI tunnel and Cloudflare both enter through MCP Studio before reaching a managed session.':'ทั้ง OpenAI tunnel และ Cloudflare ต้องผ่าน MCP Studio ก่อนถึง managed session','Normal state':'สถานะปกติ','Ingress is healthy and the client transport is bound to a managed session.':'ช่องทางเข้า healthy และ client transport ผูกกับ managed session แล้ว','An “Unbound client” needs a managed session before coding tools are allowed.':'“Unbound client” ต้องเลือก managed session ก่อนจึงจะใช้ coding tools ได้',
+  'Open System only when Home shows an alert, unhealthy ingress, or a session error.':'เปิด System เมื่อหน้า Home มี alert, ingress ผิดปกติ หรือ session error','First checks':'ตรวจสอบก่อน','Look at Alerts & SLO, then Tunnels. Expand diagnostics only if needed.':'ดู Alerts & SLO แล้วค่อยดู Tunnels และเปิด diagnostics เมื่อจำเป็นเท่านั้น','Advanced diagnostics are operational details, not part of the normal workflow.':'Advanced diagnostics เป็นรายละเอียดเชิงระบบ ไม่ใช่ขั้นตอนใช้งานปกติ',
+  'STATUS CHEAT SHEET':'ความหมายสถานะ','What the labels mean':'ความหมายของป้ายสถานะ','Session is running and available.':'เซสชันกำลังรันและพร้อมใช้งาน','IDLE':'ว่าง','Session is healthy but not currently busy.':'เซสชันปกติแต่ไม่ได้กำลังทำงาน','STOPPED':'หยุดแล้ว','Session is preserved and can be resumed.':'เซสชันยังถูกเก็บไว้และ resume ได้','WRITE ACTIVE':'กำลังล็อกเขียน','Exclusive write lease is currently held.':'กำลังถือ exclusive write lease','UNBOUND':'ยังไม่ผูก','Client reached Studio but has not selected a managed session.':'Client ถึง Studio แล้วแต่ยังไม่ได้เลือก managed session','ERROR':'ผิดพลาด','Open System and inspect the alert or session detail.':'เปิด System แล้วตรวจ alert หรือรายละเอียด session',
+  'Hover help is available throughout the UI.':'มีคำอธิบายเมื่อวางเมาส์ทั่วทั้ง UI','Move the pointer over a ? icon, important button, status badge, or navigation item. Keyboard users can focus the same controls to show the explanation.':'วางเมาส์เหนือไอคอน ?, ปุ่มสำคัญ, ป้ายสถานะ หรือเมนูเพื่อดูคำอธิบาย ผู้ใช้คีย์บอร์ดสามารถ focus ที่จุดเดียวกันได้',
+  'SYSTEM':'ระบบ','System health':'สุขภาพระบบ','Use this page only when something needs investigation.':'ใช้หน้านี้เมื่อจำเป็นต้องตรวจสอบปัญหา','Poll health':'ตรวจสุขภาพ','Refresh Herdr':'รีเฟรช Herdr','Tunnels':'Tunnels','RELIABILITY':'ความเสถียร','Alerts & SLO':'Alerts & SLO','Advanced diagnostics':'วิเคราะห์ขั้นสูง','Workers & work queue':'Workers และคิวงาน','Operations':'การปฏิบัติการ','Activity & audit':'กิจกรรมและ Audit','Execution':'การทำงาน','Servers':'เซิร์ฟเวอร์','Telemetry':'Telemetry','OpenAI compatibility':'ความเข้ากันได้กับ OpenAI',
+  'Refreshing…':'กำลังรีเฟรช…','Polling…':'กำลังตรวจ…','Confirm action':'ยืนยันการทำงาน','Continue':'ดำเนินการต่อ','Close':'ปิด','Action failed':'ดำเนินการไม่สำเร็จ','Rename session':'เปลี่ยนชื่อเซสชัน','Choose a clear name for this pinned project session.':'ตั้งชื่อที่เข้าใจง่ายให้เซสชันโปรเจกต์นี้','Rename':'เปลี่ยนชื่อ','Stop isolated Serena session?':'หยุด Serena session ที่แยกไว้หรือไม่?','The pinned project stays registered and can be resumed later. Connected clients must be detached first.':'โปรเจกต์ที่ pin ไว้ยังคงลงทะเบียนอยู่และ resume ได้ภายหลัง ต้อง detach client ที่เชื่อมต่ออยู่ก่อน','Stop session':'หยุดเซสชัน','Register workspace':'ลงทะเบียนเวิร์กสเปซ','Only approved workspaces can receive isolated project sessions.':'เฉพาะ workspace ที่อนุมัติแล้วเท่านั้นที่สร้าง isolated project session ได้','Register':'ลงทะเบียน','Workspace key':'Workspace key','Absolute project path':'Absolute project path','Display name':'ชื่อที่แสดง',
+  'Technical details':'รายละเอียดทางเทคนิค','Everything is running normally':'ระบบทำงานปกติ','System needs attention':'ระบบต้องตรวจสอบ','No action needed':'ไม่ต้องดำเนินการ','No running project sessions. Create one when you need a project.':'ยังไม่มี project session ที่กำลังรัน สร้างใหม่เมื่อเริ่มทำงานกับโปรเจกต์','No ingress configured.':'ยังไม่ได้กำหนด ingress','Nothing needs attention.':'ไม่มีสิ่งที่ต้องดำเนินการ','No approved workspaces registered.':'ยังไม่มี workspace ที่ลงทะเบียน','No managed sessions in this view.':'ไม่มี managed session ในมุมมองนี้','Managed session isolation is disabled in config.':'Managed session isolation ถูกปิดใน config','Register a workspace first':'ลงทะเบียน workspace ก่อน',
+  'ACTIVE':'ใช้งาน','HEALTHY':'ปกติ','DOWN':'ล่ม','DEGRADED':'ผิดปกติ','BUSY':'กำลังทำงาน','RUNNING':'กำลังรัน','READY':'พร้อม','CONNECTED':'เชื่อมต่อ','STALE':'หมดอายุ','CLOSED':'ปิดแล้ว','UNKNOWN':'ไม่ทราบ','FAILED':'ล้มเหลว','COMPLETED':'เสร็จแล้ว','RECONNECTING':'กำลังเชื่อมต่อใหม่','DETACHED':'แยกออกแล้ว',
+  'Language':'ภาษา','Change interface language. Your choice is saved in this browser.':'เปลี่ยนภาษาของหน้าจอ ระบบจะจำค่าที่เลือกไว้ในเบราว์เซอร์','Interface language':'ภาษาหน้าจอ','Reset text size to the default 112%.':'คืนขนาดตัวอักษรเป็นค่าเริ่มต้น 112%','Adjust UI text size. This setting is saved in your browser.':'ปรับขนาดตัวอักษรของ UI ระบบจะจำค่าไว้ในเบราว์เซอร์','Decrease text size.':'ลดขนาดตัวอักษร','Increase text size.':'เพิ่มขนาดตัวอักษร','Switch between Light and Dark. Your choice is saved in this browser.':'สลับธีมสว่าง/มืด ระบบจะจำค่าที่เลือกไว้','Use the light Google-inspired color theme.':'ใช้ธีมสว่างโทน Google','Use the dark Google-inspired color theme.':'ใช้ธีมมืดโทน Google','Reload current MCP Studio status from the server.':'โหลดสถานะ MCP Studio ล่าสุดจากเซิร์ฟเวอร์','Overall MCP Studio health. HEALTHY means the control plane is responding normally.':'สุขภาพโดยรวมของ MCP Studio; HEALTHY หมายถึง control plane ตอบสนองปกติ',
+  'Use MCP Studio mainly from ChatGPT. The Studio UI is your control panel for sessions, workspaces and system health.':'ใช้งาน MCP Studio ผ่าน ChatGPT เป็นหลัก ส่วนหน้า Studio UI ใช้ควบคุมเซสชัน เวิร์กสเปซ และสุขภาพระบบ',
+  'START HERE · CHATGPT':'เริ่มตรงนี้ · CHATGPT','Work from ChatGPT first':'เริ่มทำงานจาก ChatGPT ก่อน',
+  'Start by choosing a workspace in ChatGPT. MCP Studio will find or resume its managed session, keep the project pinned, and route you to the isolated Serena instance.':'เริ่มจากเลือก workspace ใน ChatGPT แล้ว MCP Studio จะค้นหาหรือ resume managed session, pin โปรเจกต์ และส่งงานไปยัง Serena instance ที่แยกไว้',
+  'Try this in ChatGPT':'ลองคำสั่งนี้ใน ChatGPT','Copy command':'คัดลอกคำสั่ง','Copied ✓':'คัดลอกแล้ว ✓','Copy ChatGPT command':'คัดลอกคำสั่ง ChatGPT',
+  'Copy this example command and paste it into ChatGPT.':'คัดลอกคำสั่งตัวอย่างนี้แล้วนำไปวางใน ChatGPT',
+  'After the workspace is selected, continue talking naturally. You do not need to call':'หลังเลือก workspace แล้ว สามารถคุยต่อแบบปกติได้ ไม่ต้องเรียก','yourself.':'ด้วยตัวเอง',
+  'Your working surface':'พื้นที่ทำงานหลัก','Session routing':'จัดเส้นทางเซสชัน','Project Pin 🔒':'Project Pin 🔒','Isolated workspace':'เวิร์กสเปซที่แยกออกมา',
+  'Typical ChatGPT workflow':'ตัวอย่าง workflow ใน ChatGPT','Once a workspace is selected, keep working in the same conversation with normal language.':'หลังเลือก workspace แล้ว ให้ทำงานต่อในบทสนทนาเดิมด้วยภาษาปกติ',
+  'Switch workspace':'สลับ workspace','Tell ChatGPT which workspace you want. Studio switches to that workspace\'s managed session instead of changing project inside a shared Serena process.':'บอก ChatGPT ว่าต้องการ workspace ไหน Studio จะสลับไป managed session ของ workspace นั้นแทนการเปลี่ยนโปรเจกต์ภายใน Serena process ร่วม',
+  'Example':'ตัวอย่าง','One workspace → one managed session → one isolated Serena instance. This is what prevents active-project cross-talk.':'หนึ่ง workspace → หนึ่ง managed session → หนึ่ง Serena instance ที่แยกออกมา ช่วยป้องกัน active project ชนกัน',
+  'MENTAL MODEL':'แนวคิดหลัก','ChatGPT is where you work. Studio UI is where you control the system.':'ChatGPT คือที่ทำงาน ส่วน Studio UI คือที่ควบคุมระบบ',
+  'Use ChatGPT for':'ใช้ ChatGPT สำหรับ','Work with code':'ทำงานกับโค้ด','Read or send pane messages':'อ่านหรือส่งข้อความ pane','Run tests':'รัน tests','Fix bugs':'แก้บั๊ก','Review and commit changes':'ตรวจและ commit การเปลี่ยนแปลง',
+  'Use MCP Studio UI for':'ใช้ MCP Studio UI สำหรับ','See active sessions':'ดูเซสชันที่กำลังใช้งาน','Register or inspect workspaces':'ลงทะเบียนหรือตรวจ workspace','Check ingress and client binding':'ตรวจ ingress และ client binding','Check isolated Serena instances':'ตรวจ Serena instance ที่แยกไว้','Investigate errors or conflicts':'ตรวจ error หรือ conflict',
+  'Admin setup · register a new project':'Admin setup · ลงทะเบียนโปรเจกต์ใหม่','ONE-TIME SETUP':'ตั้งค่าครั้งเดียว','Only needed for a new project':'ใช้เฉพาะตอนเพิ่มโปรเจกต์ใหม่','Normal daily use starts in ChatGPT. Use these steps only when a project has never been registered before.':'การใช้งานประจำวันเริ่มที่ ChatGPT ขั้นตอนนี้ใช้เฉพาะโปรเจกต์ที่ยังไม่เคยลงทะเบียน',
+  'Return to ChatGPT':'กลับไปที่ ChatGPT','Select the workspace from ChatGPT and continue working there.':'เลือก workspace จาก ChatGPT แล้วทำงานต่อที่นั่น',
+  'Starting or resuming work on Nova, Earth-616, Oriverse, or another project.':'เริ่มหรือกลับมาทำงานต่อใน Nova, Earth-616, Oriverse หรือโปรเจกต์อื่น',
+  'Do not switch project inside Serena. Select another workspace/session through Studio instead.':'อย่าสลับโปรเจกต์ภายใน Serena ให้เลือก workspace/session อื่นผ่าน Studio แทน',
+  'Use the “Copy ChatGPT command” button in Workspaces when you want the exact command for a project.':'ใช้ปุ่ม “คัดลอกคำสั่ง ChatGPT” ในหน้า Workspaces เมื่อต้องการคำสั่งของโปรเจกต์นั้นโดยตรง',
+  'Start here to learn how to use MCP Studio from ChatGPT, then see setup and troubleshooting guidance.':'เริ่มตรงนี้เพื่อเรียนรู้การใช้ MCP Studio จาก ChatGPT แล้วค่อยดูการตั้งค่าและแก้ปัญหา',
+  'Copy the workspace selection command for ChatGPT.':'คัดลอกคำสั่งเลือก workspace สำหรับใช้ใน ChatGPT.',
+  'Core services are responding normally.':'บริการหลักตอบสนองตามปกติ',
+  'Open System to investigate the active issue.':'เปิดหน้าระบบเพื่อตรวจสอบปัญหาที่กำลังเกิดขึ้น',
+  'Daily use first, then setup and troubleshooting.':'เริ่มจากการใช้งานประจำวัน แล้วค่อยดูการตั้งค่าและแก้ปัญหา',
+  'Quick start for daily work, plus setup and troubleshooting when you need it.':'เริ่มใช้งานประจำวันอย่างรวดเร็ว พร้อมการตั้งค่าและแก้ปัญหาเมื่อต้องการ',
+  'Keep working naturally':'ทำงานต่อได้ตามธรรมชาติ',
+  'After selecting a workspace, stay in the same ChatGPT conversation and ask for the next task normally.':'หลังเลือก workspace แล้ว ใช้บทสนทนา ChatGPT เดิมและสั่งงานถัดไปได้ตามปกติ',
+  'Tell ChatGPT the workspace name. Studio moves you to that workspace\'s managed session without changing project inside a shared Serena process.':'บอกชื่อ workspace กับ ChatGPT แล้ว Studio จะพาไปยัง managed session ของ workspace นั้นโดยไม่สลับโปรเจกต์ใน Serena ที่แชร์ร่วมกัน',
+  'Each workspace keeps its own managed session and isolated Serena instance.':'แต่ละ workspace มี managed session และ Serena instance แยกของตัวเอง',
+  'DAILY USE':'ใช้งานประจำวัน',
+  'ChatGPT for work · Studio UI for control':'ChatGPT สำหรับทำงาน · Studio UI สำหรับควบคุมระบบ',
+  'See or resume sessions':'ดูหรือ resume เซสชัน',
+  'Register workspaces':'ลงทะเบียน workspace',
+  'Inspect alerts or conflicts':'ตรวจ alert หรือ conflict',
+  'Only for a new project':'เฉพาะโปรเจกต์ใหม่',
+  'Daily work starts in ChatGPT. Do this once when a project has never been registered.':'งานประจำวันเริ่มที่ ChatGPT ขั้นตอนนี้ทำครั้งเดียวเมื่อโปรเจกต์ยังไม่เคยลงทะเบียน',
+  'Add its folder in Workspaces.':'เพิ่มโฟลเดอร์ในหน้า Workspaces',
+  'Create one isolated session for that workspace.':'สร้าง isolated session หนึ่งตัวสำหรับ workspace นั้น',
+  'Select that workspace and continue working.':'เลือก workspace นั้นแล้วทำงานต่อ',
+  'Status reference':'อ้างอิงสถานะ',
+  'Need context?':'ต้องการคำอธิบาย?',
+  'Hover or focus a ? marker and key controls to see a short explanation.':'วางเมาส์หรือโฟกัสที่เครื่องหมาย ? และส่วนควบคุมสำคัญเพื่อดูคำอธิบายสั้น ๆ',
+  'Each project session stays pinned to one workspace and uses its own isolated Serena instance.':'แต่ละ project session จะ pin กับ workspace เดียวและใช้ Serena instance ที่แยกของตัวเอง'
+
+};
+let currentLanguage='en';
+const i18nTextNodes=new WeakMap();
+const i18nAttrs=new WeakMap();
+function tr(text){
+  const raw=String(text??'');
+  if(currentLanguage==='en')return raw;
+  if(I18N_TH[raw]!=null)return I18N_TH[raw];
+  let m;
+  if((m=raw.match(/^(\d+)s ago$/)))return `${m[1]} วินาทีที่แล้ว`;
+  if((m=raw.match(/^(\d+)m ago$/)))return `${m[1]} นาทีที่แล้ว`;
+  if((m=raw.match(/^(\d+)h ago$/)))return `${m[1]} ชั่วโมงที่แล้ว`;
+  if((m=raw.match(/^(\d+)d ago$/)))return `${m[1]} วันที่แล้ว`;
+  if((m=raw.match(/^Updated (.+) · (.+)$/)))return `อัปเดต ${m[1]} · ${m[2]}`;
+  if((m=raw.match(/^(\d+) running$/)))return `กำลังรัน ${m[1]}`;
+  if((m=raw.match(/^(\d+) client transports?$/)))return `client transport ${m[1]}`;
+  if((m=raw.match(/^(\d+) clients? · (.+)$/)))return `${m[1]} client · ${m[2]}`;
+  if((m=raw.match(/^(\d+) transports?$/)))return `${m[1]} transport`;
+  if((m=raw.match(/^(\d+) live$/)))return `เชื่อมต่อ ${m[1]}`;
+  if((m=raw.match(/^(\d+) reconnects$/)))return `reconnect ${m[1]}`;
+  if((m=raw.match(/^Show stopped \((\d+)\)$/)))return `แสดงที่หยุดแล้ว (${m[1]})`;
+  if((m=raw.match(/^View (\d+) alerts?$/)))return `ดู alert ${m[1]}`;
+  if((m=raw.match(/^(\d+) active · (\d+) sessions$/)))return `ใช้งาน ${m[1]} · รวม ${m[2]} เซสชัน`;
+  return raw;
+}
+function captureAndTranslateText(root=document){
+  const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,{acceptNode(node){
+    if(!node.parentElement||['SCRIPT','STYLE','CODE'].includes(node.parentElement.tagName))return NodeFilter.FILTER_REJECT;
+    return node.nodeValue.trim()?NodeFilter.FILTER_ACCEPT:NodeFilter.FILTER_REJECT;
+  }});
+  const nodes=[];while(walker.nextNode())nodes.push(walker.currentNode);
+  nodes.forEach(node=>{
+    if(!i18nTextNodes.has(node))i18nTextNodes.set(node,node.nodeValue);
+    const original=i18nTextNodes.get(node);
+    const lead=original.match(/^\s*/)?.[0]||'';const tail=original.match(/\s*$/)?.[0]||'';const core=original.trim();
+    node.nodeValue=`${lead}${tr(core)}${tail}`;
+  });
+  root.querySelectorAll?.('[data-help],[aria-label],[placeholder]').forEach(el=>{
+    let saved=i18nAttrs.get(el);if(!saved){saved={};i18nAttrs.set(el,saved);}
+    ['data-help','aria-label','placeholder'].forEach(attr=>{
+      if(!el.hasAttribute(attr))return;
+      if(saved[attr]==null)saved[attr]=el.getAttribute(attr);
+      el.setAttribute(attr,tr(saved[attr]));
+    });
+  });
+}
+function applyLanguage(lang,{persist=true}={}){
+  currentLanguage=SUPPORTED_LANGUAGES.includes(lang)?lang:'en';
+  document.documentElement.lang=currentLanguage;
+  const select=document.getElementById('languageSelect');if(select)select.value=currentLanguage;
+  captureAndTranslateText(document);
+  refreshLocalizedCommands(document);
+  setView(currentView,false);
+  if(latestData){renderOverview(latestData);renderManagedSessions(latestData);renderSessions(latestData);renderWorkspaces(latestData);renderWorkers(latestData);renderTunnels(latestData);renderReliability(latestData);renderActivity(latestData);renderDebug(latestData);captureAndTranslateText(document);}
+  if(persist)localStorage.setItem('mcp-studio-language',currentLanguage);
+}
+function loadLanguage(){
+  const saved=localStorage.getItem('mcp-studio-language');
+  const browser=(navigator.language||'en').toLowerCase().startsWith('th')?'th':'en';
+  applyLanguage(SUPPORTED_LANGUAGES.includes(saved)?saved:browser,{persist:false});
+}
+
+function refreshLocalizedCommands(root=document){
+  root.querySelectorAll?.('[data-command-en][data-command-th]').forEach(el=>{
+    el.textContent=currentLanguage==='th'?el.dataset.commandTh:el.dataset.commandEn;
+  });
+}
+function workspaceChatGPTCommand(workspaceKey){
+  return currentLanguage==='th'?`ใช้ workspace ${workspaceKey}`:`Use workspace ${workspaceKey}`;
+}
+async function copyText(text){
+  const value=String(text||'').trim();
+  if(!value)return;
+  if(navigator.clipboard?.writeText){
+    try{await navigator.clipboard.writeText(value);return;}catch(_err){}
+  }
+  const area=document.createElement('textarea');
+  area.value=value;area.setAttribute('readonly','');area.style.position='fixed';area.style.opacity='0';
+  document.body.appendChild(area);area.select();
+  const ok=document.execCommand('copy');area.remove();
+  if(!ok)throw new Error('Copy is unavailable in this browser.');
+}
+async function copyChatGPTCommand(button){
+  const sourceId=button.dataset.copySource;
+  const source=sourceId?document.getElementById(sourceId):null;
+  const command=source?.textContent?.trim()||button.dataset.copyCommand||'';
+  await copyText(command);
+  const fallback=button.dataset.copyText||'Copy command';
+  button.textContent=tr('Copied ✓');
+  button.disabled=true;
+  window.setTimeout(()=>{button.textContent=tr(fallback);button.disabled=false;},1400);
+}
+
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+const shortId = (v, n=10) => v ? `${String(v).slice(0,n)}…` : '—';
+const when = (v) => v ? new Date(v).toLocaleString() : '—';
+const ago = (v) => {
+  if (!v) return '—';
+  const s = Math.max(0, Math.floor((Date.now() - new Date(v).getTime()) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s/60)}m ago`;
+  if (s < 86400) return `${Math.floor(s/3600)}h ago`;
+  return `${Math.floor(s/86400)}d ago`;
+};
+
+
+const FONT_SCALES=[1,1.12,1.24,1.36];
+const DEFAULT_FONT_SCALE=1.12;
+let fontScaleIndex=1;
+function applyFontScale(index,{persist=true}={}){
+  fontScaleIndex=Math.max(0,Math.min(FONT_SCALES.length-1,index));
+  const scale=FONT_SCALES[fontScaleIndex];
+  document.documentElement.style.setProperty('--font-scale',String(scale));
+  const label=document.getElementById('fontScaleLabel');
+  if(label)label.textContent=`${Math.round(scale*100)}%`;
+  const down=document.getElementById('fontDecreaseBtn');
+  const up=document.getElementById('fontIncreaseBtn');
+  if(down)down.disabled=fontScaleIndex===0;
+  if(up)up.disabled=fontScaleIndex===FONT_SCALES.length-1;
+  if(persist)localStorage.setItem('mcp-studio-font-scale',String(scale));
+}
+function loadFontScale(){
+  const version=localStorage.getItem('mcp-studio-font-scale-version');
+  let saved=Number(localStorage.getItem('mcp-studio-font-scale'));
+  if(version!=='2' && (!saved || Math.abs(saved-1)<0.001))saved=DEFAULT_FONT_SCALE;
+  const idx=FONT_SCALES.findIndex(v=>Math.abs(v-saved)<0.001);
+  applyFontScale(idx>=0?idx:FONT_SCALES.indexOf(DEFAULT_FONT_SCALE),{persist:false});
+  localStorage.setItem('mcp-studio-font-scale-version','2');
+}
+
+const THEMES=['light','dark'];
+let currentTheme='light';
+function applyTheme(theme,{persist=true}={}){
+  currentTheme=THEMES.includes(theme)?theme:'light';
+  document.documentElement.dataset.theme=currentTheme;
+  document.documentElement.style.colorScheme=currentTheme;
+  const meta=document.querySelector('meta[name="theme-color"]');
+  if(meta)meta.setAttribute('content',currentTheme==='dark'?'#111318':'#ffffff');
+  const light=document.getElementById('themeLightBtn');
+  const dark=document.getElementById('themeDarkBtn');
+  if(light){light.classList.toggle('active',currentTheme==='light');light.setAttribute('aria-pressed',String(currentTheme==='light'));}
+  if(dark){dark.classList.toggle('active',currentTheme==='dark');dark.setAttribute('aria-pressed',String(currentTheme==='dark'));}
+  if(persist)localStorage.setItem('mcp-studio-theme',currentTheme);
+}
+function loadTheme(){
+  const saved=localStorage.getItem('mcp-studio-theme');
+  applyTheme(THEMES.includes(saved)?saved:'light',{persist:false});
+}
+
+function openAppDialog({title,message='',icon='?',tone='info',confirmText='Continue',cancelText='Cancel',showCancel=true,fields=[]}={}){
+  const dialog=document.getElementById('appDialog');
+  const titleEl=document.getElementById('appDialogTitle');
+  const messageEl=document.getElementById('appDialogMessage');
+  const iconEl=document.getElementById('appDialogIcon');
+  const fieldsEl=document.getElementById('appDialogFields');
+  const confirmBtn=document.getElementById('appDialogConfirm');
+  const cancelBtn=document.getElementById('appDialogCancel');
+  titleEl.textContent=tr(title||'Confirm action');
+  messageEl.textContent=tr(message||'');
+  messageEl.hidden=!message;
+  iconEl.textContent=icon;
+  iconEl.className=`dialog-icon ${tone}`;
+  confirmBtn.textContent=tr(confirmText);
+  confirmBtn.className=`button ${tone==='danger'?'danger':''}`.trim();
+  cancelBtn.textContent=tr(cancelText);
+  cancelBtn.hidden=!showCancel;
+  fieldsEl.innerHTML='';
+  const inputs={};
+  fields.forEach((field,index)=>{
+    const label=document.createElement('label');
+    label.className='dialog-field';
+    const span=document.createElement('span');
+    span.textContent=tr(field.label||field.name);
+    const input=document.createElement(field.type==='textarea'?'textarea':'input');
+    input.id=`dialogField${index}`;
+    input.name=field.name;
+    if(field.type!=='textarea')input.type=field.type||'text';
+    input.value=field.value||'';
+    if(field.placeholder)input.placeholder=tr(field.placeholder);
+    if(field.required)input.required=true;
+    if(field.pattern)input.pattern=field.pattern;
+    if(field.autocomplete)input.autocomplete=field.autocomplete;
+    label.append(span,input);
+    fieldsEl.append(label);
+    inputs[field.name]=input;
+  });
+  return new Promise(resolve=>{
+    let settled=false;
+    const finish=(result)=>{
+      if(settled)return;settled=true;
+      confirmBtn.removeEventListener('click',onConfirm);
+      cancelBtn.removeEventListener('click',onCancel);
+      dialog.removeEventListener('cancel',onNativeCancel);
+      if(dialog.open)dialog.close();
+      resolve(result);
+    };
+    const onConfirm=()=>{
+      const values={};
+      for(const [name,input] of Object.entries(inputs)){
+        if(!input.reportValidity())return;
+        values[name]=input.value.trim();
+      }
+      finish({confirmed:true,values});
+    };
+    const onCancel=()=>finish({confirmed:false,values:{}});
+    const onNativeCancel=e=>{e.preventDefault();onCancel();};
+    confirmBtn.addEventListener('click',onConfirm);
+    cancelBtn.addEventListener('click',onCancel);
+    dialog.addEventListener('cancel',onNativeCancel);
+    dialog.showModal();
+    const first=fieldsEl.querySelector('input,textarea');
+    (first||confirmBtn).focus();
+    if(first && typeof first.select==='function')first.select();
+  });
+}
+async function showUiError(err){
+  await openAppDialog({title:tr('Action failed'),message:err?.message||String(err),icon:'!',tone:'danger',confirmText:'Close',showCancel:false});
+}
+async function uiAction(fn){try{return await fn();}catch(err){await showUiError(err);return undefined;}}
+
+function badge(status) {
+  const normalized = String(status || 'unknown').toLowerCase();
+  const aliases = {running:'busy',active:'busy',queued:'degraded',completed:'healthy',failed:'down',cancelled:'unknown',detached:'degraded',cancel_pending:'degraded',assigned:'busy',dispatching:'busy',waiting_agent:'busy',reconnecting:'degraded',recovering:'degraded',stalled:'down',dispatch_uncertain:'degraded',idle:'healthy',stopped:'unknown'};
+  const css = aliases[normalized] || normalized;
+  return `<span class="pill ${esc(css)}">${esc(normalized.toUpperCase())}</span>`;
+}
+function workerBadge(state){ return badge(state || 'unknown'); }
+function overviewCard(label, value, sub, cls='', help=''){ return `<article class="summary-card ${esc(cls)}" ${help?`data-help="${esc(help)}" tabindex="0"`:''}><span>${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(sub || '')}</small></article>`; }
+function detailBlock(rows){
+  return `<details class="details"><summary>${esc(tr('Technical details'))}</summary><div class="details-grid">${rows.map(([k,v])=>`<span>${esc(k)}</span><code>${esc(v ?? '—')}</code>`).join('')}</div></details>`;
+}
+async function getJson(url, options){ const r = await fetch(url, options); if(!r.ok){let d='';try{const j=await r.json();d=j.detail||JSON.stringify(j)}catch{}throw new Error(`${r.status} ${d||url}`)} return r.json(); }
+async function sendJson(url, body){ return getJson(url,{method:'POST',headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)}); }
+
+const viewMeta = {
+  home:['Home','Production','Only what matters right now.'],
+  sessions:['Sessions','Sessions','Create one session per project. Isolation is automatic.'],
+  workspaces:['Workspaces','Workspaces','Manage approved projects, ownership and write safety.'],
+  guide:['Guide','Guide','Daily use first, then setup and troubleshooting.'],
+  system:['System','System health','Open diagnostics only when something needs investigation.']
+};
+
+function setView(view, updateHash=true){
+  if(!viewMeta[view]) view='home';
+  currentView=view;
+  document.body.dataset.view=view;
+  document.querySelectorAll('.view-page').forEach(x=>x.classList.toggle('active',x.dataset.page===view));
+  document.querySelectorAll('.primary-nav a[data-view], .mobile-nav a[data-view]').forEach(x=>x.classList.toggle('active',x.dataset.view===view));
+  const [crumb,title,sub]=viewMeta[view];
+  document.getElementById('viewBreadcrumb').textContent=tr(crumb);
+  document.getElementById('viewTitle').textContent=tr(title);
+  document.getElementById('viewSubtitle').textContent=tr(sub);
+  if(updateHash && location.hash !== `#${view}`) history.replaceState(null,'',`#${view}`);
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+
+function tunnelNameMap(status){ return Object.fromEntries((status.tunnels||[]).map(t=>[t.id,t.name||t.id])); }
+function logicalMap(sessions){ return Object.fromEntries((sessions.sessions||[]).map(s=>[s.id,s])); }
+function connectedGateway(gatewaySessions){ return (gatewaySessions.sessions||[]).filter(s=>s.status==='connected'); }
+function activeWorkspaces(workerData){
+  const leaseByWorker=Object.fromEntries((workerData.leases||[]).map(l=>[l.worker_id,l]));
+  return (workerData.workers||[]).filter(w=>w.workspace).map(w=>({worker:w,lease:leaseByWorker[w.id]}));
+}
+function clientLabel(g, logical, i){
+  const type=String(g.client_type || logical?.client_type || '').toLowerCase();
+  if(type.includes('chatgpt') || type.includes('openai')) return `ChatGPT session ${i+1}`;
+  if(type && type!=='unknown') return `${type.replaceAll('_',' ')} session ${i+1}`;
+  return `MCP session ${i+1}`;
+}
+
+function renderOverview(data){
+  const {status,managedSessions,alertsData}=data;
+  const items=managedSessions?.sessions||[];
+  const running=items.filter(x=>x.status==='ready' || x.status==='running');
+  const active=running.filter(x=>(x.connected_transports||0)>0 || x.lifecycle_state==='active');
+  const conn=status.connectivity?.summary||{};
+  const healthyTunnels=conn.counts?.healthy||0;
+  const openAlerts=(alertsData.alerts||[]).length;
+  const runtime=status.studio.status||'unknown';
+  const healthy = runtime==='healthy' && openAlerts===0;
+
+  const hero=document.getElementById('heroStatus');
+  hero.className=`hero-status ${healthy?'healthy':'attention'}`;
+  hero.innerHTML=`<div><span class="hero-dot"></span><div><strong>${healthy?'Everything is running normally':'System needs attention'}</strong><small>${healthy?'Core services are responding normally.':'Open System to investigate the active issue.'}</small></div></div>${openAlerts?`<button class="button secondary small" data-go-view="system">View ${openAlerts} alert${openAlerts===1?'':'s'}</button>`:'<span class="hero-ok">No action needed</span>'}`;
+
+  document.getElementById('overviewCards').innerHTML=[
+    overviewCard('PROJECT SESSIONS',String(active.length),`${running.length} running`,active.length?'busy':'healthy','Managed sessions currently active. Each uses an isolated Serena instance pinned to one project.'),
+    overviewCard('INGRESS',`${healthyTunnels}/${conn.total||0}`,'healthy routes',healthyTunnels===(conn.total||0)?'healthy':'degraded','Healthy ingress routes reaching MCP Studio, such as OpenAI tunnel and Cloudflare.'),
+    overviewCard('UNBOUND',String(managedSessions?.status?.cutover?.unbound_transports??0),'client transports',(managedSessions?.status?.cutover?.unbound_transports??0)?'degraded':'healthy','Client transports that reached Studio but are not yet attached to a managed project session.'),
+    overviewCard('ALERTS',String(openAlerts),openAlerts?'needs attention':'none',openAlerts?'degraded':'healthy','Open operational alerts that may require attention.')
+  ].join('');
+
+  const sorted=[...running].sort((a,b)=>new Date(b.last_used_at||b.updated_at||0)-new Date(a.last_used_at||a.updated_at||0));
+  document.getElementById('activeSessionsPanel').innerHTML=sorted.length?`<div class="focus-session-list">${sorted.map(x=>{
+    const last=x.last_used_at||x.last_transport_seen_at||x.last_started_at||x.updated_at;
+    const providers=(x.ingress_providers||[]).join(' + ')||'No client connected';
+    const connected=x.connected_transports||0;
+    return `<div class="focus-session-row"><div class="session-project"><span class="project-icon">${connected?'●':'○'}</span><div><strong>${esc(x.name)}</strong><small data-help="Pinned means this logical session cannot silently switch to another project.">${esc(x.workspace_key)} · 🔒 pinned project</small></div></div><div class="session-ingress"><strong>${esc(providers)}</strong><small>${connected} client${connected===1?'':'s'} · ${esc(ago(last))}</small></div><div>${badge(x.lifecycle_state||x.status)}</div><button class="text-button" data-go-view="sessions">Manage</button></div>`;
+  }).join('')}</div>`:'<div class="empty good">No running project sessions. Create one when you need a project.</div>';
+
+}
+function renderManagedSessions(data){
+  const managed=data.managedSessions||{sessions:[],status:{}}, workspaces=data.managedWorkspaces||{workspaces:[]};
+  const items=managed.sessions||[], ws=workspaces.workspaces||[], status=managed.status||{};
+  const active=items.filter(x=>x.lifecycle_state==='active').length;
+  const idle=items.filter(x=>x.lifecycle_state==='idle').length;
+  const stopped=items.filter(x=>x.status==='stopped').length;
+  const errors=items.filter(x=>x.status==='error').length;
+  document.getElementById('managedSessionSummary').innerHTML=`<span class="mini-stat primary">Active <strong>${active}</strong></span><span class="mini-stat">Idle <strong>${idle}</strong></span><span class="mini-stat">Errors <strong>${errors}</strong></span>${(status.cutover?.unbound_transports??0)?`<span class="mini-stat warning">Unbound clients <strong>${status.cutover.unbound_transports}</strong></span>`:''}`;
+  const select=document.getElementById('managedSessionWorkspace');
+  const old=select.value;
+  select.innerHTML=ws.map(w=>`<option value="${esc(w.key)}">${esc(w.name||w.key)} · ${esc(w.project_path)}</option>`).join('')||'<option value="">Register a workspace first</option>';
+  if(old && ws.some(w=>w.key===old)) select.value=old;
+  document.getElementById('newManagedSessionBtn').disabled=!status.enabled||!ws.length;
+  document.getElementById('registerWorkspaceBtn').disabled=!status.enabled;
+  const toggle=document.getElementById('managedHistoryToggle');
+  toggle.textContent=showManagedHistory?'Hide stopped':`Show stopped (${stopped})`;
+  const visible=items.filter(x=>showManagedHistory || x.status!=='stopped');
+  document.getElementById('managedSessionsPanel').innerHTML=visible.length?`<div class="managed-session-row header"><span>SESSION</span><span>PINNED PROJECT</span><span>STATE</span><span>ACTIVITY</span><span>ACTIONS</span></div>${visible.map(x=>{
+    const lifecycle=x.lifecycle_state||x.status;
+    const providers=(x.ingress_providers||[]).join(', ')||'—';
+    const last=x.last_used_at||x.last_transport_seen_at||x.last_started_at||x.updated_at;
+    const resume=x.status==='stopped'?`<button class="button small" data-managed-resume="${esc(x.id)}">Resume</button>`:`<button class="button secondary small" data-managed-restart="${esc(x.id)}" ${x.connected_transports?'disabled':''}>Restart</button>`;
+    const stop=x.status!=='stopped'?`<button class="button danger small" data-managed-stop="${esc(x.id)}" ${x.connected_transports?'disabled':''}>Stop</button>`:'';
+    return `<div class="managed-session-row"><div><strong>${esc(x.name)}</strong><small>${esc(shortId(x.id,18))}</small><span class="project-pin">🔒 PINNED</span></div><div><strong>${esc(x.workspace_key)}</strong><small>${esc(x.project_path)}</small></div><div>${badge(lifecycle)}<small>${esc(x.status)} · port ${esc(x.port||'—')}</small></div><div><strong>${esc(x.connected_transports||0)} transport${x.connected_transports===1?'':'s'}</strong><small>${esc(providers)} · ${esc(ago(last))}</small></div><div class="managed-actions">${resume}<button class="button secondary small" data-managed-rename="${esc(x.id)}" data-managed-name="${esc(x.name)}">Rename</button><button class="text-button" data-managed-history="${esc(x.id)}">History</button>${stop}</div></div>`;
+  }).join('')}`:`<div class="empty ${status.enabled?'':'good'}">${status.enabled?'No managed sessions in this view.':'Managed session isolation is disabled in config.'}</div>`;
+  document.getElementById('managedWorkspacesPanel').innerHTML=ws.length?ws.map(w=>{const sessionCount=items.filter(x=>x.workspace_key===w.key).length;const activeCount=items.filter(x=>x.workspace_key===w.key&&x.status!=='stopped').length;const chatCommand=workspaceChatGPTCommand(w.key);return `<div class="workspace-registry-row workspace-registry-rich"><strong>${esc(w.name||w.key)}<small>${esc(w.key)}</small></strong><code>${esc(w.project_path)}</code><div class="workspace-registry-meta"><span class="project-pin">APPROVED</span><small>${activeCount} active · ${sessionCount} sessions</small><button class="button secondary small workspace-copy-command" data-copy-command="${esc(chatCommand)}" data-copy-text="Copy ChatGPT command" data-help="Copy the workspace selection command for ChatGPT." type="button">${esc(tr('Copy ChatGPT command'))}</button></div></div>`}).join(''):'<div class="empty">No approved workspaces registered.</div>';
+  const activeWorkspaceKeys=new Set(items.filter(x=>x.status!=='stopped').map(x=>x.workspace_key));
+  const leaseCount=data.workerData?.leases?.length||0;
+  document.getElementById('workspaceSummary').innerHTML=`<span class="mini-stat primary">Approved <strong>${ws.length}</strong></span><span class="mini-stat">In use <strong>${activeWorkspaceKeys.size}</strong></span><span class="mini-stat ${leaseCount?'warning':''}">Write leases <strong>${leaseCount}</strong></span>`;
+}
+
+function renderManagedHistory(payload){
+  const panel=document.getElementById('managedSessionHistoryPanel');
+  const session=payload.session||{}; const audit=payload.audit||[]; const transports=payload.transports||[];
+  panel.hidden=false;
+  panel.innerHTML=`<div class="history-head"><div><span class="eyebrow">SESSION HISTORY</span><h3>${esc(session.name||session.id)}</h3><p>${esc(session.workspace_key||'')} · ${esc(session.project_path||'')}</p></div><button class="text-button" data-managed-history-close>Close</button></div><div class="history-grid"><div><h4>Lifecycle</h4>${audit.length?audit.slice(0,30).map(a=>`<div class="history-item"><strong>${esc(a.action)}</strong><small>${esc(ago(a.created_at))} · ${esc(a.actor||'system')}</small></div>`).join(''):'<div class="empty">No lifecycle audit yet.</div>'}</div><div><h4>Transport history</h4>${transports.length?transports.slice(0,30).map(t=>`<div class="history-item"><strong>${esc(t.ingress_provider||t.last_tunnel_id||'direct')}</strong><small>${esc(t.status)} · ${esc(ago(t.last_seen_at))} · ${esc(shortId(t.id,14))}</small></div>`).join(''):'<div class="empty">No transport history yet.</div>'}</div></div>`;
+  panel.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+
+function renderSessions(data){
+  const {status,sessions,gatewaySessions}=data; const tnames=tunnelNameMap(status); const logicalById=logicalMap(sessions); const managedItems=data.managedSessions?.sessions||[]; const managedById=Object.fromEntries(managedItems.map(x=>[x.id,x]));
+  const filter=document.getElementById('sessionTunnelFilter');
+  const previous=sessionTunnelFilter;
+  filter.innerHTML=`<option value="">All ingress</option>${(status.tunnels||[]).map(t=>`<option value="${esc(t.id)}">${esc(t.name)}</option>`).join('')}<option value="__unattributed__">Direct / unattributed</option>`;
+  filter.value=previous;
+  let all=gatewaySessions.sessions||[];
+  const connected=all.filter(s=>s.status==='connected').length;
+  const stale=all.filter(s=>s.status==='stale').length;
+  const closed=all.filter(s=>s.status==='closed').length;
+  document.getElementById('sessionSummary').innerHTML=`<span class="mini-stat">Connected <strong>${connected}</strong></span><span class="mini-stat">Historical <strong>${stale+closed}</strong></span><span class="mini-stat">Reconnects <strong>${gatewaySessions.summary?.reconnects||0}</strong></span>`;
+  let visible=all.filter(s=>{
+    const tunnelMatch=!sessionTunnelFilter || (sessionTunnelFilter==='__unattributed__' ? !s.last_tunnel_id : s.last_tunnel_id===sessionTunnelFilter);
+    const stateMatch=showSessionHistory || s.status==='connected';
+    return tunnelMatch&&stateMatch;
+  });
+  visible.sort((a,b)=>new Date(b.last_seen_at||b.created_at)-new Date(a.last_seen_at||a.created_at));
+  document.getElementById('sessionHistoryToggle').textContent=showSessionHistory?'Hide history':`Show history (${stale+closed})`;
+  document.getElementById('sessionsPanel').innerHTML=visible.length?visible.map((g,i)=>{
+    const logical=logicalById[g.studio_session_id]; const tunnel=tnames[g.last_tunnel_id]||g.last_tunnel_id||'Direct / unattributed';
+    const bound=managedById[g.managed_session_id]; const options=managedItems.filter(x=>x.status==='ready').map(x=>`<option value="${esc(x.id)}" ${x.id===g.managed_session_id?'selected':''}>${esc(x.name)} · ${esc(x.workspace_key)}</option>`).join('');
+    const bindControls=g.status==='connected'?`<div class="transport-bind">${badge('healthy')}<select data-gateway-select="${esc(g.id)}"><option value="">Choose project session…</option>${options}</select><button class="button secondary small" data-gateway-attach="${esc(g.id)}">Attach</button>${g.managed_session_id?`<button class="text-button" data-gateway-detach="${esc(g.id)}">Unbind</button>`:''}</div>`:badge(g.status==='stale'?'degraded':g.status);
+    return `<div class="data-row"><div class="row-main"><strong>${esc(clientLabel(g,logical,i))}</strong><small>${esc(g.server_id||'MCP')} · last seen ${esc(ago(g.last_seen_at))}</small>${bound?`<span class="project-pin">🔒 ${esc(bound.workspace_key)}</span>`:''}${detailBlock([['gateway session',g.id],['studio session',g.studio_session_id],['managed session',g.managed_session_id||'—'],['generation',g.generation],['reconnects',g.reconnect_count],['attribution',g.attribution_method||'—']])}</div><div class="row-secondary">${esc(tunnel)}<small>${esc(g.ingress_host||'—')}${g.ingress_path?esc(g.ingress_path):''}</small></div>${bindControls}</div>`;
+  }).join(''):'<div class="empty">No sessions match this view.</div>';
+}
+
+function renderWorkspaces(data){
+  const {workerData}=data; const ws=activeWorkspaces(workerData);
+  document.getElementById('workspacesPanel').innerHTML=ws.length?`<div class="workspace-row header"><span>WORKSPACE</span><span>WORKER</span><span>STATE</span><span>AGENT / PANE</span><span>OWNERSHIP</span></div>${ws.map(({worker:w,lease})=>`<div class="workspace-row"><div class="row-main"><strong>${esc(w.workspace)}</strong><small>${esc(w.owner_session_id||'')}</small></div><strong>${esc(w.id)}</strong>${workerBadge(w.state)}<div>${esc(w.agent||'—')}<small>${esc(w.pane||'—')}</small></div><div>${lease?'<span class="lease write">WRITE ACTIVE</span>':(w.lease_mode==='write'?'<span class="lease">WRITE INTENT</span>':'<span class="lease">BOUND</span>')}<small>${lease?esc(lease.work_id||'manual writer'):'no active writer'}</small></div></div>`).join('')}`:'<div class="empty">No workspace bindings.</div>';
+  document.getElementById('leasesPanel').innerHTML=(workerData.leases||[]).length?(workerData.leases||[]).map(l=>`<div class="lease-row"><div><strong>${esc(l.workspace)}</strong><small>${esc(l.worker_id)} · ${esc(l.work_id||'manual')}</small></div><span class="lease write">WRITE ACTIVE</span></div>`).join(''):'<div class="empty good">No active write leases.</div>';
+}
+
+function renderWorkers(data){
+  const {workerData,workData}=data; const leaseByWorker=Object.fromEntries((workerData.leases||[]).map(l=>[l.worker_id,l]));
+  document.getElementById('workersPanel').innerHTML=(workerData.workers||[]).length?`<div class="worker-row header"><span>WORKER</span><span>STATE</span><span>WORKSPACE</span><span>AGENT / PANE</span><span>LEASE</span><span>WORK</span></div>${workerData.workers.map(w=>{const lease=leaseByWorker[w.id];return `<div class="worker-row"><div><strong>${esc(w.id)}</strong><small>${esc(w.server_id||'')}</small></div>${workerBadge(w.state)}<div><strong>${esc(w.workspace||'Unbound')}</strong></div><div>${esc(w.agent||'—')}<small>${esc(w.pane||'—')}</small></div><div>${lease?'<span class="lease write">WRITE ACTIVE</span>':(w.lease_mode==='write'&&w.workspace?'<span class="lease">WRITE INTENT</span>':'<span class="lease">NONE</span>')}</div><div>${esc(w.work_label||'—')}</div></div>`}).join('')}`:'<div class="empty">Worker pool not bootstrapped.</div>';
+  const live=(workData.work||[]).filter(x=>['running','queued','assigned','dispatching','waiting_agent','reconnecting','recovering'].includes(x.state));
+  document.getElementById('workPanel').innerHTML=live.length?`<div class="work-row header"><span>WORK</span><span>STATE</span><span>PRIORITY</span><span>WORKSPACE</span><span>WORKER</span><span>AGENT / PANE</span></div>${live.map(x=>`<div class="work-row"><div><strong>${esc(x.label||x.id)}</strong><small>${esc(shortId(x.id,14))}</small></div>${badge(x.state)}<strong>${esc(x.priority)}</strong><div><strong>${esc(x.workspace||'—')}</strong></div><div>${esc(x.worker_id||'QUEUE')}</div><div>${esc(x.agent||'—')}<small>${esc(x.pane||x.requested_pane||'—')}</small></div></div>`).join('')}`:'<div class="empty good">No queued or running work.</div>';
+}
+
+function renderTunnels(data){
+  const {status}=data; const tmap=status.tunnel_sessions?.by_tunnel||{};
+  document.getElementById('tunnelsPanel').innerHTML=(status.tunnels||[]).length?(status.tunnels||[]).map(t=>{const ts=tmap[t.id]||{counts:{},total:0,reconnects:0};return `<article class="tunnel-card"><div class="tunnel-head"><div><h3>${esc(t.name)}</h3><small>${esc(t.provider)} · ${esc(t.managed?'managed':'external/direct')}</small></div>${badge(t.status||'unknown')}</div><div class="tunnel-metrics"><div><span>CONNECTED</span><strong>${esc(ts.counts?.connected||0)}</strong></div><div><span>SESSIONS</span><strong>${esc(ts.total||0)}</strong></div><div><span>RECONNECTS</span><strong>${esc(ts.reconnects||0)}</strong></div></div><div class="endpoint">${esc(t.endpoint||t.origin||'—')}</div><button class="text-button" data-tunnel-session="${esc(t.id)}">View sessions →</button>${detailBlock([['tunnel id',t.id],['desired state',t.desired_state||'—'],['server id',t.metadata?.server_id||'—']])}</article>`}).join(''):'<div class="empty">No tunnels configured.</div>';
+  const conn=status.connectivity||{}; const counts=conn.summary?.counts||{};
+  document.getElementById('connectivityPanel').innerHTML=`<div class="keyline"><span>Status</span>${badge(conn.status||'unknown')}</div><div class="keyline"><span>Healthy tunnels</span><strong>${esc(counts.healthy||0)} / ${esc(conn.summary?.total||0)}</strong></div><div class="keyline"><span>Auto reconnect</span><strong>${status.studio.connectivity_auto_reconnect?'Enabled':'Disabled'}</strong></div><div class="keyline"><span>Public MCP gateway</span><strong>${status.studio.gateway_enabled?'Enabled':'Disabled'}</strong></div><div class="keyline"><span>Last poll</span><small>${esc(when(conn.last_poll_at))}</small></div>${conn.last_error?`<div class="warning">${esc(conn.last_error)}</div>`:''}`;
+}
+
+function renderReliability(data){
+  const {observabilityData,operationsData,alertsData}=data; const slo=observabilityData||{}, m=slo.metrics||{}, objectives=slo.objectives||{}, restore=slo.restore_drill||{}; const fmt=(v,s='')=>v==null?'—':`${v}${s}`;
+  document.getElementById('sloPanel').innerHTML=`<div class="metrics"><div><span>Availability</span><strong>${fmt(m.availability_percent,'%')}</strong></div><div><span>MCP success</span><strong>${fmt(m.mcp_success_percent,'%')}</strong></div><div><span>MCP P95 latency</span><strong>${fmt(m.mcp_p95_latency_ms,' ms')}</strong></div><div><span>Queue P95</span><strong>${fmt(m.queue_p95_ms,' ms')}</strong></div><div><span>Worker saturation</span><strong>${fmt(m.worker_saturation_current_percent,'%')}</strong></div><div><span>Reconnect / 100</span><strong>${fmt(m.reconnect_rate_per_100_requests)}</strong></div></div><div class="keyline"><span>Restore drill</span><div>${badge(restore.status==='pass'?'healthy':restore.status==='fail'?'down':'unknown')}<small>${esc(when(restore.created_at))}</small></div></div>${Object.entries(objectives).map(([name,x])=>`<div class="slo-row"><div><strong>${esc(name.replaceAll('_',' ').toUpperCase())}</strong><small>${esc(x.message||'')}</small></div><div><strong>${esc(fmt(x.value))}</strong><small>target ${esc(fmt(x.target))}</small></div><div><strong>${x.error_budget_remaining_percent==null?'—':esc(x.error_budget_remaining_percent+'%')}</strong><small>budget left</small></div>${badge(x.state||'unknown')}</div>`).join('')||'<div class="empty">Waiting for SLO samples.</div>'}`;
+  const ops=operationsData.supervisor||{}, sum=operationsData.summary||{}, schema=operationsData.schema||{}, alerts=alertsData.alerts||[];
+  document.getElementById('operationsPanel').innerHTML=`<div class="metrics"><div><span>Supervisor</span><strong>${esc((ops.status||'unknown').toUpperCase())}</strong></div><div><span>Cancel pending</span><strong>${esc(sum.cancel_pending||0)}</strong></div><div><span>Detached</span><strong>${esc(sum.detached||0)}</strong></div><div><span>Open alerts</span><strong>${esc(alerts.length)}</strong></div><div><span>Schema</span><strong>v${esc(schema.current_version||0)}</strong></div><div><span>DB integrity</span><strong>${esc(schema.integrity||'unknown')}</strong></div></div>${alerts.length?alerts.slice(0,8).map(a=>`<div class="data-row"><div class="row-main"><strong>${esc(a.message||a.kind)}</strong><small>${esc(when(a.created_at))}</small></div><div class="row-secondary">${esc(a.kind||'operations')}</div>${badge(a.severity==='error'||a.severity==='critical'?'down':'degraded')}</div>`).join(''):'<div class="empty good">No open operational alerts.</div>'}`;
+}
+
+function renderActivity(data){
+  const {events,auditData}=data;
+  document.getElementById('eventsPanel').innerHTML=(events.events||[]).length?(events.events||[]).slice(0,40).map(e=>`<div class="event-row"><span>${esc(when(e.created_at))}</span><span class="severity ${esc(e.severity)}">${esc(e.severity)}</span><strong>${esc(e.kind)}</strong><span>${esc(e.message)}</span></div>`).join(''):'<div class="empty">No events yet.</div>';
+  document.getElementById('auditPanel').innerHTML=(auditData.audit||[]).length?(auditData.audit||[]).slice(0,30).map(a=>`<div class="data-row"><div class="row-main"><strong>${esc(a.action)}</strong><small>${esc(a.actor)} · ${esc(when(a.created_at))}</small></div><div class="row-secondary">${esc(a.target_type||'—')}<small>${esc(a.target_id||'')}</small></div>${badge(a.outcome==='success'?'healthy':'degraded')}</div>`).join(''):'<div class="empty">No audit records.</div>';
+}
+
+function renderDebug(data){
+  const {status,openaiCompat}=data; const h=status.herdr||{}, ex=status.execution||{}, telemetry=status.telemetry||{};
+  document.getElementById('executionPanel').innerHTML=`<div class="keyline"><span>Status</span>${badge(ex.status||'unknown')}</div><div class="keyline"><span>Automatic dispatch</span><strong>${status.studio.execution_enabled?'Enabled':'Disabled'}</strong></div><div class="keyline"><span>Parallelism</span><strong>${esc(status.studio.execution_parallelism??ex.parallelism??1)}</strong></div><div class="keyline"><span>Active / peak dispatch</span><strong>${esc(ex.active_dispatches??0)} / ${esc(ex.peak_parallel_dispatches??0)}</strong></div><div class="keyline"><span>Recoveries</span><strong>${esc(ex.recoveries??0)}</strong></div><div class="keyline"><span>Last tick</span><small>${esc(when(ex.last_tick_at))}</small></div>`;
+  document.getElementById('herdrPanel').innerHTML=`<div class="keyline"><span>Status</span>${badge(h.status||'unknown')}</div><div class="keyline"><span>Server</span><code>${esc(h.server_id||'—')}</code></div><div class="keyline"><span>Agents</span><strong>${esc(h.agent_count??'—')}</strong></div><div class="keyline"><span>Panes</span><strong>${esc(h.pane_count??'—')}</strong></div><div class="keyline"><span>Last refresh</span><small>${esc(when(h.last_refreshed_at))}</small></div>`;
+  document.getElementById('serverCount').textContent=`${status.servers?.length||0} configured`;
+  document.getElementById('serversGrid').innerHTML=(status.servers||[]).map(s=>`<article class="server-card"><div class="server-head"><div><h3>${esc(s.server_name)}</h3><small>${esc(s.server_id)}</small></div>${badge(s.status)}</div><div class="tunnel-metrics"><div><span>TOOLS</span><strong>${esc(s.tool_count)}</strong></div><div><span>SCHEMA</span><strong>${esc(shortId(s.schema_hash,8))}</strong></div><div><span>CHANGED</span><strong>${s.schema_changed?'YES':'NO'}</strong></div></div><div>${(s.layers||[]).map(l=>`<div class="layer"><span class="dot ${esc(l.status)}"></span><strong>${esc(l.name)}</strong><span>${esc(l.detail||'')}</span></div>`).join('')}</div></article>`).join('')||'<div class="empty">No server data.</div>';
+  document.getElementById('telemetryPanel').innerHTML=`<div class="metrics"><div><span>Success</span><strong>${telemetry.success_rate==null?'—':esc(telemetry.success_rate+'%')}</strong></div><div><span>Avg runtime</span><strong>${telemetry.avg_runtime_ms==null?'—':esc(Math.round(telemetry.avg_runtime_ms)+' ms')}</strong></div><div><span>Avg queue wait</span><strong>${telemetry.avg_queue_wait_ms==null?'—':esc(Math.round(telemetry.avg_queue_wait_ms)+' ms')}</strong></div></div>${(telemetry.per_worker||[]).map(x=>`<div class="data-row"><div><strong>${esc(x.worker_id)}</strong><small>${esc(x.total)} total</small></div><div>${esc(x.completed)} done · ${esc(x.failed)} failed<small>${esc(x.recoveries)} recoveries</small></div>${badge(x.failed?'degraded':'healthy')}</div>`).join('')||'<div class="empty">No execution telemetry.</div>'}`;
+  const obs=openaiCompat.observations||[];
+  document.getElementById('openaiPanel').innerHTML=`<div class="metrics"><div><span>Observed clients</span><strong>${esc(openaiCompat.summary?.observed||0)}</strong></div><div><span>OpenAI-like</span><strong>${esc(openaiCompat.summary?.openai_like||0)}</strong></div><div><span>Connector reclaim</span><strong>${openaiCompat.connector_reclaim_enabled?'Enabled':'Disabled'}</strong></div></div>${obs.slice(0,20).map(o=>`<div class="data-row"><div class="row-main"><strong>${esc(o.client_info_name||'Unknown MCP client')}</strong><small>${esc(o.user_agent||'')}</small></div><div class="row-secondary">${esc(o.identity_scope||'—')}<small>${esc(o.identity_source||'')}</small></div>${badge(o.openai_like?'healthy':'unknown')}</div>`).join('')||'<div class="empty">No client observations.</div>'}`;
+}
+
+async function load(){
+  try{
+    const [status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,openaiCompat,operationsData,observabilityData,alertsData,auditData,events]=await Promise.all([
+      getJson('/api/status'),getJson('/api/workers'),getJson('/api/work?limit=100'),getJson('/api/sessions'),getJson('/api/gateway/sessions'),getJson('/api/managed/sessions'),getJson('/api/managed/workspaces'),getJson('/api/openai/compatibility'),getJson('/api/operations'),getJson('/api/observability'),getJson('/api/alerts?status=open&limit=20'),getJson('/api/audit?limit=30'),getJson('/api/events?limit=40')
+    ]);
+    latestData={status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,openaiCompat,operationsData,observabilityData,alertsData,auditData,events};
+    const studio=document.getElementById('studioStatus'); studio.className=`pill ${status.studio.status}`; studio.textContent=String(status.studio.status||'unknown').toUpperCase();
+    document.getElementById('lastUpdated').textContent=`Updated ${new Date().toLocaleTimeString()} · ${status.studio.version}`;
+    renderOverview(latestData); renderManagedSessions(latestData); renderSessions(latestData); renderWorkspaces(latestData); renderWorkers(latestData); renderTunnels(latestData); renderReliability(latestData); renderActivity(latestData); renderDebug(latestData); captureAndTranslateText(document);
+  }catch(err){
+    const studio=document.getElementById('studioStatus'); studio.className='pill down'; studio.textContent='UI ERROR';
+    document.getElementById('lastUpdated').textContent=err.message;
+  }
+}
+
+document.querySelectorAll('.primary-nav a[data-view], .mobile-nav a[data-view]').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();setView(a.dataset.view);}));
+document.addEventListener('click',e=>uiAction(async()=>{
+  const copy=e.target.closest('[data-copy-command],[data-copy-source]'); if(copy){await copyChatGPTCommand(copy);return;}
+  const go=e.target.closest('[data-go-view]'); if(go){setView(go.dataset.goView);return;}
+  const tunnel=e.target.closest('[data-tunnel-session]'); if(tunnel){sessionTunnelFilter=tunnel.dataset.tunnelSession;showSessionHistory=false;setView('sessions');if(latestData)renderSessions(latestData);return;}
+  const restart=e.target.closest('[data-managed-restart]'); if(restart){await sendJson(`/api/managed/sessions/${encodeURIComponent(restart.dataset.managedRestart)}/restart`);await load();return;}
+  const resume=e.target.closest('[data-managed-resume]'); if(resume){await sendJson(`/api/managed/sessions/${encodeURIComponent(resume.dataset.managedResume)}/resume`);await load();return;}
+  const rename=e.target.closest('[data-managed-rename]'); if(rename){
+    const result=await openAppDialog({title:'Rename session',message:'Choose a clear name for this pinned project session.',icon:'✎',tone:'info',confirmText:'Rename',fields:[{name:'name',label:'Session name',value:rename.dataset.managedName||'',required:true}]});
+    if(result.confirmed&&result.values.name){await sendJson(`/api/managed/sessions/${encodeURIComponent(rename.dataset.managedRename)}/rename`,{name:result.values.name});await load();}
+    return;
+  }
+  const history=e.target.closest('[data-managed-history]'); if(history){renderManagedHistory(await getJson(`/api/managed/sessions/${encodeURIComponent(history.dataset.managedHistory)}/history`));return;}
+  const historyClose=e.target.closest('[data-managed-history-close]'); if(historyClose){document.getElementById('managedSessionHistoryPanel').hidden=true;return;}
+  const stop=e.target.closest('[data-managed-stop]'); if(stop){
+    const result=await openAppDialog({title:'Stop isolated Serena session?',message:'The pinned project stays registered and can be resumed later. Connected clients must be detached first.',icon:'!',tone:'danger',confirmText:'Stop session'});
+    if(result.confirmed){await sendJson(`/api/managed/sessions/${encodeURIComponent(stop.dataset.managedStop)}/stop`);await load();}
+    return;
+  }
+  const attach=e.target.closest('[data-gateway-attach]'); if(attach){const id=attach.dataset.gatewayAttach;const sel=document.querySelector(`[data-gateway-select="${CSS.escape(id)}"]`);if(sel?.value){await sendJson(`/api/gateway/sessions/${encodeURIComponent(id)}/managed/attach`,{managed_session_id:sel.value});await load();}return;}
+  const detach=e.target.closest('[data-gateway-detach]'); if(detach){await sendJson(`/api/gateway/sessions/${encodeURIComponent(detach.dataset.gatewayDetach)}/managed/detach`);await load();return;}
+}));
+document.getElementById('languageSelect').addEventListener('change',e=>applyLanguage(e.target.value));
+document.getElementById('themeLightBtn').addEventListener('click',()=>applyTheme('light'));
+document.getElementById('themeDarkBtn').addEventListener('click',()=>applyTheme('dark'));
+document.getElementById('fontDecreaseBtn').addEventListener('click',()=>applyFontScale(fontScaleIndex-1));
+document.getElementById('fontResetBtn').addEventListener('click',()=>applyFontScale(1));
+document.getElementById('fontIncreaseBtn').addEventListener('click',()=>applyFontScale(fontScaleIndex+1));
+document.getElementById('newManagedSessionBtn').addEventListener('click',()=>{document.getElementById('managedSessionForm').hidden=false;document.getElementById('managedSessionName').focus();});
+document.getElementById('cancelManagedSessionBtn').addEventListener('click',()=>{document.getElementById('managedSessionForm').hidden=true;});
+document.getElementById('managedSessionForm').addEventListener('submit',e=>uiAction(async()=>{e.preventDefault();const name=document.getElementById('managedSessionName').value.trim();const workspace_key=document.getElementById('managedSessionWorkspace').value;if(!name||!workspace_key)return;await sendJson('/api/managed/sessions',{name,workspace_key});document.getElementById('managedSessionName').value='';document.getElementById('managedSessionForm').hidden=true;await load();}));
+document.getElementById('registerWorkspaceBtn').addEventListener('click',()=>uiAction(async()=>{
+  const result=await openAppDialog({title:'Register workspace',message:'Only approved workspaces can receive isolated project sessions.',icon:'+',tone:'info',confirmText:'Register',fields:[
+    {name:'key',label:'Workspace key',placeholder:'oriverse',required:true,pattern:'[A-Za-z0-9._-]+'},
+    {name:'project_path',label:'Absolute project path',placeholder:'/data/oriverse',required:true},
+    {name:'name',label:'Display name',placeholder:'Oriverse'}
+  ]});
+  if(!result.confirmed)return;
+  const {key,project_path}=result.values;const name=result.values.name||key;
+  await sendJson('/api/managed/workspaces',{key,project_path,name});
+  await load();
+}));
+document.getElementById('managedHistoryToggle').addEventListener('click',()=>{showManagedHistory=!showManagedHistory;if(latestData)renderManagedSessions(latestData);});
+document.getElementById('sessionTunnelFilter').addEventListener('change',e=>{sessionTunnelFilter=e.target.value||'';if(latestData)renderSessions(latestData);});
+document.getElementById('sessionHistoryToggle').addEventListener('click',()=>{showSessionHistory=!showSessionHistory;if(latestData)renderSessions(latestData);});
+document.getElementById('refreshBtn').addEventListener('click',()=>uiAction(async()=>{const b=document.getElementById('refreshBtn');b.disabled=true;b.textContent=tr('Refreshing…');try{await load();}finally{b.disabled=false;b.textContent=tr('Refresh');}}));
+document.getElementById('pollBtn').addEventListener('click',()=>uiAction(async()=>{const b=document.getElementById('pollBtn');b.disabled=true;b.textContent=tr('Polling…');try{await getJson('/api/health/poll',{method:'POST'});await load();}finally{b.disabled=false;b.textContent=tr('Poll health');}}));
+document.getElementById('herdrBtn').addEventListener('click',()=>uiAction(async()=>{const b=document.getElementById('herdrBtn');b.disabled=true;b.textContent=tr('Refreshing…');try{await getJson('/api/herdr/refresh',{method:'POST'});await load();}finally{b.disabled=false;b.textContent=tr('Refresh Herdr');}}));
+window.addEventListener('hashchange',()=>setView((location.hash||'#home').slice(1),false));
+
+
+const helpTooltip=document.getElementById('helpTooltip');
+let helpTarget=null;
+function positionHelpTooltip(target){
+  if(!helpTooltip||!target||helpTooltip.hidden)return;
+  const rect=target.getBoundingClientRect();
+  const gap=10;
+  const width=helpTooltip.offsetWidth||280;
+  const height=helpTooltip.offsetHeight||80;
+  let left=rect.left+(rect.width/2)-(width/2);
+  left=Math.max(10,Math.min(window.innerWidth-width-10,left));
+  let top=rect.bottom+gap;
+  if(top+height>window.innerHeight-10) top=rect.top-height-gap;
+  top=Math.max(10,top);
+  helpTooltip.style.left=`${Math.round(left)}px`;
+  helpTooltip.style.top=`${Math.round(top)}px`;
+}
+function showHelpTooltip(target){
+  if(!helpTooltip||!target?.dataset?.help)return;
+  helpTarget=target;
+  helpTooltip.textContent=target.dataset.help;
+  helpTooltip.hidden=false;
+  requestAnimationFrame(()=>positionHelpTooltip(target));
+}
+function hideHelpTooltip(target=null){
+  if(!helpTooltip)return;
+  if(target&&helpTarget&&target!==helpTarget)return;
+  helpTooltip.hidden=true;
+  helpTarget=null;
+}
+document.addEventListener('mouseover',e=>{
+  const target=e.target.closest('[data-help]');
+  if(target)showHelpTooltip(target);
+});
+document.addEventListener('mouseout',e=>{
+  const target=e.target.closest('[data-help]');
+  if(target&&!target.contains(e.relatedTarget))hideHelpTooltip(target);
+});
+document.addEventListener('focusin',e=>{
+  const target=e.target.closest?.('[data-help]');
+  if(target)showHelpTooltip(target);
+});
+document.addEventListener('focusout',e=>{
+  const target=e.target.closest?.('[data-help]');
+  if(target)hideHelpTooltip(target);
+});
+window.addEventListener('scroll',()=>hideHelpTooltip(),{passive:true});
+window.addEventListener('resize',()=>hideHelpTooltip());
+
+loadTheme();
+loadFontScale();
+loadLanguage();
+setView(currentView,false);
+load();
+setInterval(load,5000);

@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+
+# Runtime / local state
+data/
+backups/
+.serena/
+
+# Local production configuration and credentials
+config.yaml
+config.yaml.*
+*.bak
+.gateway-token
+.oauth-owner-token
+.oauth-signing-secret
+.env
+.env.*
+
+# OS/editor noise
+.DS_Store
+*.swp
+*~

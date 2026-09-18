@@ -1,0 +1,19 @@
+[Unit]
+Description=MCP Studio non-destructive backup restore drill
+After=mcp-studio-backup.service
+
+[Service]
+Type=oneshot
+User=alfred
+Group=alfred
+WorkingDirectory=/home/alfred/mcp-studio
+Environment=MCP_STUDIO_CONFIG=/home/alfred/mcp-studio/config.yaml
+EnvironmentFile=/etc/mcp-studio/mcp-studio.env
+ExecStart=/home/alfred/mcp-studio/.venv/bin/python /home/alfred/mcp-studio/scripts/restore-drill.py
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/alfred/mcp-studio/backups
