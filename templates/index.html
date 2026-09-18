@@ -6,7 +6,7 @@
 <meta content="width=device-width, initial-scale=1" name="viewport"/>
 <meta content="light dark" name="color-scheme"/>
 <meta content="#ffffff" name="theme-color"/>
-<title>MCP Studio · Production</title>
+<title>HIRDA · Agent Runtime & Control Plane</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
@@ -16,12 +16,12 @@
 <div class="app-shell focus-shell">
 <aside class="sidebar focus-sidebar">
 <div class="brand">
-<div aria-hidden="true" class="brand-mark">M</div>
-<div><strong>MCP Studio</strong><small>Production</small></div>
+<div aria-hidden="true" class="brand-mark">H</div>
+<div><strong>HIRDA</strong><small>One control plane. Many agents.</small></div>
 </div>
 <div class="environment-card compact-env">
 <span class="status-beacon"></span>
-<div><strong>Live</strong><small>All ingress through Studio</small></div>
+<div><strong>Live</strong><small>All ingress through HIRDA Gateway</small></div>
 </div>
 <nav aria-label="Primary navigation" class="primary-nav focus-nav capsule-primary-nav">
 <a class="active" data-help="Live capsule routing, current agent lane, handoffs and system health." data-view="home" href="#home"><span>▣</span>Dashboard</a>
@@ -38,7 +38,7 @@
 <div class="workspace">
 <header class="topbar focus-topbar">
 <div>
-<div class="breadcrumb">MCP Studio <span>/</span> <strong id="viewBreadcrumb">Home</strong></div>
+<div class="breadcrumb">HIRDA <span>/</span> <strong id="viewBreadcrumb">Home</strong></div>
 <div class="title-line"><h1 id="viewTitle">Production</h1><span class="environment-badge">LIVE</span></div>
 <p id="viewSubtitle">Only what matters right now.</p>
 </div>
@@ -53,8 +53,8 @@
 <button aria-label="Reset text size" class="font-size-button font-size-reset" data-help="Reset text size to the default 112%." id="fontResetBtn" type="button"><span id="fontScaleLabel">112%</span></button>
 <button aria-label="Increase text size" class="font-size-button" data-help="Increase text size." id="fontIncreaseBtn" type="button">A+</button>
 </div>
-<button class="button secondary" data-help="Reload current MCP Studio status from the server." id="refreshBtn">Refresh</button>
-<div class="pill unknown" data-help="Overall MCP Studio health. HEALTHY means the control plane is responding normally." id="studioStatus" tabindex="0">UNKNOWN</div>
+<button class="button secondary" data-help="Reload current HIRDA status from the server." id="refreshBtn">Refresh</button>
+<div class="pill unknown" data-help="Overall HIRDA health. HEALTHY means the control plane is responding normally." id="studioStatus" tabindex="0">UNKNOWN</div>
 </div>
 </header>
 <main class="dashboard focus-dashboard">
@@ -134,8 +134,8 @@
 </section>
 <section class="view-page" data-page="workspaces">
 <div class="page-section-head focus-page-head">
-<div><span class="eyebrow">PROJECT REGISTRY</span><h2>Workspaces</h2><p>Register the projects that MCP Studio is allowed to isolate and manage.</p></div>
-<div class="toolbar"><button class="button small" data-help="Add an approved project path so MCP Studio can create isolated sessions for it." id="registerWorkspaceBtn">+ Register workspace</button></div>
+<div><span class="eyebrow">PROJECT REGISTRY</span><h2>Workspaces</h2><p>Register the projects that HIRDA is allowed to isolate and manage.</p></div>
+<div class="toolbar"><button class="button small" data-help="Add an approved project path so HIRDA can create isolated sessions for it." id="registerWorkspaceBtn">+ Register workspace</button></div>
 </div>
 <div class="mini-stats focus-mini-stats" id="workspaceSummary"></div>
 <div class="workspace-management-grid">
@@ -174,7 +174,7 @@
 <div class="chatgpt-guide-copy">
 <span class="eyebrow">START HERE · CHATGPT</span>
 <h3>Work from ChatGPT first</h3>
-<p>Start by choosing a workspace in ChatGPT. MCP Studio will find or resume its managed session, keep the project pinned, and route you to the isolated Serena instance.</p>
+<p>Start by choosing a workspace in ChatGPT. HIRDA will find or resume its managed session, keep the project pinned, and route you to the isolated Serena instance.</p>
 <div class="command-box primary-command">
 <div><span class="command-label">Try this in ChatGPT</span><code id="quickWorkspaceCommand" data-command-en="Use workspace nova-oracle" data-command-th="ใช้ workspace nova-oracle">Use workspace nova-oracle</code></div>
 <button class="button small" data-copy-source="quickWorkspaceCommand" data-copy-text="Copy command" data-help="Copy this example command and paste it into ChatGPT." type="button">Copy command</button>
@@ -184,7 +184,7 @@
 <div class="chatgpt-flow" aria-label="ChatGPT to workspace flow">
 <div class="flow-node"><strong>ChatGPT</strong><small>Your working surface</small></div>
 <span class="flow-arrow">↓</span>
-<div class="flow-node"><strong>MCP Studio</strong><small>Session routing</small></div>
+<div class="flow-node"><strong>HIRDA Gateway</strong><small>Session routing</small></div>
 <span class="flow-arrow">↓</span>
 <div class="flow-node"><strong>Managed Session</strong><small>Project Pin 🔒</small></div>
 <span class="flow-arrow">↓</span>
@@ -206,7 +206,7 @@
 
 <article class="panel-card guide-card switch-workspace-card">
 <div class="guide-icon green">⇄</div><h3>Switch workspace</h3>
-<p>Tell ChatGPT the workspace name. Studio moves you to that workspace's managed session without changing project inside a shared Serena process.</p>
+<p>Tell ChatGPT the workspace name. HIRDA moves you to that workspace's managed session without changing project inside a shared Serena process.</p>
 <div class="command-box">
 <div><span class="command-label">Example</span><code id="switchWorkspaceCommand" data-command-en="Switch to workspace earth-616" data-command-th="สลับไป workspace earth-616">Switch to workspace earth-616</code></div>
 <button class="button secondary small" data-copy-source="switchWorkspaceCommand" data-copy-text="Copy command" type="button">Copy command</button>
@@ -216,10 +216,10 @@
 </div>
 
 <div class="panel-card guide-usage-split">
-<div class="panel-head"><div><span class="eyebrow">DAILY USE</span><h3>ChatGPT for work · Studio UI for control</h3></div></div>
+<div class="panel-head"><div><span class="eyebrow">DAILY USE</span><h3>ChatGPT for work · HIRDA Studio for control</h3></div></div>
 <div class="usage-columns">
 <div class="usage-column chatgpt-column"><h4>Use ChatGPT for</h4><ul><li>Work with code</li><li>Read or send pane messages</li><li>Run tests</li><li>Fix bugs</li><li>Review and commit changes</li></ul></div>
-<div class="usage-column studio-column"><h4>Use MCP Studio UI for</h4><ul><li>See or resume sessions</li><li>Register workspaces</li><li>Check ingress and client binding</li><li>Inspect alerts or conflicts</li></ul></div>
+<div class="usage-column studio-column"><h4>Use HIRDA Studio for</h4><ul><li>See or resume sessions</li><li>Register workspaces</li><li>Check ingress and client binding</li><li>Inspect alerts or conflicts</li></ul></div>
 </div>
 </div>
 
@@ -242,7 +242,7 @@
 <div><span class="pill healthy">IDLE</span><p>Session is healthy but not currently busy.</p></div>
 <div><span class="pill unknown">STOPPED</span><p>Session is preserved and can be resumed.</p></div>
 <div><span class="pill busy">WRITE ACTIVE</span><p>Exclusive write lease is currently held.</p></div>
-<div><span class="pill degraded">UNBOUND</span><p>Client reached Studio but has not selected a managed session.</p></div>
+<div><span class="pill degraded">UNBOUND</span><p>Client reached HIRDA but has not selected a managed session.</p></div>
 <div><span class="pill down">ERROR</span><p>Open System and inspect the alert or session detail.</p></div>
 </div></div></details>
 <div class="guide-tip panel-card">
@@ -325,7 +325,7 @@
     </div>
   </div>
   <div class="computer-viewer-shell" id="computerViewerShell">
-    <iframe id="computerViewer" title="MCP Studio shared desktop" src="about:blank" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
+    <iframe id="computerViewer" title="HIRDA Computer desktop" src="about:blank" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
   </div>
 </div>
 </section>

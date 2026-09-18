@@ -42,7 +42,7 @@ async function loadComputerData(){
     if(!computer.enabled){
       statusEl.className = 'pill unknown';
       statusEl.textContent = 'disabled';
-      messageEl.textContent = 'Computer Use is disabled in MCP Studio config.';
+      messageEl.textContent = 'Computer Use is disabled in HIRDA config.';
       messageEl.className = 'computer-message error';
       sessionSelect.innerHTML = '<option value="">disabled</option>';
       return;

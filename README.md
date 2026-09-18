@@ -1,4 +1,10 @@
-# MCP Studio v0.9.9 — M6.2.4 Session UX + Lifecycle Polish
+# HIRDA — Agent Runtime & Control Plane
+
+**One control plane. Many agents.**
+
+HIRDA is the product identity succeeding MCP Studio. During M1, user-facing branding transitions to HIRDA while infrastructure identifiers remain backward-compatible. See `HIRDA_M1_IDENTITY_PRODUCT_BOUNDARY.md` for the naming and migration boundary.
+
+Current implementation lineage: **MCP Studio v0.9.9 — M6.2.4 Session UX + Lifecycle Polish**.
 
 This release builds on the certified M6.2.3C production cutover. Routing, project pinning and Serena process isolation are unchanged; M6.2.4 makes durable managed sessions easier to operate.
 
