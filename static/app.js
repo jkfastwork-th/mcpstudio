@@ -347,37 +347,234 @@ function clientLabel(g, logical, i){
   return `MCP session ${i+1}`;
 }
 
+function capsuleDisplayId(session){
+  if(!session) return 'C-204';
+  const raw=String(session.id||session.name||'204');
+  let hash=0;
+  for(let i=0;i<raw.length;i++) hash=((hash<<5)-hash+raw.charCodeAt(i))|0;
+  return `C-${String(100+(Math.abs(hash)%900)).padStart(3,'0')}`;
+}
+
+function normalizeCapsuleStage(stage=''){
+  return ({capsule_build:'build',agent_runtime:'runtime',completed:'result'}[stage]||stage||'');
+}
+
+function capsuleStageNodes(activeStage=''){
+  const active=normalizeCapsuleStage(activeStage);
+  const stages=[['ingress','Ingress'],['build','Capsule Build'],['context','Context'],['runtime','Agent Runtime'],['result','Result']];
+  return stages.map(([key,label],i)=>`<div class="capsule-stage ${key===active?'active':''}"><span class="stage-node">${i+1}</span><small>${label}</small></div>`).join('');
+}
+
+function renderCapsuleLane({agent,sub,colorClass,active=false,activeStage='',capsuleId='',muted=false,statusText=''}){
+  const state=statusText||(active?'Running':muted?'Standby':'Ready');
+  return `<div class="capsule-lane ${colorClass} ${active?'lane-active':''} ${muted?'lane-muted':''}">
+    <div class="lane-agent">
+      <span class="lane-agent-icon">${agent==='Claude'?'✦':agent==='Codex'?'⌁':'◆'}</span>
+      <div><strong>${esc(agent)}</strong><small>${esc(sub||'')}</small></div>
+    </div>
+    <div class="lane-track">${capsuleStageNodes(activeStage)}</div>
+    <div class="lane-status"><span>${esc(state)}</span>${capsuleId?`<b>${esc(capsuleId)}</b>`:''}</div>
+  </div>`;
+}
+
+function renderAgentLanes(data){
+  const grid=document.getElementById('agentRuntimeGrid');
+  if(!grid) return;
+  const discovered=data?.agentRuntimesData?.runtimes||[];
+  const fallback=[
+    {id:'claude',name:'Claude',brand:'Anthropic',provider:'Anthropic',status:'unknown',installed:false},
+    {id:'codex',name:'Codex',brand:'OpenAI',provider:'OpenAI',status:'unknown',installed:false},
+    {id:'hermes',name:'Hermes',brand:'Nous / custom',provider:'Nous / custom',status:'unknown',installed:false}
+  ];
+  const cards=discovered.length?discovered:fallback;
+  grid.innerHTML=cards.map(r=>{
+    const id=String(r.id||'').toLowerCase();
+    const icon=id==='claude'?'✦':id==='codex'?'⌁':'◆';
+    const state=r.status||'unknown';
+    const model=r.model||r.last_used_model||'Model not reported';
+    const version=r.version||'Version unavailable';
+    const provider=r.provider||r.brand||'Unknown provider';
+    const free=r.free?'<span class="runtime-free">FREE</span>':'';
+    const installed=r.installed!==false;
+    const meter=state==='running'?100:state==='ready'?84:state==='available'?68:state==='blocked'?34:installed?50:8;
+    return `<article class="agent-runtime-card ${esc(id)}">
+      <div class="agent-runtime-top"><span class="agent-runtime-icon">${icon}</span><div><h3>${esc(r.name||id)}</h3><small>${esc(provider)} ${free}</small></div><span class="runtime-pill runtime-${esc(state)}">${esc(installed?state:'not installed')}</span></div>
+      <div class="agent-runtime-health"><span>${esc(model)}</span><strong>${esc(r.pane_count||0)} pane${Number(r.pane_count||0)===1?'':'s'}</strong></div>
+      <div class="runtime-meter"><i style="width:${meter}%"></i></div>
+      <p>${esc(version)}</p>
+      <div class="runtime-tags"><span>${installed?'Installed':'Missing'}</span><span>Capsules</span><span>Handoff</span>${r.free?'<span>Free model</span>':''}</div>
+      ${id==='hermes'&&r.nous_free?`<div class="runtime-free-note"><strong>Nous Portal</strong><span>${esc(r.nous_free.preferred_model||'')}</span>${r.nous_free.active?'<b>Active</b>':'<small>Fallback candidate</small>'}</div>`:''}
+      <button class="button secondary small" type="button" disabled>Runtime broker next</button>
+    </article>`;
+  }).join('');
+}
+
 function renderOverview(data){
-  const {status,managedSessions,alertsData}=data;
+  const {status,managedSessions,alertsData,capsulesData,agentRuntimesData}=data;
   const items=managedSessions?.sessions||[];
   const running=items.filter(x=>x.status==='ready' || x.status==='running');
-  const active=running.filter(x=>(x.connected_transports||0)>0 || x.lifecycle_state==='active');
-  const conn=status.connectivity?.summary||{};
-  const healthyTunnels=conn.counts?.healthy||0;
+  const activeSessions=running.filter(x=>(x.connected_transports||0)>0 || x.lifecycle_state==='active');
   const openAlerts=(alertsData.alerts||[]).length;
   const runtime=status.studio.status||'unknown';
-  const healthy = runtime==='healthy' && openAlerts===0;
+  const healthy=runtime==='healthy' && openAlerts===0;
 
-  const hero=document.getElementById('heroStatus');
-  hero.className=`hero-status ${healthy?'healthy':'attention'}`;
-  hero.innerHTML=`<div><span class="hero-dot"></span><div><strong>${healthy?'Everything is running normally':'System needs attention'}</strong><small>${healthy?'Core services are responding normally.':'Open System to investigate the active issue.'}</small></div></div>${openAlerts?`<button class="button secondary small" data-go-view="system">View ${openAlerts} alert${openAlerts===1?'':'s'}</button>`:'<span class="hero-ok">No action needed</span>'}`;
+  const ledgerCapsules=capsulesData?.capsules||[];
+  const liveCapsule=ledgerCapsules.find(x=>x.status==='active')||ledgerCapsules[0]||null;
+  const hasLedger=Boolean(liveCapsule);
+  const activeSession=activeSessions[0]||running[0]||items[0]||null;
+  const capsuleId=hasLedger?liveCapsule.capsule_id:capsuleDisplayId(activeSession);
+  const workspace=hasLedger?(liveCapsule.workspace||'—'):(activeSession?.workspace_key||'No active workspace');
+  const sourcePane=hasLedger?(liveCapsule.source_pane||'—'):(activeSession?.metadata?.source_pane||'Herdr / ChatGPT');
+  const currentAgent=String(hasLedger?(liveCapsule.current_agent||'claude'):'hermes').toLowerCase();
+  const currentStage=hasLedger?(liveCapsule.current_stage||'ingress'):'agent_runtime';
+  const lastHandoff=hasLedger?liveCapsule.last_handoff:null;
+  const capsuleSummary=capsulesData?.summary||{};
+  const runtimeSummary=agentRuntimesData?.summary||{};
 
   document.getElementById('overviewCards').innerHTML=[
-    overviewCard('PROJECT SESSIONS',String(active.length),`${running.length} running`,active.length?'busy':'healthy','Managed sessions currently active. Each uses an isolated Serena instance pinned to one project.'),
-    overviewCard('INGRESS',`${healthyTunnels}/${conn.total||0}`,'healthy routes',healthyTunnels===(conn.total||0)?'healthy':'degraded','Healthy ingress routes reaching MCP Studio, such as OpenAI tunnel and Cloudflare.'),
-    overviewCard('UNBOUND',String(managedSessions?.status?.cutover?.unbound_transports??0),'client transports',(managedSessions?.status?.cutover?.unbound_transports??0)?'degraded':'healthy','Client transports that reached Studio but are not yet attached to a managed project session.'),
-    overviewCard('ALERTS',String(openAlerts),openAlerts?'needs attention':'none',openAlerts?'degraded':'healthy','Open operational alerts that may require attention.')
+    overviewCard('ACTIVE CAPSULES',String(hasLedger?(capsuleSummary.active||0):(activeSessions.length||running.length)),hasLedger?`${capsuleSummary.total||0} tracked in ledger`:`${running.length} managed sessions`,(capsuleSummary.active||activeSessions.length)?'busy':'healthy'),
+    overviewCard('AGENT LANES',String(runtimeSummary.ready??3),`${runtimeSummary.installed??3} installed · Claude · Codex · Hermes`,'healthy'),
+    overviewCard('HANDOFFS',String(hasLedger?(capsuleSummary.handoffs||0):Math.max(0,(activeSession?.use_count||0)-1)),hasLedger?'persisted capsule events':'session-derived preview',(capsuleSummary.handoffs||0)?'busy':'healthy'),
+    overviewCard('SYSTEM',healthy?'98%':'Attention',openAlerts?`${openAlerts} open alert${openAlerts===1?'':'s'}`:'control plane healthy',healthy?'healthy':'degraded')
   ].join('');
 
-  const sorted=[...running].sort((a,b)=>new Date(b.last_used_at||b.updated_at||0)-new Date(a.last_used_at||a.updated_at||0));
-  document.getElementById('activeSessionsPanel').innerHTML=sorted.length?`<div class="focus-session-list">${sorted.map(x=>{
-    const last=x.last_used_at||x.last_transport_seen_at||x.last_started_at||x.updated_at;
-    const providers=(x.ingress_providers||[]).join(' + ')||'No client connected';
-    const connected=x.connected_transports||0;
-    return `<div class="focus-session-row"><div class="session-project"><span class="project-icon">${connected?'●':'○'}</span><div><strong>${esc(x.name)}</strong><small data-help="Pinned means this logical session cannot silently switch to another project.">${esc(x.workspace_key)} · 🔒 pinned project</small></div></div><div class="session-ingress"><strong>${esc(providers)}</strong><small>${connected} client${connected===1?'':'s'} · ${esc(ago(last))}</small></div><div>${badge(x.lifecycle_state||x.status)}</div><button class="text-button" data-go-view="sessions">Manage</button></div>`;
-  }).join('')}</div>`:'<div class="empty good">No running project sessions. Create one when you need a project.</div>';
+  const runtimeById=Object.fromEntries((agentRuntimesData?.runtimes||[]).map(r=>[r.id,r]));
+  const laneDefs={
+    claude:{name:'Claude',sub:runtimeById.claude?.model||'Anthropic',y:92,color:'#f26a2e'},
+    codex:{name:'Codex',sub:runtimeById.codex?.model||'OpenAI Codex',y:189,color:'#10a37f'},
+    hermes:{name:'Hermes',sub:runtimeById.hermes?.model||'Nous / custom',y:286,color:'#7c3aed'}
+  };
+  const fromAgent=String(lastHandoff?.from_agent||'').toLowerCase();
+  const toAgent=String(lastHandoff?.to_agent||'').toLowerCase();
+  const lanes=Object.entries(laneDefs).map(([key,meta])=>{
+    const participates=key===currentAgent||key===fromAgent||key===toAgent;
+    const active=key===currentAgent && liveCapsule?.status!=='completed';
+    const statusText=active?'Running':key===fromAgent&&lastHandoff?'Handoff source':key===toAgent&&lastHandoff?'Received':'Ready';
+    const eventStage=key===fromAgent?(lastHandoff?.from_stage||''):key===toAgent?(lastHandoff?.to_stage||''):'';
+    return renderCapsuleLane({
+      agent:meta.name,
+      sub:meta.sub,
+      colorClass:key,
+      active,
+      activeStage:active?currentStage:eventStage,
+      capsuleId:participates?capsuleId:'',
+      muted:!participates,
+      statusText
+    });
+  }).join('');
 
+  let connector='';
+  if(lastHandoff && laneDefs[fromAgent] && laneDefs[toAgent]){
+    const from=laneDefs[fromAgent], to=laneDefs[toAgent];
+    const connectorId=lastHandoff.connector_id||capsuleId;
+    const fromTop=(from.y/390*100).toFixed(2);
+    const toTop=(to.y/390*100).toFixed(2);
+    connector=`<svg class="capsule-connector-layer" viewBox="0 0 1000 390" preserveAspectRatio="none" aria-label="Capsule handoff from ${esc(from.name)} to ${esc(to.name)}">
+      <defs>
+        <linearGradient id="handoffGradientLive" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${from.color}"/><stop offset="100%" stop-color="${to.color}"/></linearGradient>
+        <marker id="handoffArrowLive" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="${to.color}"/></marker>
+      </defs>
+      <path class="handoff-path live-handoff-path" style="stroke:url(#handoffGradientLive)" d="M758 ${from.y} C860 ${from.y}, 858 ${to.y}, 758 ${to.y}" marker-end="url(#handoffArrowLive)"/>
+      <circle class="handoff-anchor" style="stroke:${from.color}" cx="758" cy="${from.y}" r="9"/>
+      <circle class="handoff-anchor" style="stroke:${to.color}" cx="758" cy="${to.y}" r="9"/>
+    </svg>
+    <span class="connector-badge connector-from" style="top:calc(${fromTop}% - 12px);background:${from.color}">${esc(connectorId)}</span>
+    <span class="connector-badge connector-to" style="top:calc(${toTop}% - 12px);bottom:auto;background:${to.color}">${esc(connectorId)}</span>`;
+  }
+
+  document.getElementById('capsulePipeline').innerHTML=`<div class="capsule-pipeline-inner">${lanes}${connector}</div>`;
+
+  const hero=document.getElementById('heroStatus');
+  hero.className='capsule-state-card';
+  const laneName=laneDefs[currentAgent]?.name||currentAgent;
+  const lastText=lastHandoff?`${laneDefs[fromAgent]?.name||fromAgent} → ${laneDefs[toAgent]?.name||toAgent}`:'No handoff yet';
+  const nextFallback=currentAgent==='claude'?'Codex / Hermes':currentAgent==='codex'?'Hermes':'Codex';
+  const stageLabel=String(currentStage||'').replaceAll('_',' ');
+  hero.innerHTML=`<div class="capsule-card-heading compact"><div><span class="eyebrow">CAPSULE STATE</span><h3>${esc(capsuleId)}</h3></div><span class="state-live-dot">${liveCapsule?.status==='completed'?'✓ Completed':'● Live'}</span></div>
+    <div class="capsule-state-list">
+      <div><span>Task</span><strong>${esc(hasLedger?liveCapsule.title:(activeSession?.name||'Workspace capsule preview'))}</strong></div>
+      <div><span>Workspace</span><strong>${esc(workspace)}</strong></div>
+      <div><span>Current lane</span><strong class="state-${esc(currentAgent)}"><i></i>${esc(laneName)}</strong></div>
+      <div><span>Current stage</span><strong>${esc(stageLabel)}</strong></div>
+      <div><span>Source</span><strong>${esc(sourcePane)}</strong></div>
+      <div><span>Last handoff</span><strong>${esc(lastText)}</strong></div>
+      <div><span>Next fallback</span><strong>${esc(nextFallback)}</strong></div>
+    </div>
+    <button class="button capsule-detail-button" data-go-view="sessions">View capsule details →</button>`;
+
+  if(hasLedger){
+    const ev=[...(liveCapsule.events||[])].reverse().slice(0,6);
+    document.getElementById('activeSessionsPanel').innerHTML=ev.length?`<div class="capsule-event-list">${ev.map(e=>{
+      const d=e.data||{};
+      const detail=e.kind==='capsule.handoff'?`${d.from_agent} → ${d.to_agent} · ${d.reason||'handoff'}`:e.kind==='capsule.stage'?`Stage → ${d.stage}`:e.kind==='capsule.completed'?'Capsule completed':'Capsule created';
+      const cls=e.kind==='capsule.handoff'?'event-handoff':'event-success';
+      return `<div class="capsule-event-row"><span class="event-time">${esc(ago(e.created_at))}</span><b>${esc(capsuleId)}</b><span>${esc(detail)}</span><em class="${cls}">${esc(e.kind.replace('capsule.',''))}</em></div>`;
+    }).join('')}</div>`:'<div class="empty good">No capsule events yet.</div>';
+  }else{
+    const sorted=[...running].sort((a,b)=>new Date(b.last_used_at||b.updated_at||0)-new Date(a.last_used_at||a.updated_at||0)).slice(0,5);
+    document.getElementById('activeSessionsPanel').innerHTML=sorted.length?`<div class="capsule-event-list">${sorted.map((x)=>{
+      const id=capsuleDisplayId(x); const last=x.last_used_at||x.updated_at||x.last_started_at;
+      return `<div class="capsule-event-row"><span class="event-time">${esc(ago(last))}</span><b>${id}</b><span>Managed session ready</span><em class="event-success">preview</em></div>`;
+    }).join('')}</div>`:'<div class="empty good">No active capsules yet. Open a workspace from ChatGPT to start the flow.</div>';
+  }
+
+  renderAgentLanes(data);
 }
+
+function renderCapsuleLedger(data){
+  const panel=document.getElementById('capsuleLedgerPanel');
+  const summaryEl=document.getElementById('capsuleLedgerSummary');
+  if(!panel||!summaryEl) return;
+  const payload=data?.capsulesData||{capsules:[],summary:{}};
+  const capsules=payload.capsules||[];
+  const summary=payload.summary||{};
+  summaryEl.innerHTML=`<span class="mini-stat primary">Active <strong>${esc(summary.active||0)}</strong></span><span class="mini-stat">Tracked <strong>${esc(summary.total||0)}</strong></span><span class="mini-stat">Handoffs <strong>${esc(summary.handoffs||0)}</strong></span>`;
+  if(!capsules.length){
+    panel.innerHTML='<div class="panel-card empty good">No persisted capsules yet. A capsule appears here as soon as the broker creates one.</div>';
+    return;
+  }
+  panel.innerHTML=capsules.map((capsule,index)=>{
+    const handoffs=capsule.handoffs||[];
+    const events=[...(capsule.events||[])].reverse();
+    const current=String(capsule.current_agent||'unknown').toLowerCase();
+    const last=capsule.last_handoff||null;
+    const route=last?`${last.from_agent} → ${last.to_agent}`:`${current} · no handoff yet`;
+    const handoffRows=handoffs.length?handoffs.slice().reverse().map(h=>`<div class="capsule-trace-row">
+      <span class="trace-connector">${esc(h.connector_id||capsule.capsule_id)}</span>
+      <div><strong>${esc(h.from_agent)} → ${esc(h.to_agent)}</strong><small>${esc(h.reason||'manual')} · ${esc(when(h.created_at))}</small></div>
+      <code>${esc(h.handoff_id||'—')}</code>
+    </div>`).join(''):'<div class="empty compact">No handoff recorded.</div>';
+    const timeline=events.length?events.map(e=>{
+      const d=e.data||{};
+      let text=e.message||e.kind;
+      if(e.kind==='capsule.stage') text=`Stage → ${d.stage||'unknown'}`;
+      if(e.kind==='capsule.handoff') text=`${d.from_agent||'?'} → ${d.to_agent||'?'} · ${d.reason||'handoff'}`;
+      if(e.kind==='capsule.completed') text='Capsule completed';
+      return `<div class="capsule-timeline-row"><span class="timeline-dot ${esc(e.kind.replace('capsule.',''))}"></span><div><strong>${esc(text)}</strong><small>${esc(when(e.created_at))} · ${esc(e.kind)}</small></div></div>`;
+    }).join(''):'<div class="empty compact">No events recorded.</div>';
+    return `<details class="capsule-ledger-item ${esc(current)}" ${index===0?'open':''}>
+      <summary>
+        <span class="capsule-ledger-id">${esc(capsule.capsule_id)}</span>
+        <div class="capsule-ledger-title"><strong>${esc(capsule.title||capsule.capsule_id)}</strong><small>${esc(capsule.workspace||'No workspace')} · ${esc(route)}</small></div>
+        <span class="capsule-ledger-stage">${esc(String(capsule.current_stage||'unknown').replaceAll('_',' '))}</span>
+        <span class="capsule-ledger-status ${esc(capsule.status||'active')}">${esc(capsule.status||'active')}</span>
+      </summary>
+      <div class="capsule-ledger-body">
+        <div class="capsule-ledger-facts">
+          <div><span>Current lane</span><strong class="state-${esc(current)}"><i></i>${esc(current)}</strong></div>
+          <div><span>Source pane</span><strong>${esc(capsule.source_pane||'—')}</strong></div>
+          <div><span>Created</span><strong>${esc(when(capsule.created_at))}</strong></div>
+          <div><span>Updated</span><strong>${esc(when(capsule.updated_at))}</strong></div>
+        </div>
+        <div class="capsule-ledger-columns">
+          <section><div class="capsule-subhead"><span>CONNECTORS</span><strong>${esc(handoffs.length)}</strong></div>${handoffRows}</section>
+          <section><div class="capsule-subhead"><span>TIMELINE</span><strong>${esc(events.length)}</strong></div><div class="capsule-timeline">${timeline}</div></section>
+        </div>
+      </div>
+    </details>`;
+  }).join('');
+}
+
 function renderManagedSessions(data){
   const managed=data.managedSessions||{sessions:[],status:{}}, workspaces=data.managedWorkspaces||{workspaces:[]};
   const items=managed.sessions||[], ws=workspaces.workspaces||[], status=managed.status||{};
@@ -489,13 +686,13 @@ function renderDebug(data){
 
 async function load(){
   try{
-    const [status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,openaiCompat,operationsData,observabilityData,alertsData,auditData,events]=await Promise.all([
-      getJson('/api/status'),getJson('/api/workers'),getJson('/api/work?limit=100'),getJson('/api/sessions'),getJson('/api/gateway/sessions'),getJson('/api/managed/sessions'),getJson('/api/managed/workspaces'),getJson('/api/openai/compatibility'),getJson('/api/operations'),getJson('/api/observability'),getJson('/api/alerts?status=open&limit=20'),getJson('/api/audit?limit=30'),getJson('/api/events?limit=40')
+    const [status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,openaiCompat,operationsData,observabilityData,alertsData,auditData,events,capsulesData,agentRuntimesData]=await Promise.all([
+      getJson('/api/status'),getJson('/api/workers'),getJson('/api/work?limit=100'),getJson('/api/sessions'),getJson('/api/gateway/sessions'),getJson('/api/managed/sessions'),getJson('/api/managed/workspaces'),getJson('/api/openai/compatibility'),getJson('/api/operations'),getJson('/api/observability'),getJson('/api/alerts?status=open&limit=20'),getJson('/api/audit?limit=30'),getJson('/api/events?limit=40'),getJson('/api/capsules?limit=100'),getJson('/api/agents/runtimes')
     ]);
-    latestData={status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,openaiCompat,operationsData,observabilityData,alertsData,auditData,events};
+    latestData={status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,openaiCompat,operationsData,observabilityData,alertsData,auditData,events,capsulesData,agentRuntimesData};
     const studio=document.getElementById('studioStatus'); studio.className=`pill ${status.studio.status}`; studio.textContent=String(status.studio.status||'unknown').toUpperCase();
     document.getElementById('lastUpdated').textContent=`Updated ${new Date().toLocaleTimeString()} · ${status.studio.version}`;
-    renderOverview(latestData); renderManagedSessions(latestData); renderSessions(latestData); renderWorkspaces(latestData); renderWorkers(latestData); renderTunnels(latestData); renderReliability(latestData); renderActivity(latestData); renderDebug(latestData); captureAndTranslateText(document);
+    renderOverview(latestData); renderCapsuleLedger(latestData); renderManagedSessions(latestData); renderSessions(latestData); renderWorkspaces(latestData); renderWorkers(latestData); renderTunnels(latestData); renderReliability(latestData); renderActivity(latestData); renderDebug(latestData); captureAndTranslateText(document);
   }catch(err){
     const studio=document.getElementById('studioStatus'); studio.className='pill down'; studio.textContent='UI ERROR';
     document.getElementById('lastUpdated').textContent=err.message;

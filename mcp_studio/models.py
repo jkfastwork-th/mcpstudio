@@ -180,3 +180,34 @@ class ManagedSessionRename(BaseModel):
 
 class ManagedGatewayAttach(BaseModel):
     managed_session_id: str = Field(min_length=1, max_length=120)
+
+
+AgentId = Literal["claude", "codex", "hermes"]
+
+
+class CapsuleCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
+    workspace: str | None = Field(default=None, max_length=2000)
+    source_pane: str | None = Field(default=None, max_length=240)
+    agent: AgentId = "claude"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CapsuleStageUpdate(BaseModel):
+    stage: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._-]+$")
+    agent: AgentId | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CapsuleHandoff(BaseModel):
+    from_agent: AgentId
+    to_agent: AgentId
+    reason: str = Field(default="manual", min_length=1, max_length=240)
+    from_stage: str = Field(default="agent_runtime", min_length=1, max_length=120)
+    to_stage: str = Field(default="agent_runtime", min_length=1, max_length=120)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CapsuleComplete(BaseModel):
+    agent: AgentId | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)

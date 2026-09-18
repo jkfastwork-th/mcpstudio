@@ -16,10 +16,13 @@ from .gateway import GatewaySessionManager, make_gateway_router
 from .managed_sessions import ManagedSessionManager, ManagedSessionError, ManagedSessionConflict, WorkspaceNotAllowed
 from .health import HealthManager
 from .herdr import HerdrManager
+from .capsules import CapsuleService, CapsuleNotFound
+from .agent_runtimes import AgentRuntimeInventory
 from .models import (
     SessionCreate, SessionHeartbeat, WorkerBind, WorkerHeartbeat, WorkerStatePatch,
     WorkSubmit, WorkFinish, WorkFail, WorkDetach, AlertAcknowledge, RetryDispatch, FaultInject, BatchDispatch,
     SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedGatewayAttach,
+    CapsuleCreate, CapsuleStageUpdate, CapsuleHandoff, CapsuleComplete,
 )
 from .settings import Settings, load_settings
 from .workers import WorkerManager
@@ -38,6 +41,8 @@ db = Database(settings.studio.database)
 health = HealthManager(settings, db)
 workers = WorkerManager(settings, db)
 herdr = HerdrManager(settings, db, health)
+capsules = CapsuleService(db)
+agent_runtimes = AgentRuntimeInventory(herdr)
 scheduler = Scheduler(settings, db, health, herdr)
 execution = ExecutionSupervisor(settings, db, herdr, scheduler)
 connectivity = ConnectivityManager(settings, db)
@@ -369,6 +374,85 @@ async def force_poll():
 @app.get("/api/events")
 async def events(limit: int = 100):
     return {"events": await db.recent_events(limit)}
+
+@app.get("/api/capsules")
+async def capsule_list(limit: int = 100):
+    return await capsules.overview(limit)
+
+
+@app.get("/api/capsules/{capsule_id}")
+async def capsule_get(capsule_id: str):
+    try:
+        return await capsules.get(capsule_id)
+    except CapsuleNotFound:
+        raise HTTPException(status_code=404, detail="capsule not found")
+
+
+@app.post("/api/capsules")
+async def capsule_create(body: CapsuleCreate):
+    try:
+        return await capsules.create(
+            title=body.title,
+            workspace=body.workspace,
+            source_pane=body.source_pane,
+            agent=body.agent,
+            metadata=body.metadata,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/capsules/{capsule_id}/stage")
+async def capsule_stage(capsule_id: str, body: CapsuleStageUpdate):
+    try:
+        return await capsules.set_stage(
+            capsule_id,
+            stage=body.stage,
+            agent=body.agent,
+            metadata=body.metadata,
+        )
+    except CapsuleNotFound:
+        raise HTTPException(status_code=404, detail="capsule not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/capsules/{capsule_id}/handoff")
+async def capsule_handoff(capsule_id: str, body: CapsuleHandoff):
+    try:
+        return await capsules.handoff(
+            capsule_id,
+            from_agent=body.from_agent,
+            to_agent=body.to_agent,
+            reason=body.reason,
+            from_stage=body.from_stage,
+            to_stage=body.to_stage,
+            metadata=body.metadata,
+        )
+    except CapsuleNotFound:
+        raise HTTPException(status_code=404, detail="capsule not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/capsules/{capsule_id}/complete")
+async def capsule_complete(capsule_id: str, body: CapsuleComplete):
+    try:
+        return await capsules.complete(
+            capsule_id,
+            agent=body.agent,
+            metadata=body.metadata,
+        )
+    except CapsuleNotFound:
+        raise HTTPException(status_code=404, detail="capsule not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/agents/runtimes")
+async def agent_runtime_list(refresh: bool = False):
+    return agent_runtimes.snapshot(force=refresh)
+
 
 
 @app.get("/api/sessions")

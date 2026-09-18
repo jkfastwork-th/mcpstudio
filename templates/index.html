@@ -23,12 +23,12 @@
 <span class="status-beacon"></span>
 <div><strong>Live</strong><small>All ingress through Studio</small></div>
 </div>
-<nav aria-label="Primary navigation" class="primary-nav focus-nav">
-<a class="active" data-help="Quick view of what is active, connected, and needs attention." data-view="home" href="#home"><span>⌂</span>Home</a>
-<a data-help="Create and manage isolated project sessions. Each session keeps its project pinned." data-view="sessions" href="#sessions"><span>◎</span>Sessions</a>
-<a data-help="Register approved project folders and inspect ownership or write leases." data-view="workspaces" href="#workspaces"><span>▦</span>Workspaces</a>
-<a data-help="Start here to learn how to use MCP Studio from ChatGPT, then see setup and troubleshooting guidance." data-view="guide" href="#guide"><span>?</span>Guide</a>
-<a data-help="Health, alerts, tunnels, and advanced diagnostics for troubleshooting." data-view="system" href="#system"><span>⚙</span>System</a>
+<nav aria-label="Primary navigation" class="primary-nav focus-nav capsule-primary-nav">
+<a class="active" data-help="Live capsule routing, current agent lane, handoffs and system health." data-view="home" href="#home"><span>▣</span>Dashboard</a>
+<a data-help="Capsule work, session state and handoff history." data-view="sessions" href="#sessions"><span>◉</span>Capsules</a>
+<a data-help="Claude, Codex and Hermes runtime availability and lane status." data-view="agents" href="#agents"><span>◈</span>Agents</a>
+<a data-help="Approved project folders, managed sessions and workspace safety." data-view="workspaces" href="#workspaces"><span>▢</span>Workspaces</a>
+<a data-help="Appearance, system controls and advanced diagnostics." data-view="system" href="#system"><span>⚙</span>Settings</a>
 </nav>
 <div class="sidebar-footer">
 <div class="release-row"><span class="release-dot"></span><div><strong>v0.9.9</strong><small>Production isolated</small></div></div>
@@ -57,27 +57,60 @@
 </div>
 </header>
 <main class="dashboard focus-dashboard">
-<section class="view-page active" data-page="home">
-<div class="hero-status" id="heroStatus"></div>
-<div class="overview-grid focus-overview-grid" id="overviewCards"></div>
-<div class="focus-main-grid home-session-grid">
-<article class="panel-card focus-primary-card">
-<div class="panel-head">
-<div><span class="eyebrow">ACTIVE NOW</span><h2>Project sessions <span class="help-dot" data-help="Each project session stays pinned to one workspace and uses its own isolated Serena instance." tabindex="0">?</span></h2></div>
-<button class="button small" data-go-view="sessions">Manage sessions</button>
+<section class="view-page active capsule-dashboard-page" data-page="home">
+<div class="capsule-page-head">
+  <div>
+    <span class="eyebrow">LIVE ORCHESTRATION</span>
+    <h1>Capsule Lane Overview</h1>
+    <p>See where work entered, which agent owns it now, and where the capsule can move next.</p>
+  </div>
+  <div class="capsule-live-chip"><span></span>Live visual preview</div>
 </div>
-<div id="activeSessionsPanel"></div>
-</article>
+<div class="capsule-summary-grid" id="overviewCards"></div>
+<div class="capsule-dashboard-grid">
+  <article class="capsule-pipeline-card">
+    <div class="capsule-card-heading">
+      <div>
+        <span class="eyebrow">CAPSULE PIPELINE</span>
+        <h2>Agent lanes</h2>
+      </div>
+      <span class="capsule-preview-note">Stage 1–2 · live-derived preview</span>
+    </div>
+    <div class="capsule-pipeline-board" id="capsulePipeline"></div>
+  </article>
+  <aside class="capsule-state-card" id="heroStatus"></aside>
+</div>
+<div class="capsule-bottom-grid">
+  <article class="capsule-events-card">
+    <div class="capsule-card-heading compact">
+      <div><span class="eyebrow">RECENT FLOW</span><h3>Capsule events</h3></div>
+      <button class="text-button" data-go-view="sessions">View capsules</button>
+    </div>
+    <div id="activeSessionsPanel"></div>
+  </article>
+  <article class="capsule-legend-card">
+    <div class="capsule-card-heading compact"><div><span class="eyebrow">LANE LEGEND</span><h3>Routing colors</h3></div></div>
+    <div class="capsule-legend-list">
+      <div><span class="lane-swatch claude"></span><strong>Claude</strong><small>reasoning · analysis</small></div>
+      <div><span class="lane-swatch codex"></span><strong>Codex</strong><small>code · execution</small></div>
+      <div><span class="lane-swatch hermes"></span><strong>Hermes</strong><small>coordination · handoff</small></div>
+    </div>
+  </article>
 </div>
 </section>
 <section class="view-page" data-page="sessions">
 <div class="page-section-head focus-page-head">
-<div><span class="eyebrow">PROJECT SESSIONS</span><h2>Sessions</h2><p>Create one session per project. Project pinning and Serena isolation are automatic.</p></div>
+<div><span class="eyebrow">CAPSULES</span><h2>Capsules</h2><p>Inspect live capsule state, connector routes and the persisted handoff timeline.</p></div>
 <div class="toolbar">
 <button class="button secondary small" data-help="Show sessions that have been stopped but can still be resumed." id="managedHistoryToggle">Show stopped</button>
 <button class="button small" data-help="Create a new isolated Serena session for one registered workspace." id="newManagedSessionBtn">+ New session</button>
 </div>
 </div>
+<div class="capsule-ledger-summary" id="capsuleLedgerSummary"></div>
+<div class="capsule-ledger-list" id="capsuleLedgerPanel"></div>
+<details class="advanced-box session-advanced capsule-session-controls">
+<summary>Managed session controls</summary>
+<div class="advanced-content">
 <form class="managed-form focus-create-form" hidden="" id="managedSessionForm">
 <label><span>Session name</span><input id="managedSessionName" placeholder="Oriverse Dev" required=""/></label>
 <label><span>Project / workspace</span><select id="managedSessionWorkspace" required=""></select></label>
@@ -87,6 +120,8 @@
 <div class="mini-stats focus-mini-stats" id="managedSessionSummary"></div>
 <div class="panel-card flush" id="managedSessionsPanel"></div>
 <div class="panel-card session-history-panel" hidden="" id="managedSessionHistoryPanel"></div>
+</div>
+</details>
 <details class="advanced-box session-advanced">
 <summary>Client transport details</summary>
 <div class="advanced-content">
@@ -117,6 +152,16 @@
 <div id="leasesPanel"></div>
 </article>
 </div>
+</div>
+</section>
+<section class="view-page" data-page="agents">
+<div class="page-section-head focus-page-head capsule-section-head">
+  <div><span class="eyebrow">AGENT RUNTIMES</span><h2>Agents</h2><p>Claude, Codex and Hermes are the first-class lanes. Runtime detection and switching will bind here next.</p></div>
+</div>
+<div class="agent-runtime-grid" id="agentRuntimeGrid"></div>
+<div class="agent-runtime-footnote panel-card">
+  <strong>Next wiring step</strong>
+  <span>Detect installed runtimes, authentication and quota/rate-limit health without changing the capsule UI contract.</span>
 </div>
 </section>
 <section class="view-page" data-page="guide">
@@ -206,7 +251,7 @@
 </section>
 <section class="view-page" data-page="system">
 <div class="page-section-head focus-page-head">
-<div><span class="eyebrow">SYSTEM</span><h2>System health</h2><p>Use this page only when something needs investigation.</p></div>
+<div><span class="eyebrow">SETTINGS</span><h2>Settings &amp; diagnostics</h2><p>Daily controls stay simple. Operational details remain available below when you need them.</p></div>
 <div class="toolbar"><button class="button secondary small" data-help="Run an immediate health poll of registered MCP servers." id="pollBtn">Poll health</button><button class="button secondary small" data-help="Refresh Herdr agent and pane inventory." id="herdrBtn">Refresh Herdr</button></div>
 </div>
 <div class="system-essentials">
@@ -232,12 +277,12 @@
 </main>
 </div>
 </div>
-<nav aria-label="Mobile navigation" class="mobile-nav">
-<a class="active" data-view="home" href="#home"><span aria-hidden="true">⌂</span><small>Home</small></a>
-<a data-view="sessions" href="#sessions"><span aria-hidden="true">◎</span><small>Sessions</small></a>
-<a data-view="workspaces" href="#workspaces"><span aria-hidden="true">▦</span><small>Workspaces</small></a>
-<a data-view="guide" href="#guide"><span aria-hidden="true">?</span><small>Guide</small></a>
-<a data-view="system" href="#system"><span aria-hidden="true">⚙</span><small>System</small></a>
+<nav aria-label="Mobile navigation" class="mobile-nav capsule-mobile-nav">
+<a class="active" data-view="home" href="#home"><span>▣</span><small>Dashboard</small></a>
+<a data-view="sessions" href="#sessions"><span>◉</span><small>Capsules</small></a>
+<a data-view="agents" href="#agents"><span>◈</span><small>Agents</small></a>
+<a data-view="workspaces" href="#workspaces"><span>▢</span><small>Workspaces</small></a>
+<a data-view="system" href="#system"><span>⚙</span><small>Settings</small></a>
 </nav>
 <div class="help-tooltip" hidden="" id="helpTooltip" role="tooltip"></div>
 <dialog aria-labelledby="appDialogTitle" class="app-dialog" id="appDialog">
