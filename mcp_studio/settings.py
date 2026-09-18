@@ -104,6 +104,12 @@ class StudioConfig:
     managed_session_idle_stop_seconds: int = 0
     managed_session_history_limit: int = 100
 
+    # M6.2.3 Phase C production cutover. When enabled, the shared/base Serena
+    # instance is discovery/control-only. All Serena tools/call traffic must be
+    # routed through a pinned managed session (dedicated Serena process).
+    managed_session_cutover_enabled: bool = False
+    managed_session_cutover_block_legacy_tools: bool = True
+
     # M6.2.5 Computer Use / Web VNC MVP. Shared loopback VNC desktop bridged
     # through Studio's authenticated web app. No raw VNC port is exposed to
     # remote clients; the only path in is the Studio websocket route which
