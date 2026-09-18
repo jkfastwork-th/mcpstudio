@@ -80,16 +80,6 @@ class StudioConfig:
 
     # M6.2.3 Phase B managed sessions. Serena's active project is process-scoped,
     # so each durable managed session owns a dedicated loopback Serena process.
-    # Computer Use / Web VNC shared loopback desktop.
-    computer_use_enabled: bool = False
-    computer_vnc_host: str = "127.0.0.1"
-    computer_vnc_port: int = 5902
-    computer_websockify_host: str = "127.0.0.1"
-    computer_websockify_port: int = 6080
-    computer_cdp_port: int = 9222
-    computer_novnc_dir: str = "/usr/share/novnc"
-    computer_auth_token: str | None = None
-
     managed_session_enabled: bool = False
     managed_session_require_binding_for_tools: bool = True
     managed_session_workspace_roots: list[str] = field(default_factory=list)
@@ -114,11 +104,39 @@ class StudioConfig:
     managed_session_idle_stop_seconds: int = 0
     managed_session_history_limit: int = 100
 
+    # M6.2.5 Computer Use / Web VNC MVP. Shared loopback VNC desktop bridged
+    # through Studio's authenticated web app. No raw VNC port is exposed to
+    # remote clients; the only path in is the Studio websocket route which
+    # validates the managed session and optional bearer token.
+    computer_use_enabled: bool = False
+    computer_vnc_host: str = "127.0.0.1"
+    computer_vnc_port: int = 5902
+    computer_websockify_host: str = "127.0.0.1"
+    computer_websockify_port: int = 6080
+    computer_cdp_port: int = 9222
+    computer_novnc_dir: str = "/usr/share/novnc"
+    computer_auth_token: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.computer_use_enabled:
+            for label, host in (
+                ("computer_vnc_host", self.computer_vnc_host),
+                ("computer_websockify_host", self.computer_websockify_host),
+            ):
+                if not _is_loopback_strict(host):
+                    raise ValueError(f"studio.{label} must be loopback only (got {host!r})")
+            if not (1024 <= self.computer_vnc_port <= 65535):
+                raise ValueError("studio.computer_vnc_port must be between 1024 and 65535")
+            if not (1024 <= self.computer_websockify_port <= 65535):
+                raise ValueError("studio.computer_websockify_port must be between 1024 and 65535")
+            if not (1024 <= self.computer_cdp_port <= 65535):
+                raise ValueError("studio.computer_cdp_port must be between 1024 and 65535")
+            if self.computer_auth_token and len(self.computer_auth_token) < 8:
+                raise ValueError("studio.computer_auth_token must be at least 8 characters when set")
+
     # M6.2.3 Phase C production cutover. When enabled, the shared/base Serena
     # instance is discovery/control-only. All Serena tools/call traffic must be
     # routed through a pinned managed session (dedicated Serena process).
-    managed_session_cutover_enabled: bool = False
-    managed_session_cutover_block_legacy_tools: bool = True
 
     # M5.3.1 OAuth facade for ChatGPT custom MCP apps. The public client uses
     # Authorization Code + PKCE S256 and rotating refresh tokens. Client
@@ -162,26 +180,20 @@ class StudioConfig:
     slo_worker_saturation_warn_percent: float = 85.0
     slo_reconnect_rate_warn_per_100_requests: float = 5.0
     slo_oauth_refresh_failures_max: int = 0
-    slo_orphan_events_max: int = 0
-
     def __post_init__(self) -> None:
-        if not self.computer_use_enabled:
-            return
-        for label, host in (
-            ("computer_vnc_host", self.computer_vnc_host),
-            ("computer_websockify_host", self.computer_websockify_host),
-        ):
-            if not _is_loopback_strict(host):
-                raise ValueError(f"studio.{label} must be loopback only (got {host!r})")
-        if not (1024 <= self.computer_vnc_port <= 65535):
-            raise ValueError("studio.computer_vnc_port must be between 1024 and 65535")
-        if not (1024 <= self.computer_websockify_port <= 65535):
-            raise ValueError("studio.computer_websockify_port must be between 1024 and 65535")
-        if not (1024 <= self.computer_cdp_port <= 65535):
-            raise ValueError("studio.computer_cdp_port must be between 1024 and 65535")
-        if self.computer_auth_token and len(self.computer_auth_token) < 8:
-            raise ValueError("studio.computer_auth_token must be at least 8 characters when set")
-
+        if self.computer_use_enabled:
+            if (self.computer_vnc_host or "").strip().lower() not in {"127.0.0.1", "::1"}:
+                raise ValueError(f"studio.computer_vnc_host must be loopback only (got {self.computer_vnc_host!r})")
+            if (self.computer_websockify_host or "").strip().lower() not in {"127.0.0.1", "::1"}:
+                raise ValueError(f"studio.computer_websockify_host must be loopback only (got {self.computer_websockify_host!r})")
+            if not (1024 <= self.computer_vnc_port <= 65535):
+                raise ValueError("studio.computer_vnc_port must be between 1024 and 65535")
+            if not (1024 <= self.computer_websockify_port <= 65535):
+                raise ValueError("studio.computer_websockify_port must be between 1024 and 65535")
+            if not (1024 <= self.computer_cdp_port <= 65535):
+                raise ValueError("studio.computer_cdp_port must be between 1024 and 65535")
+            if self.computer_auth_token and len(self.computer_auth_token) < 8:
+                raise ValueError("studio.computer_auth_token must be at least 8 characters when set")
 
 
 @dataclass(slots=True)
@@ -225,10 +237,14 @@ def _dataclass_kwargs(cls: type, values: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in values.items() if k in allowed}
 
 
-
 def _is_loopback_strict(host: str) -> bool:
-    """Accept only explicit loopback addresses for Computer Use backends."""
-    return (host or "").strip().lower() in {"127.0.0.1", "::1"}
+    """Strict loopback-only check used by load_settings validation.
+
+    Only real loopback addresses are accepted; 'localhost' nicknames are
+    rejected in config validation so the host/port contract is unambiguous.
+    """
+    h = (host or "").strip().lower()
+    return h in {"127.0.0.1", "::1"}
 
 
 def load_settings(path: str | Path) -> Settings:
@@ -305,6 +321,21 @@ def load_settings(path: str | Path) -> Settings:
             raise ValueError("managed_session_cutover_enabled=true requires managed_session_require_binding_for_tools=true")
         if not studio.gateway_session_enabled:
             raise ValueError("managed_session_cutover_enabled=true requires gateway_session_enabled=true")
+    if studio.computer_use_enabled:
+        for label, host in (
+            ("computer_vnc_host", studio.computer_vnc_host),
+            ("computer_websockify_host", studio.computer_websockify_host),
+        ):
+            if not _is_loopback_strict(host):
+                raise ValueError(f"studio.{label} must be loopback only (got {host!r})")
+        if not (1024 <= studio.computer_vnc_port <= 65535):
+            raise ValueError("studio.computer_vnc_port must be between 1024 and 65535")
+        if not (1024 <= studio.computer_websockify_port <= 65535):
+            raise ValueError("studio.computer_websockify_port must be between 1024 and 65535")
+        if not (1024 <= studio.computer_cdp_port <= 65535):
+            raise ValueError("studio.computer_cdp_port must be between 1024 and 65535")
+        if studio.computer_auth_token and len(studio.computer_auth_token) < 8:
+            raise ValueError("studio.computer_auth_token must be at least 8 characters when set")
     if studio.oauth_enabled:
         if not studio.oauth_issuer.startswith("https://"):
             raise ValueError("studio.oauth_issuer must be an https:// URL when oauth_enabled=true")

@@ -188,7 +188,51 @@ html[data-theme="dark"] .app-dialog::backdrop{background:rgba(0,0,0,.62)}html[da
 @media(max-width:1100px){.workspace-management-grid{grid-template-columns:1fr}}
 @media(max-width:900px){.theme-button>span:last-child{display:none}.theme-button{padding:0 10px}.workspace-registry-rich{grid-template-columns:1fr}.workspace-registry-meta{justify-items:start}}
 @media(max-width:760px){.theme-control{order:2}.font-size-control{order:3}.app-dialog{width:min(520px,calc(100vw - 20px))}.dialog-card{padding:22px 18px}}
-/* Workspace management needs horizontal room for ownership columns. */
+.computer-view{display:block}
+.computer-head{display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:18px}
+.computer-head-text{flex:1;min-width:240px}
+.computer-head-text h2{margin:3px 0 0;font-size:calc(18px * var(--font-scale))}
+.computer-head-text p{margin:5px 0 0;color:var(--muted);font-size:calc(9px * var(--font-scale))}
+.computer-status-card{flex:0 0 auto;min-width:200px;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:var(--surface);text-align:right;transition:border-color .15s,background .15s}
+.computer-status-card>strong{display:block;font-size:calc(11px * var(--font-scale));color:var(--text)}
+.computer-status-card>small{display:block;margin-top:3px;color:var(--muted);font-size:calc(8px * var(--font-scale))}
+.computer-status-card[data-state="ready"]{border-color:rgba(90,214,141,.35)}
+.computer-status-card[data-state="ready"]>strong{color:#5ad68d}
+.computer-status-card[data-state="warning"]{border-color:rgba(241,189,97,.35)}
+.computer-status-card[data-state="warning"]>strong{color:#f1bd61}
+.computer-status-card[data-state="down"]{border-color:rgba(255,116,124,.35)}
+.computer-status-card[data-state="down"]>strong{color:#ff747c}
+
+.computer-toolbar{display:flex;flex-wrap:wrap;align-items:flex-end;gap:14px;margin-bottom:14px}
+.computer-field{display:flex;flex-direction:column;gap:4px;font-size:calc(8px * var(--font-scale));color:var(--muted);letter-spacing:.08em;text-transform:uppercase;font-weight:600}
+.computer-field>span{display:flex;align-items:center;gap:6px}
+.computer-field>span small{font-weight:400;text-transform:none;letter-spacing:0;color:var(--muted)}
+.computer-field input,.computer-field select{min-height:34px;padding:7px 9px;border:1px solid var(--border-strong);border-radius:8px;background:var(--surface);color:var(--text);font:inherit;font-size:calc(9px * var(--font-scale));outline:none}
+.computer-field input:focus,.computer-field select:focus{border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-soft)}
+.computer-field input[type="password"]{width:200px}
+.computer-actions{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto;align-items:center}
+
+.computer-message{margin:0 0 12px;padding:10px 14px;border-radius:8px;font-size:calc(9px * var(--font-scale));line-height:1.5}
+.computer-message.good{color:#74dfa0;background:var(--green-soft)}
+.computer-message.warning{color:#dcb96f;background:var(--amber-soft)}
+.computer-message.error{color:#ff8990;background:var(--red-soft)}
+.computer-message[data-kind="good"]{color:#74dfa0;background:var(--green-soft)}
+.computer-message[data-kind="warning"]{color:#dcb96f;background:var(--amber-soft)}
+.computer-message[data-kind="error"]{color:#ff8990;background:var(--red-soft)}
+
+.computer-viewer-shell{margin:0 -24px 24px;background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;position:relative}
+.computer-viewer-shell iframe{width:100%;height:65vh;border:0;display:block;min-height:360px}
+.computer-viewer-shell.fullscreen{position:fixed;left:0;right:0;top:0;bottom:0;z-index:9000;background:#000;margin:0}
+.computer-viewer-shell.fullscreen iframe{height:100vh!important}
+
+@media(max-width:760px){
+  .computer-head{flex-direction:column}
+  .computer-status-card{text-align:left}
+  .computer-field input[type="password"]{width:100%}
+  .computer-actions{margin-left:0;width:100%}
+  .computer-viewer-shell{margin:0 0 24px}
+  .computer-viewer-shell iframe{height:50vh}
+}
 .workspace-management-grid{grid-template-columns:1fr}.workspace-side-stack{grid-template-columns:minmax(0,1.8fr) minmax(300px,.7fr);align-items:start}.workspace-side-stack>.panel-card{min-width:0}
 @media(max-width:1100px){.workspace-side-stack{grid-template-columns:1fr}}
 
@@ -790,8 +834,6 @@ html,body{max-width:100%;overflow-x:hidden}
 [data-theme="dark"] .capsule-context-meter{background:#111c2f;border-color:#2a3954}[data-theme="dark"] .capsule-context-head strong{color:#e8edf6}[data-theme="dark"] .capsule-context-head small,[data-theme="dark"] .capsule-context-foot{color:#aab6cb}[data-theme="dark"] .capsule-context-track,[data-theme="dark"] .lane-context-mini{background:#2a3954}
 @media(max-width:760px){.capsule-context-head{grid-template-columns:auto 1fr}.capsule-context-head small{grid-column:1/-1;text-align:left}.lane-context-mini{margin-left:0}}
 
-
-/* MCP_STUDIO_COMPUTER_USE_MVP */
 
 /* MCP_STUDIO_COMPUTER_USE_MVP */
 .computer-view{gap:18px}

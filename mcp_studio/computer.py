@@ -5,7 +5,7 @@ import socket
 from pathlib import Path
 from typing import Any
 
-from mcp_studio.settings import StudioConfig
+from mcp_studio.settings import StudioConfig, _is_loopback_strict
 from mcp_studio.db import Database
 
 
@@ -24,11 +24,6 @@ def _is_loopback(host: str) -> bool:
         family in {socket.AF_INET, socket.AF_INET6} and addr in {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
         for family, _, _, _, addr in addr_info
     )
-
-
-def _is_loopback_strict(host: str) -> bool:
-    """Strict helper exported for tests/config validation."""
-    return (host or "").strip().lower() in {"127.0.0.1", "::1"}
 
 
 def _tcp_probe(host: str, port: int, timeout: float = 0.5) -> bool:

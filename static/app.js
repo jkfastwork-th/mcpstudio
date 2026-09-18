@@ -312,11 +312,11 @@ async function getJson(url, options){ const r = await fetch(url, options); if(!r
 async function sendJson(url, body){ return getJson(url,{method:'POST',headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)}); }
 
 const viewMeta = {
-  computer:['Computer','Computer','Shared browser desktop for OAuth and human-in-the-loop actions.'],
   home:['Home','Production','Only what matters right now.'],
   sessions:['Sessions','Sessions','Create one session per project. Isolation is automatic.'],
   workspaces:['Workspaces','Workspaces','Manage approved projects, ownership and write safety.'],
   guide:['Guide','Guide','Daily use first, then setup and troubleshooting.'],
+  computer:['Computer','Computer','Shared browser desktop for OAuth and human-in-the-loop actions.'],
   system:['System','System health','Open diagnostics only when something needs investigation.']
 };
 
@@ -835,6 +835,7 @@ loadLanguage();
 setView(currentView,false);
 load();
 setInterval(load,5000);
+
 
 /* MCP_STUDIO_COMPUTER_USE_MVP */
 const computerUiState={descriptor:null};
