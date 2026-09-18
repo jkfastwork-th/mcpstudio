@@ -4,6 +4,7 @@ import pytest
 
 from mcp_studio.capsules import CapsuleNotFound, CapsuleService
 from mcp_studio.agent_runtimes import AgentRuntimeInventory
+from mcp_studio.context_fit import ContextProfile, ModelCapability, evaluate_context_fit
 
 
 class FakeDB:
@@ -37,6 +38,7 @@ async def test_capsule_handoff_uses_capsule_id_as_visual_connector():
         source_pane="w1:p1",
         agent="claude",
         capsule_id="C-204",
+        metadata={"context_profile": {"source_tokens": 120000, "retained_tokens": 120000}},
     )
     assert created["capsule_id"] == "C-204"
     assert created["current_agent"] == "claude"
@@ -47,6 +49,18 @@ async def test_capsule_handoff_uses_capsule_id_as_visual_connector():
         from_agent="claude",
         to_agent="hermes",
         reason="quota_exhausted",
+        metadata={
+            "model_capability": {
+                "provider": "nous",
+                "model_id": "upstage/solar-pro4:free",
+                "context_window": 524288,
+                "max_output_tokens": 32768,
+                "system_prompt_tokens": 6000,
+                "tool_schema_tokens": 8000,
+                "safety_reserve_tokens": 16000,
+                "last_verified_at": "2026-09-18T09:30:00Z",
+            }
+        },
     )
 
     assert handed["current_agent"] == "hermes"
@@ -54,6 +68,14 @@ async def test_capsule_handoff_uses_capsule_id_as_visual_connector():
     assert handed["last_handoff"]["connector_id"] == "C-204"
     assert handed["last_handoff"]["handoff_id"].startswith("H-")
     assert handed["last_handoff"]["reason"] == "quota_exhausted"
+    assert handed["capsule_type"] == "full"
+    assert handed["context_profile"]["retained_percent"] == 100.0
+    assert handed["last_handoff"]["context_fit"]["fit"] is True
+    assert handed["last_handoff"]["a2a"]["protocol"] == "a2a"
+    assert handed["last_handoff"]["a2a"]["task_id"].startswith("A2A-")
+    assert handed["last_handoff"]["a2a"]["context_id"] == "C-204"
+    assert handed["last_handoff"]["a2a"]["task"]["kind"] == "task"
+    assert handed["last_handoff"]["a2a"]["task"]["status"]["state"] == "submitted"
 
     overview = await service.overview()
     assert overview["summary"] == {"active": 1, "total": 1, "handoffs": 1}
@@ -72,6 +94,78 @@ async def test_capsule_missing_fails_closed():
             from_agent="claude",
             to_agent="hermes",
         )
+
+
+def test_context_profile_types_and_fit_math():
+    full = ContextProfile(source_tokens=100000, retained_tokens=100000)
+    compact = ContextProfile(source_tokens=100000, retained_tokens=62000)
+    minimal = ContextProfile(source_tokens=100000, retained_tokens=18000)
+    assert full.capsule_type == "full" and full.retained_percent == 100.0
+    assert compact.capsule_type == "compact" and compact.retained_percent == 62.0
+    assert minimal.capsule_type == "minimal" and minimal.retained_percent == 18.0
+
+    cap = ModelCapability(
+        provider="test",
+        model_id="model-a",
+        context_window=100000,
+        max_output_tokens=10000,
+        system_prompt_tokens=5000,
+        tool_schema_tokens=5000,
+        safety_reserve_tokens=10000,
+    )
+    safe = evaluate_context_fit(compact, cap)
+    blocked = evaluate_context_fit(ContextProfile(source_tokens=120000, retained_tokens=90000), cap)
+    assert safe["fit"] is True
+    assert safe["usable_context_tokens"] == 70000
+    assert blocked["fit"] is False
+    assert blocked["fit_state"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_handoff_fails_closed_when_context_exceeds_target_model():
+    db = FakeDB()
+    service = CapsuleService(db)
+    await service.create(
+        title="Oversized capsule",
+        agent="claude",
+        capsule_id="C-BIG",
+        metadata={"context_profile": {"source_tokens": 200000, "retained_tokens": 150000}},
+    )
+    with pytest.raises(ValueError, match="capsule_context_too_large"):
+        await service.handoff(
+            "C-BIG",
+            from_agent="claude",
+            to_agent="hermes",
+            metadata={
+                "model_capability": {
+                    "provider": "nous",
+                    "model_id": "small-target",
+                    "context_window": 100000,
+                    "max_output_tokens": 10000,
+                    "system_prompt_tokens": 5000,
+                    "tool_schema_tokens": 5000,
+                    "safety_reserve_tokens": 10000,
+                }
+            },
+        )
+    current = await service.get("C-BIG")
+    assert current["current_agent"] == "claude"
+    assert current["handoffs"] == []
+    assert len(current["blocked_handoffs"]) == 1
+    assert current["blocked_handoffs"][0]["reason"] == "capsule_context_too_large"
+    assert current["blocked_handoffs"][0]["a2a"]["task"]["status"]["state"] == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_handoff_requires_verified_context_profile_and_capability():
+    db = FakeDB()
+    service = CapsuleService(db)
+    await service.create(title="No context profile", agent="claude", capsule_id="C-NOPROFILE")
+    with pytest.raises(ValueError, match="capsule_context_profile_required"):
+        await service.handoff("C-NOPROFILE", from_agent="claude", to_agent="codex")
+    current = await service.get("C-NOPROFILE")
+    assert current["current_agent"] == "claude"
+    assert current["blocked_handoffs"][0]["reason"] == "capsule_context_profile_required"
 
 
 class FakeHerdr:

@@ -365,7 +365,33 @@ function capsuleStageNodes(activeStage=''){
   return stages.map(([key,label],i)=>`<div class="capsule-stage ${key===active?'active':''}"><span class="stage-node">${i+1}</span><small>${label}</small></div>`).join('');
 }
 
-function renderCapsuleLane({agent,sub,colorClass,active=false,activeStage='',capsuleId='',muted=false,statusText=''}){
+function capsuleContextProfile(capsule){
+  const raw=capsule?.context_profile||capsule?.metadata?.context_profile||{};
+  const source=Number(raw.source_tokens||0);
+  const retained=Number(raw.retained_tokens||0);
+  let pct=Number(raw.retained_percent);
+  if(!Number.isFinite(pct) && source>0) pct=(retained/source)*100;
+  pct=Math.max(0,Math.min(100,Number.isFinite(pct)?pct:0));
+  let type=String(capsule?.capsule_type||raw.capsule_type||'').toLowerCase();
+  if(!['full','compact','minimal'].includes(type)) type=pct===100?'full':pct>=40?'compact':pct>0?'minimal':'unknown';
+  return {source,retained,pct,type};
+}
+
+function renderCapsuleContextBar(capsule,{compact=false}={}){
+  const profile=capsuleContextProfile(capsule);
+  if(profile.type==='unknown') return compact?'':'<div class="capsule-context-empty">Context profile pending</div>';
+  const fit=capsule?.last_context_fit||capsule?.last_handoff?.context_fit||null;
+  const fitState=fit?.fit_state||'';
+  const fitText=fit?`${fit.fit?'FIT':'BLOCKED'} · ${esc(fit.utilization_percent??'—')}% of target usable context`:'Fit not evaluated';
+  const opacity=(0.35+(profile.pct/100)*0.65).toFixed(2);
+  return `<div class="capsule-context-meter ${esc(profile.type)} ${compact?'compact':''}">
+    <div class="capsule-context-head"><span class="capsule-type-badge ${esc(profile.type)}">${esc(profile.type.toUpperCase())}</span><strong>${esc(profile.pct.toFixed(1))}% retained</strong><small>${esc(fitText)}</small></div>
+    <div class="capsule-context-track" aria-label="${esc(profile.type)} capsule retaining ${esc(profile.pct.toFixed(1))} percent of source context"><i style="width:${profile.pct}%;opacity:${opacity}"></i></div>
+    ${compact?'':`<div class="capsule-context-foot"><span>${esc(profile.retained.toLocaleString())} / ${esc(profile.source.toLocaleString())} tokens</span>${fitState?`<em class="fit-${esc(fitState)}">${esc(fitState.toUpperCase())}</em>`:''}</div>`}
+  </div>`;
+}
+
+function renderCapsuleLane({agent,sub,colorClass,active=false,activeStage='',capsuleId='',muted=false,statusText='',capsule=null}){
   const state=statusText||(active?'Running':muted?'Standby':'Ready');
   return `<div class="capsule-lane ${colorClass} ${active?'lane-active':''} ${muted?'lane-muted':''}">
     <div class="lane-agent">
@@ -373,7 +399,7 @@ function renderCapsuleLane({agent,sub,colorClass,active=false,activeStage='',cap
       <div><strong>${esc(agent)}</strong><small>${esc(sub||'')}</small></div>
     </div>
     <div class="lane-track">${capsuleStageNodes(activeStage)}</div>
-    <div class="lane-status"><span>${esc(state)}</span>${capsuleId?`<b>${esc(capsuleId)}</b>`:''}</div>
+    <div class="lane-status"><span>${esc(state)}</span>${capsuleId?`<b>${esc(capsuleId)}</b>`:''}${capsuleId&&capsule?`<div class="lane-context-mini ${esc(capsuleContextProfile(capsule).type)}"><i style="width:${capsuleContextProfile(capsule).pct}%"></i></div>`:''}</div>
   </div>`;
 }
 
@@ -491,6 +517,7 @@ function renderOverview(data){
   const nextFallback=currentAgent==='claude'?'Codex / Hermes':currentAgent==='codex'?'Hermes':'Codex';
   const stageLabel=String(currentStage||'').replaceAll('_',' ');
   hero.innerHTML=`<div class="capsule-card-heading compact"><div><span class="eyebrow">CAPSULE STATE</span><h3>${esc(capsuleId)}</h3></div><span class="state-live-dot">${liveCapsule?.status==='completed'?'✓ Completed':'● Live'}</span></div>
+    ${hasLedger?renderCapsuleContextBar(liveCapsule):''}
     <div class="capsule-state-list">
       <div><span>Task</span><strong>${esc(hasLedger?liveCapsule.title:(activeSession?.name||'Workspace capsule preview'))}</strong></div>
       <div><span>Workspace</span><strong>${esc(workspace)}</strong></div>
@@ -498,6 +525,7 @@ function renderOverview(data){
       <div><span>Current stage</span><strong>${esc(stageLabel)}</strong></div>
       <div><span>Source</span><strong>${esc(sourcePane)}</strong></div>
       <div><span>Last handoff</span><strong>${esc(lastText)}</strong></div>
+      ${lastHandoff?.a2a?.task_id?`<div><span>A2A task</span><strong>${esc(lastHandoff.a2a.task_id)} · ${esc(lastHandoff.a2a.task?.status?.state||'submitted')}</strong></div>`:''}
       <div><span>Next fallback</span><strong>${esc(nextFallback)}</strong></div>
     </div>
     <button class="button capsule-detail-button" data-go-view="sessions">View capsule details →</button>`;
@@ -541,7 +569,7 @@ function renderCapsuleLedger(data){
     const route=last?`${last.from_agent} → ${last.to_agent}`:`${current} · no handoff yet`;
     const handoffRows=handoffs.length?handoffs.slice().reverse().map(h=>`<div class="capsule-trace-row">
       <span class="trace-connector">${esc(h.connector_id||capsule.capsule_id)}</span>
-      <div><strong>${esc(h.from_agent)} → ${esc(h.to_agent)}</strong><small>${esc(h.reason||'manual')} · ${esc(when(h.created_at))}</small></div>
+      <div><strong>${esc(h.from_agent)} → ${esc(h.to_agent)}</strong><small>${esc(h.reason||'manual')} · ${esc(when(h.created_at))}${h.a2a?.task_id?` · A2A ${esc(h.a2a.task_id)}`:''}</small></div>
       <code>${esc(h.handoff_id||'—')}</code>
     </div>`).join(''):'<div class="empty compact">No handoff recorded.</div>';
     const timeline=events.length?events.map(e=>{
@@ -549,6 +577,7 @@ function renderCapsuleLedger(data){
       let text=e.message||e.kind;
       if(e.kind==='capsule.stage') text=`Stage → ${d.stage||'unknown'}`;
       if(e.kind==='capsule.handoff') text=`${d.from_agent||'?'} → ${d.to_agent||'?'} · ${d.reason||'handoff'}`;
+      if(e.kind==='capsule.handoff_blocked') text=`Blocked ${d.from_agent||'?'} → ${d.to_agent||'?'} · ${d.reason||'context fit'}`;
       if(e.kind==='capsule.completed') text='Capsule completed';
       return `<div class="capsule-timeline-row"><span class="timeline-dot ${esc(e.kind.replace('capsule.',''))}"></span><div><strong>${esc(text)}</strong><small>${esc(when(e.created_at))} · ${esc(e.kind)}</small></div></div>`;
     }).join(''):'<div class="empty compact">No events recorded.</div>';
@@ -560,6 +589,7 @@ function renderCapsuleLedger(data){
         <span class="capsule-ledger-status ${esc(capsule.status||'active')}">${esc(capsule.status||'active')}</span>
       </summary>
       <div class="capsule-ledger-body">
+        ${renderCapsuleContextBar(capsule,{compact:true})}
         <div class="capsule-ledger-facts">
           <div><span>Current lane</span><strong class="state-${esc(current)}"><i></i>${esc(current)}</strong></div>
           <div><span>Source pane</span><strong>${esc(capsule.source_pane||'—')}</strong></div>
