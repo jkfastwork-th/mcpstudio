@@ -2505,6 +2505,22 @@ class Database:
         await self._run(op)
         return await self.get_managed_session(session_id)
 
+    async def update_managed_session_metadata(
+        self, session_id: str, metadata: dict[str, Any]
+    ) -> dict[str, Any]:
+        now = _now()
+        def op() -> None:
+            with self._connect() as db:
+                row = db.execute("SELECT id FROM managed_sessions WHERE id=?", (session_id,)).fetchone()
+                if row is None:
+                    raise KeyError(session_id)
+                db.execute(
+                    "UPDATE managed_sessions SET metadata_json=?, updated_at=? WHERE id=?",
+                    (json.dumps(metadata or {}, ensure_ascii=False), now, session_id),
+                )
+        await self._run(op)
+        return await self.get_managed_session(session_id)
+
     async def bind_gateway_managed_session(
         self, gateway_id: str, *, managed_session_id: str | None, upstream_url: str,
         upstream_session_id: str | None,

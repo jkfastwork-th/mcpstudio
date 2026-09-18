@@ -42,3 +42,13 @@ def test_novnc_websocket_path_resolves_to_app_root() -> None:
     websocket_path = "/api/computer/vnc/ws/ms-test"
     resolved = urljoin(viewer, "../.." + websocket_path)
     assert resolved == "https://studio.example/api/computer/vnc/ws/ms-test"
+
+
+def test_computer_ui_surfaces_permissions_and_isolated_transport() -> None:
+    js = (ROOT / "static" / "app.js").read_text()
+    css = (ROOT / "static" / "styles.css").read_text()
+    assert "computer-session-permissions" in js
+    assert "permissionBadge('write','W')" in js
+    assert "status.runtime_mode==='session-isolated'?status.transport_ready" in js
+    assert ".computer-permission-badge.allowed" in css
+    assert ".computer-permission-badge.blocked" in css

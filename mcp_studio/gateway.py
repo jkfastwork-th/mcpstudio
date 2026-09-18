@@ -6,6 +6,7 @@ import os
 import secrets
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -17,6 +18,7 @@ from .db import Database
 from .settings import Settings
 from .oauth import OAuthManager
 from .managed_sessions import ManagedSessionManager, ManagedSessionError, ManagedSessionConflict, WorkspaceNotAllowed
+from .tool_permissions import decide_tool_call
 
 
 CONTROL_TOOL_NAMES = (
@@ -276,6 +278,24 @@ class GatewaySessionManager:
                     "type": "object",
                     "properties": {"session": {"type": "string"}, "name": {"type": "string"}},
                     "required": ["session", "name"], "additionalProperties": False,
+                },
+            },
+            {
+                "name": "mcpstudio_set_permissions",
+                "description": "Set READ/WRITE/EXECUTE/DESTRUCTIVE permissions for one managed session. Omitted fields keep their current value.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session": {"type": "string"},
+                        "read": {"type": "boolean"},
+                        "write": {"type": "boolean"},
+                        "execute": {"type": "boolean"},
+                        "destructive": {"type": "boolean"},
+                        "scope": {"type": "string", "enum": ["workspace", "unrestricted"]},
+                        "fail_closed_unknown": {"type": "boolean"},
+                    },
+                    "required": ["session"],
+                    "additionalProperties": False,
                 },
             },
             {
@@ -589,6 +609,15 @@ class GatewaySessionManager:
             return {"session": await self.managed_sessions.rename_session(
                 target["id"], name=str(args.get("name") or ""), actor="chatgpt/mcp"
             )}
+        if name == "mcpstudio_set_permissions":
+            target = await self._resolve_managed_session(str(args.get("session") or ""))
+            changes = {
+                key: args[key]
+                for key in ("read", "write", "execute", "destructive", "scope", "fail_closed_unknown")
+                if key in args
+            }
+            session = await self.managed_sessions.update_permissions(target["id"], changes, actor="chatgpt/mcp")
+            return {"session": session, "permissions": await self.managed_sessions.permissions(target["id"])}
         if name == "mcpstudio_session_history":
             target = await self._resolve_managed_session(str(args.get("session") or ""))
             return await self.managed_sessions.history(target["id"])
@@ -908,14 +937,73 @@ class GatewaySessionManager:
                     },
                     is_error=True,
                 )
+            managed_session: dict[str, Any] | None = None
             if session.get("managed_session_id") and tool_name in set(self.settings.studio.managed_session_blocked_tools):
-                return local_tool_response(
-                    {
-                        "error": "SESSION_PROJECT_PINNED",
-                        "message": f"Tool {tool_name} is blocked because this transport is pinned to managed session {session['managed_session_id']}.",
-                    },
-                    is_error=True,
-                )
+                if tool_name == "activate_project":
+                    try:
+                        managed_session = await self.db.get_managed_session(str(session["managed_session_id"]))
+                    except KeyError:
+                        return local_tool_response(
+                            {
+                                "error": "TOOL_PERMISSION_SESSION_MISSING",
+                                "message": "Pinned managed session record is missing.",
+                            },
+                            is_error=True,
+                        )
+                    requested_project = str(tool_args.get("project") or "").strip()
+                    pinned_path = str(managed_session.get("project_path") or "").strip()
+                    pinned_key = str(managed_session.get("workspace_key") or "").strip()
+                    same_path = False
+                    if requested_project and pinned_path:
+                        try:
+                            requested_path = Path(requested_project).expanduser()
+                            if requested_path.is_absolute():
+                                same_path = requested_path.resolve(strict=False) == Path(pinned_path).expanduser().resolve(strict=False)
+                        except OSError:
+                            same_path = False
+                    if not requested_project or not (same_path or requested_project == pinned_key):
+                        return local_tool_response(
+                            {
+                                "error": "SESSION_PROJECT_PINNED",
+                                "message": f"activate_project may only re-activate pinned workspace {pinned_key!r}.",
+                                "workspace_key": pinned_key,
+                                "project_path": pinned_path,
+                            },
+                            is_error=True,
+                        )
+                else:
+                    return local_tool_response(
+                        {
+                            "error": "SESSION_PROJECT_PINNED",
+                            "message": f"Tool {tool_name} is blocked because this transport is pinned to managed session {session['managed_session_id']}.",
+                        },
+                        is_error=True,
+                    )
+            if session.get("managed_session_id") and self.settings.studio.managed_session_tool_permissions_enabled:
+                try:
+                    if managed_session is None:
+                        managed_session = await self.db.get_managed_session(str(session["managed_session_id"]))
+                except KeyError:
+                    return local_tool_response(
+                        {
+                            "error": "TOOL_PERMISSION_SESSION_MISSING",
+                            "message": "Permission policy cannot be evaluated because the managed session record is missing.",
+                        },
+                        is_error=True,
+                    )
+                decision = decide_tool_call(self.settings.studio, managed_session, tool_name, tool_args)
+                if not decision.allowed:
+                    return local_tool_response(
+                        {
+                            "error": decision.code,
+                            "message": decision.message,
+                            "tool": tool_name,
+                            "permission_class": decision.category,
+                            "workspace_key": managed_session.get("workspace_key"),
+                            "policy": decision.policy,
+                        },
+                        is_error=True,
+                    )
 
         target_url = session.get("upstream_url") or server.url
         if (

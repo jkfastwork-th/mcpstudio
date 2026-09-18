@@ -99,6 +99,15 @@ class StudioConfig:
     managed_session_path: str = "/home/alfred/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
     managed_session_log_dir: str = "./data/managed-sessions"
     managed_session_blocked_tools: list[str] = field(default_factory=lambda: ["activate_project"])
+    # Per-managed-session tool permission boundary. Disabled by default for
+    # backward compatibility; production can opt in and override per session via metadata.
+    managed_session_tool_permissions_enabled: bool = False
+    managed_session_default_read_allowed: bool = True
+    managed_session_default_write_allowed: bool = True
+    managed_session_default_execute_allowed: bool = True
+    managed_session_default_destructive_allowed: bool = False
+    managed_session_tool_permissions_fail_closed: bool = True
+    managed_session_tool_scope_enforced: bool = True
     # M6.2.4 lifecycle polish. Zero keeps idle auto-stop disabled by default;
     # operators can opt in once their workload pattern is understood.
     managed_session_idle_stop_seconds: int = 0
@@ -124,6 +133,14 @@ class StudioConfig:
     computer_cdp_port: int = 9222
     computer_novnc_dir: str = "/usr/share/novnc"
     computer_auth_token: str | None = None
+    # Per-managed-session Computer Use. Existing VNC/CDP ports become base ports.
+    computer_session_isolation_enabled: bool = False
+    computer_runtime_dir: str = "./data/computers"
+    computer_vnc_display_base: int = 2
+    computer_vnc_password_file: str = "~/.vnc/passwd"
+    computer_chrome_binary: str = ""
+    computer_geometry: str = "1440x900"
+    computer_adopt_workspace: str | None = None
 
     def __post_init__(self) -> None:
         if self.computer_use_enabled:
@@ -141,6 +158,16 @@ class StudioConfig:
                 raise ValueError("studio.computer_cdp_port must be between 1024 and 65535")
             if self.computer_auth_token and len(self.computer_auth_token) < 8:
                 raise ValueError("studio.computer_auth_token must be at least 8 characters when set")
+            if self.computer_session_isolation_enabled:
+                if not (1 <= int(self.computer_vnc_display_base) <= 99):
+                    raise ValueError("studio.computer_vnc_display_base must be between 1 and 99")
+                if not str(self.computer_runtime_dir or "").strip():
+                    raise ValueError("studio.computer_runtime_dir is required")
+                if not str(self.computer_vnc_password_file or "").strip():
+                    raise ValueError("studio.computer_vnc_password_file is required")
+                geometry = str(self.computer_geometry or "").lower().split("x", 1)
+                if len(geometry) != 2 or not all(part.isdigit() and int(part) > 0 for part in geometry):
+                    raise ValueError("studio.computer_geometry must look like 1440x900")
 
     # M6.2.3 Phase C production cutover. When enabled, the shared/base Serena
     # instance is discovery/control-only. All Serena tools/call traffic must be
@@ -202,6 +229,16 @@ class StudioConfig:
                 raise ValueError("studio.computer_cdp_port must be between 1024 and 65535")
             if self.computer_auth_token and len(self.computer_auth_token) < 8:
                 raise ValueError("studio.computer_auth_token must be at least 8 characters when set")
+            if self.computer_session_isolation_enabled:
+                if not (1 <= int(self.computer_vnc_display_base) <= 99):
+                    raise ValueError("studio.computer_vnc_display_base must be between 1 and 99")
+                if not str(self.computer_runtime_dir or "").strip():
+                    raise ValueError("studio.computer_runtime_dir is required")
+                if not str(self.computer_vnc_password_file or "").strip():
+                    raise ValueError("studio.computer_vnc_password_file is required")
+                geometry = str(self.computer_geometry or "").lower().split("x", 1)
+                if len(geometry) != 2 or not all(part.isdigit() and int(part) > 0 for part in geometry):
+                    raise ValueError("studio.computer_geometry must look like 1440x900")
 
 
 @dataclass(slots=True)
@@ -344,6 +381,16 @@ def load_settings(path: str | Path) -> Settings:
             raise ValueError("studio.computer_cdp_port must be between 1024 and 65535")
         if studio.computer_auth_token and len(studio.computer_auth_token) < 8:
             raise ValueError("studio.computer_auth_token must be at least 8 characters when set")
+        if studio.computer_session_isolation_enabled:
+            if not (1 <= int(studio.computer_vnc_display_base) <= 99):
+                raise ValueError("studio.computer_vnc_display_base must be between 1 and 99")
+            if not str(studio.computer_runtime_dir or "").strip():
+                raise ValueError("studio.computer_runtime_dir is required")
+            if not str(studio.computer_vnc_password_file or "").strip():
+                raise ValueError("studio.computer_vnc_password_file is required")
+            geometry = str(studio.computer_geometry or "").lower().split("x", 1)
+            if len(geometry) != 2 or not all(part.isdigit() and int(part) > 0 for part in geometry):
+                raise ValueError("studio.computer_geometry must look like 1440x900")
     if studio.oauth_enabled:
         if not studio.oauth_issuer.startswith("https://"):
             raise ValueError("studio.oauth_issuer must be an https:// URL when oauth_enabled=true")

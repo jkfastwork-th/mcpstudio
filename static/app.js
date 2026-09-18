@@ -870,9 +870,17 @@ function renderComputerSessions(sessions){
     const status=esc(s.status||'unknown');
     const selected=s.id===computerUiState.selectedSessionId;
     const accent=accents[index%accents.length];
+    const permissions=s.tool_permissions||{};
+    const permissionBadge=function(key,label){
+      const allowed=permissions[key]!==false;
+      return '<span class="computer-permission-badge '+(allowed?'allowed':'blocked')+'" title="'+label+': '+(allowed?'allowed':'blocked')+'">'+label+'</span>';
+    };
+    const permissionRow=s.tool_permissions_enabled===false?'':('<span class="computer-session-permissions">'
+      +permissionBadge('read','R')+permissionBadge('write','W')+permissionBadge('execute','X')+permissionBadge('destructive','D')+'</span>');
     return '<button class="computer-session-card'+(selected?' selected':'')+'" style="--session-accent:'+accent+'" type="button" data-computer-session="'+id+'" data-status="'+status+'" aria-pressed="'+(selected?'true':'false')+'">'
       +'<span class="computer-monitor-icon">'+computerMonitorSvg()+'<span class="computer-monitor-glow"></span></span>'
       +'<span class="computer-session-copy"><strong>'+name+'</strong><small>'+workspace+'</small></span>'
+      +permissionRow
       +'<span class="computer-session-status"><i></i>'+status+'</span>'
       +'</button>';
   }).join('');
@@ -884,9 +892,10 @@ function updateComputerStatus(status){
   const novnc=document.getElementById('computerNovncLine');
   const token=document.getElementById('computerTokenLine');
   const tokenWrap=document.getElementById('computerTokenWrap');
-  const ready=!!(status.enabled&&status.configured&&status.websockify_reachable&&status.novnc_available);
+  const transportReady=status.runtime_mode==='session-isolated'?status.transport_ready:status.websockify_reachable;
+  const ready=!!(status.enabled&&status.configured&&transportReady&&status.novnc_available);
   if(pill){pill.textContent=ready?'ready':(status.enabled?'needs setup':'disabled');pill.dataset.state=ready?'ready':'warning';}
-  if(bridge)bridge.textContent=status.websockify_reachable?'online':'offline';
+  if(bridge)bridge.textContent=transportReady?'online':'offline';
   if(novnc)novnc.textContent=status.novnc_available?'available':'missing';
   if(token)token.textContent=status.auth_required?'yes':'no';
   if(tokenWrap)tokenWrap.hidden=!status.auth_required;

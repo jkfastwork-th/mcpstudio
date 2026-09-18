@@ -26,7 +26,7 @@ from .agent_runtimes import AgentRuntimeInventory
 from .models import (
     SessionCreate, SessionHeartbeat, WorkerBind, WorkerHeartbeat, WorkerStatePatch,
     WorkSubmit, WorkFinish, WorkFail, WorkDetach, AlertAcknowledge, RetryDispatch, FaultInject, BatchDispatch,
-    SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedGatewayAttach,
+    SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate, ManagedGatewayAttach,
     CapsuleCreate, CapsuleStageUpdate, CapsuleHandoff, CapsuleComplete,
 )
 from .settings import Settings, load_settings
@@ -540,6 +540,23 @@ async def managed_session_resume(session_id: str):
         raise HTTPException(status_code=404, detail="Unknown managed session")
     except ManagedSessionError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/api/managed/sessions/{session_id}/permissions")
+async def managed_session_permissions(session_id: str):
+    try:
+        return await managed_sessions.permissions(session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown managed session")
+
+
+@app.patch("/api/managed/sessions/{session_id}/permissions")
+async def managed_session_permissions_update(session_id: str, payload: ManagedSessionPermissionsUpdate):
+    try:
+        changes = payload.model_dump(exclude_none=True)
+        return {"session": await managed_sessions.update_permissions(session_id, changes, actor="ui/api")}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown managed session")
 
 
 @app.get("/api/managed/sessions/{session_id}/history")
@@ -1306,7 +1323,7 @@ async def computer_descriptor(managed_session_id: str):
         return await computer.descriptor(managed_session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Unknown managed session")
-    except (RuntimeError, ValueError) as exc:
+    except (RuntimeError, ValueError, OSError) as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
 
@@ -1324,7 +1341,6 @@ async def computer_vnc_ws(websocket: WebSocket, managed_session_id: str):
 
     try:
         await computer.descriptor(managed_session_id)
-        target = computer.websocket_target()
     except KeyError:
         await websocket.accept()
         await websocket.close(code=4404, reason="Unknown managed session")
@@ -1335,6 +1351,60 @@ async def computer_vnc_ws(websocket: WebSocket, managed_session_id: str):
         return
 
     await websocket.accept()
+
+    if computer.session_isolation_enabled:
+        try:
+            host, port = await computer.tcp_target(managed_session_id)
+            reader, writer = await asyncio.open_connection(host, port)
+
+            async def client_to_vnc() -> None:
+                try:
+                    while True:
+                        event = await websocket.receive()
+                        event_type = event.get("type")
+                        if event_type == "websocket.disconnect":
+                            return
+                        if event_type != "websocket.receive":
+                            continue
+                        payload = event.get("bytes")
+                        if payload is None and event.get("text") is not None:
+                            payload = event["text"].encode("latin-1")
+                        if payload is not None:
+                            writer.write(payload)
+                            await writer.drain()
+                except (WebSocketDisconnect, ConnectionError, asyncio.IncompleteReadError):
+                    return
+
+            async def vnc_to_client() -> None:
+                try:
+                    while True:
+                        chunk = await reader.read(65536)
+                        if not chunk:
+                            return
+                        await websocket.send_bytes(chunk)
+                except (WebSocketDisconnect, ConnectionError, asyncio.IncompleteReadError):
+                    return
+
+            tasks = {
+                asyncio.create_task(client_to_vnc()),
+                asyncio.create_task(vnc_to_client()),
+            }
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*done, *pending, return_exceptions=True)
+            writer.close()
+            await writer.wait_closed()
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            try:
+                await websocket.close(code=1011, reason="VNC runtime unavailable")
+            except Exception:
+                pass
+        return
+
+    target = computer.websocket_target()
 
     async def client_to_upstream(upstream):
         try:

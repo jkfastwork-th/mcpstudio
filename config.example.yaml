@@ -28,3 +28,32 @@ studio:
   execution_max_recoveries: 6
   execution_read_result: true
   execution_safe_redispatch: false
+
+  # Per-managed-session tool permissions. Session metadata can override these defaults.
+  # Unknown/unclassified tools fail closed; workspace scope blocks path escapes.
+  #managed_session_tool_permissions_enabled: false
+  #managed_session_default_read_allowed: true
+  #managed_session_default_write_allowed: true
+  #managed_session_default_execute_allowed: true
+  #managed_session_default_destructive_allowed: false
+  #managed_session_tool_permissions_fail_closed: true
+  #managed_session_tool_scope_enforced: true
+
+  # M6.2.5 Computer Use / Web VNC MVP.
+  #computer_use_enabled: false
+  #computer_vnc_host: 127.0.0.1
+  #computer_vnc_port: 5902
+  #computer_websockify_host: 127.0.0.1
+  #computer_websockify_port: 6080
+  #computer_cdp_port: 9222
+  #computer_novnc_dir: /usr/share/novnc
+  #computer_auth_token: ""
+  # Per-managed-session desktop isolation. When enabled, VNC/CDP ports above
+  # are base ports; each managed session gets its own free slot; occupied displays/ports are skipped.
+  #computer_session_isolation_enabled: false
+  #computer_runtime_dir: ./data/computers
+  #computer_vnc_display_base: 2
+  #computer_vnc_password_file: ~/.vnc/passwd
+  #computer_chrome_binary: ""
+  #computer_geometry: 1440x900
+  #computer_adopt_workspace: ""

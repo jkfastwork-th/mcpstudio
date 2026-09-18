@@ -245,6 +245,18 @@ async def test_spawn_uses_certified_serena_template_and_project_pin(tmp_path: Pa
     assert args[args.index("--port") + 1] == "43110"
     assert args[args.index("--context") + 1] == "chatgpt"
     assert args[args.index("--project") + 1] == str(project.resolve())
+    env = captured["kwargs"]["env"]
+    runtime_root = (tmp_path / "logs" / ".runtime" / raw["id"]).resolve()
+    assert env["XDG_CACHE_HOME"] == str(runtime_root / "cache")
+    assert env["XDG_DATA_HOME"] == str(runtime_root / "data")
+    assert env["UV_CACHE_DIR"] == str(runtime_root / "cache" / "uv")
+    assert env["UV_TOOL_DIR"] == str(runtime_root / "data" / "uv" / "tools")
+    assert env["UV_TOOL_BIN_DIR"] == str(runtime_root / "bin")
+    assert env["TMPDIR"] == str(runtime_root / "tmp")
+    assert (runtime_root / "cache" / "uv").is_dir()
+    assert (runtime_root / "data" / "uv" / "tools").is_dir()
+    assert (runtime_root / "bin").is_dir()
+    assert (runtime_root / "tmp").is_dir()
     assert ready["status"] == "ready"
     assert ready["pid"] == 98765
 
@@ -668,3 +680,221 @@ async def test_tools_list_falls_back_to_local_controls_when_upstream_unreachable
         "mcpstudio_use_session",
     ]
     assert response.headers["mcp-session-id"] == gw["id"]
+
+
+async def _permission_bound_gateway(tmp_path: Path, *, metadata: dict | None = None):
+    settings = settings_for(tmp_path)
+    settings.studio.managed_session_tool_permissions_enabled = True
+    db = Database(settings.studio.database)
+    await db.init()
+    project = tmp_path / "projects" / "permission-alpha"
+    project.mkdir(parents=True, exist_ok=True)
+    managed = await db.create_managed_session(
+        name="Permission Alpha",
+        workspace_key="permission-alpha",
+        project_path=str(project.resolve()),
+        server_id="serena-8001",
+        port=43110,
+        metadata=metadata or {},
+    )
+    studio = await db.create_session({"client_id": "perm", "client_type": "openai", "server_id": "serena-8001"})
+    gw = await db.create_gateway_session(
+        studio_session_id=studio["id"],
+        client_id="perm",
+        client_type="openai",
+        server_id="serena-8001",
+        upstream_session_id="managed-up",
+        protocol_version="2025-06-18",
+        init_payload={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+    )
+
+    def pin() -> None:
+        with db._connect() as conn:
+            conn.execute(
+                "UPDATE gateway_sessions SET managed_session_id=?, upstream_url=? WHERE id=?",
+                (managed["id"], "http://127.0.0.1:43110/mcp", gw["id"]),
+            )
+            conn.execute("UPDATE sessions SET managed_session_id=? WHERE id=?", (managed["id"], studio["id"]))
+
+    await db._run(pin)
+    return settings, db, gw, managed
+
+
+@pytest.mark.asyncio
+async def test_gateway_permission_blocks_write_for_read_only_session(tmp_path: Path, monkeypatch):
+    settings, db, gw, managed = await _permission_bound_gateway(
+        tmp_path,
+        metadata={"tool_permissions": {"read": True, "write": False, "execute": False, "destructive": False}},
+    )
+    manager = GatewaySessionManager(settings, db, managed_sessions=FakeManagedPool())
+    called = False
+
+    async def fake_send(**kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("denied write must not reach upstream")
+
+    monkeypatch.setattr(manager, "_send", fake_send)
+    body = json.dumps({
+        "jsonrpc": "2.0", "id": 20, "method": "tools/call",
+        "params": {"name": "replace_content", "arguments": {"relative_path": "src/x.py", "needle": "a", "repl": "b", "mode": "literal"}},
+    }).encode()
+    response = await manager.proxy_existing(
+        request=request_for(body, gw["id"]), server=settings.servers[0], body=body, gateway_session_id=gw["id"]
+    )
+    payload = json.loads(response.body)
+    text = payload["result"]["content"][0]["text"]
+    assert payload["result"]["isError"] is True
+    assert "TOOL_PERMISSION_DENIED" in text
+    assert '"permission_class": "write"' in text
+    assert managed["workspace_key"] in text
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_gateway_permission_blocks_workspace_escape(tmp_path: Path, monkeypatch):
+    settings, db, gw, _ = await _permission_bound_gateway(tmp_path)
+    manager = GatewaySessionManager(settings, db, managed_sessions=FakeManagedPool())
+    called = False
+
+    async def fake_send(**kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("scope escape must not reach upstream")
+
+    monkeypatch.setattr(manager, "_send", fake_send)
+    body = json.dumps({
+        "jsonrpc": "2.0", "id": 21, "method": "tools/call",
+        "params": {"name": "read_file", "arguments": {"relative_path": "../outside.txt"}},
+    }).encode()
+    response = await manager.proxy_existing(
+        request=request_for(body, gw["id"]), server=settings.servers[0], body=body, gateway_session_id=gw["id"]
+    )
+    text = json.loads(response.body)["result"]["content"][0]["text"]
+    assert "TOOL_SCOPE_VIOLATION" in text
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_gateway_permission_blocks_unknown_tool_fail_closed(tmp_path: Path, monkeypatch):
+    settings, db, gw, _ = await _permission_bound_gateway(tmp_path)
+    manager = GatewaySessionManager(settings, db, managed_sessions=FakeManagedPool())
+    called = False
+
+    async def fake_send(**kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("unclassified tool must not reach upstream")
+
+    monkeypatch.setattr(manager, "_send", fake_send)
+    body = json.dumps({"jsonrpc": "2.0", "id": 22, "method": "tools/call", "params": {"name": "future_mutator", "arguments": {}}}).encode()
+    response = await manager.proxy_existing(
+        request=request_for(body, gw["id"]), server=settings.servers[0], body=body, gateway_session_id=gw["id"]
+    )
+    text = json.loads(response.body)["result"]["content"][0]["text"]
+    assert "TOOL_PERMISSION_UNCLASSIFIED" in text
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_gateway_permission_blocks_destructive_by_default(tmp_path: Path, monkeypatch):
+    settings, db, gw, _ = await _permission_bound_gateway(tmp_path)
+    manager = GatewaySessionManager(settings, db, managed_sessions=FakeManagedPool())
+    called = False
+
+    async def fake_send(**kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("destructive tool must not reach upstream")
+
+    monkeypatch.setattr(manager, "_send", fake_send)
+    body = json.dumps({
+        "jsonrpc": "2.0", "id": 23, "method": "tools/call",
+        "params": {"name": "safe_delete_symbol", "arguments": {"relative_path": "src/x.py", "name_path_pattern": "x"}},
+    }).encode()
+    response = await manager.proxy_existing(
+        request=request_for(body, gw["id"]), server=settings.servers[0], body=body, gateway_session_id=gw["id"]
+    )
+    text = json.loads(response.body)["result"]["content"][0]["text"]
+    assert "TOOL_PERMISSION_DENIED" in text
+    assert '"permission_class": "destructive"' in text
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_managed_session_permissions_persist_and_surface_in_list(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    settings.studio.managed_session_tool_permissions_enabled = True
+    db = Database(settings.studio.database)
+    await db.init()
+    project = tmp_path / "projects" / "persist-perms"
+    project.mkdir(parents=True, exist_ok=True)
+    item = await db.create_managed_session(
+        name="Persist permissions",
+        workspace_key="persist-perms",
+        project_path=str(project.resolve()),
+        server_id="serena-8001",
+        port=43111,
+    )
+    manager = ManagedSessionManager(settings, db)
+    updated = await manager.update_permissions(
+        item["id"],
+        {"read": True, "write": False, "execute": True, "destructive": False, "scope": "workspace"},
+        actor="test",
+    )
+    assert updated["metadata"]["tool_permissions"]["write"] is False
+    assert updated["metadata"]["tool_permissions_updated_by"] == "test"
+    view = await manager.permissions(item["id"])
+    assert view["override"]["write"] is False
+    assert view["effective"]["write"] is False
+    assert view["effective"]["read"] is True
+    listed = {x["id"]: x for x in await manager.list_sessions()}
+    assert listed[item["id"]]["tool_permissions"]["write"] is False
+    assert listed[item["id"]]["tool_permissions_enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_pinned_activate_project_allows_same_project_and_blocks_cross_project(tmp_path: Path, monkeypatch):
+    settings, db, gw, managed = await _permission_bound_gateway(tmp_path)
+    settings.studio.managed_session_blocked_tools = ["activate_project"]
+    manager = GatewaySessionManager(settings, db, managed_sessions=FakeManagedPool())
+    calls = []
+
+    async def fake_send(**kwargs):
+        calls.append(kwargs)
+        return FakeHttpClient(), httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=b'{"jsonrpc":"2.0","id":30,"result":{"content":[{"type":"text","text":"ok"}],"isError":false}}',
+            request=httpx.Request("POST", kwargs["server_url"]),
+        )
+
+    monkeypatch.setattr(manager, "_send", fake_send)
+
+    same_body = json.dumps({
+        "jsonrpc": "2.0", "id": 30, "method": "tools/call",
+        "params": {"name": "activate_project", "arguments": {"project": managed["project_path"]}},
+    }).encode()
+    same_response = await manager.proxy_existing(
+        request=request_for(same_body, gw["id"]),
+        server=settings.servers[0],
+        body=same_body,
+        gateway_session_id=gw["id"],
+    )
+    same_payload = json.loads(same_response.body)
+    assert same_payload["result"]["isError"] is False
+    assert len(calls) == 1
+
+    cross_body = json.dumps({
+        "jsonrpc": "2.0", "id": 31, "method": "tools/call",
+        "params": {"name": "activate_project", "arguments": {"project": str(tmp_path / "other")}},
+    }).encode()
+    cross_response = await manager.proxy_existing(
+        request=request_for(cross_body, gw["id"]),
+        server=settings.servers[0],
+        body=cross_body,
+        gateway_session_id=gw["id"],
+    )
+    cross_text = json.loads(cross_response.body)["result"]["content"][0]["text"]
+    assert "SESSION_PROJECT_PINNED" in cross_text
+    assert len(calls) == 1

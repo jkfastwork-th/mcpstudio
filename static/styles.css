@@ -888,6 +888,10 @@ html,body{max-width:100%;overflow-x:hidden}
 .computer-session-copy{display:grid;gap:3px;text-align:center;min-width:0;width:100%}
 .computer-session-copy strong{font-size:calc(12px * var(--font-scale));white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .computer-session-copy small{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.computer-session-permissions{display:flex;align-items:center;justify-content:center;gap:5px}
+.computer-permission-badge{display:grid;place-items:center;width:22px;height:22px;border-radius:7px;border:1px solid var(--border);font-size:calc(7px * var(--font-scale));font-weight:800;line-height:1}
+.computer-permission-badge.allowed{color:#32c48d;border-color:rgba(50,196,141,.28);background:rgba(50,196,141,.07)}
+.computer-permission-badge.blocked{color:var(--muted);opacity:.45;background:rgba(127,127,127,.035)}
 .computer-session-status{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border:1px solid var(--border);border-radius:999px;color:var(--muted);font-size:calc(8px * var(--font-scale));text-transform:uppercase;letter-spacing:.04em}
 .computer-session-status i{width:7px;height:7px;border-radius:50%;background:#999;box-shadow:0 0 0 3px rgba(127,127,127,.10)}
 .computer-session-card[data-status="ready"] .computer-session-status{color:#32c48d;border-color:rgba(50,196,141,.28)}

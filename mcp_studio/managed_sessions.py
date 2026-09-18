@@ -13,6 +13,7 @@ from typing import Any
 from .db import Database
 from .mcp_client import MCPClient
 from .settings import Settings
+from .tool_permissions import effective_policy
 
 
 class ManagedSessionError(RuntimeError):
@@ -432,11 +433,32 @@ class ManagedSessionManager:
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"{item['id']}.log"
         log_handle = open(log_path, "ab", buffering=0)
+
+        # Managed Serena processes inherit Studio's systemd sandbox. Keep HOME
+        # intact for Serena config, but move mutable cache/temp state into the
+        # writable managed-session data tree.
+        runtime_root = log_dir / ".runtime" / str(item["id"])
+        cache_dir = runtime_root / "cache"
+        data_dir = runtime_root / "data"
+        bin_dir = runtime_root / "bin"
+        uv_cache_dir = cache_dir / "uv"
+        uv_tool_dir = data_dir / "uv" / "tools"
+        tmp_dir = runtime_root / "tmp"
+        for path in (runtime_root, cache_dir, data_dir, bin_dir, uv_cache_dir, uv_tool_dir, tmp_dir):
+            path.mkdir(parents=True, exist_ok=True)
+        runtime_root.chmod(0o700)
+
         env = os.environ.copy()
         if self.settings.studio.managed_session_home:
             env["HOME"] = str(self.settings.studio.managed_session_home)
         if self.settings.studio.managed_session_path:
             env["PATH"] = str(self.settings.studio.managed_session_path)
+        env["XDG_CACHE_HOME"] = str(cache_dir)
+        env["XDG_DATA_HOME"] = str(data_dir)
+        env["UV_CACHE_DIR"] = str(uv_cache_dir)
+        env["UV_TOOL_DIR"] = str(uv_tool_dir)
+        env["UV_TOOL_BIN_DIR"] = str(bin_dir)
+        env["TMPDIR"] = str(tmp_dir)
         cmd = [
             executable,
             "start-mcp-server",
@@ -592,11 +614,44 @@ class ManagedSessionManager:
             session_id, limit=int(self.settings.studio.managed_session_history_limit or 100)
         )
 
+    def _with_tool_permissions(self, session: dict[str, Any]) -> dict[str, Any]:
+        item = dict(session)
+        item["tool_permissions"] = effective_policy(self.settings.studio, item)
+        item["tool_permissions_enabled"] = bool(self.settings.studio.managed_session_tool_permissions_enabled)
+        return item
+
     async def get_session(self, session_id: str) -> dict[str, Any]:
-        return await self.db.get_managed_session(session_id)
+        return self._with_tool_permissions(await self.db.get_managed_session(session_id))
 
     async def list_sessions(self) -> list[dict[str, Any]]:
-        return await self.db.managed_session_overview(limit=500)
+        sessions = await self.db.managed_session_overview(limit=500)
+        return [self._with_tool_permissions(item) for item in sessions]
+
+    async def permissions(self, session_id: str) -> dict[str, Any]:
+        session = await self.db.get_managed_session(session_id)
+        metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
+        override = metadata.get("tool_permissions") if isinstance(metadata, dict) else None
+        return {
+            "session_id": session_id,
+            "workspace_key": session.get("workspace_key"),
+            "enabled": bool(self.settings.studio.managed_session_tool_permissions_enabled),
+            "override": dict(override) if isinstance(override, dict) else {},
+            "effective": effective_policy(self.settings.studio, session),
+        }
+
+    async def update_permissions(
+        self, session_id: str, changes: dict[str, Any], *, actor: str = "operator"
+    ) -> dict[str, Any]:
+        session = await self.db.get_managed_session(session_id)
+        metadata = dict(session.get("metadata") or {})
+        override = dict(metadata.get("tool_permissions") or {})
+        for key in ("read", "write", "execute", "destructive", "scope", "fail_closed_unknown"):
+            if key in changes:
+                override[key] = changes[key]
+        metadata["tool_permissions"] = override
+        metadata["tool_permissions_updated_by"] = actor
+        updated = await self.db.update_managed_session_metadata(session_id, metadata)
+        return self._with_tool_permissions(updated)
 
     async def status(self) -> dict[str, Any]:
         sessions = await self.list_sessions() if self.enabled else []
@@ -614,4 +669,5 @@ class ManagedSessionManager:
             "approved_roots": list(self.settings.studio.managed_session_workspace_roots),
             "idle_stop_seconds": int(self.settings.studio.managed_session_idle_stop_seconds or 0),
             "history_limit": int(self.settings.studio.managed_session_history_limit or 100),
+            "tool_permissions_enabled": bool(self.settings.studio.managed_session_tool_permissions_enabled),
         }

@@ -178,6 +178,15 @@ class ManagedSessionRename(BaseModel):
     name: str = Field(min_length=1, max_length=240)
 
 
+class ManagedSessionPermissionsUpdate(BaseModel):
+    read: bool | None = None
+    write: bool | None = None
+    execute: bool | None = None
+    destructive: bool | None = None
+    scope: Literal["workspace", "unrestricted"] | None = None
+    fail_closed_unknown: bool | None = None
+
+
 class ManagedGatewayAttach(BaseModel):
     managed_session_id: str = Field(min_length=1, max_length=120)
 

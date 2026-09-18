@@ -230,3 +230,111 @@ async def test_descriptor_does_not_leak_vnc_endpoint() -> None:
 
 def test_tcp_probe_returns_false_for_unbound_port() -> None:
     assert _tcp_probe("127.0.0.1", 1, timeout=0.25) is False
+
+# ------------------------------------------------------------------
+# Per-managed-session isolation
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_isolated_runtime_allocates_stable_session_slots(tmp_path) -> None:
+    sessions = {
+        "ms-o": {"id": "ms-o", "workspace_key": "oriverse"},
+        "ms-e": {"id": "ms-e", "workspace_key": "earth-616"},
+        "ms-n": {"id": "ms-n", "workspace_key": "nova-oracle"},
+    }
+
+    class FakeDB:
+        async def get_managed_session(self, session_id: str):
+            return sessions[session_id]
+
+    studio = StudioConfig(
+        computer_use_enabled=True,
+        computer_session_isolation_enabled=True,
+        computer_runtime_dir=str(tmp_path),
+        computer_adopt_workspace="oriverse",
+        computer_vnc_display_base=2,
+        computer_vnc_port=5902,
+        computer_cdp_port=9222,
+    )
+    mgr = ComputerUseManager(studio, FakeDB())
+
+    with (
+        patch.object(mgr, "_ensure_isolated_runtime", new=AsyncMock(return_value=None)),
+        patch.object(mgr, "_slot_available", return_value=True),
+    ):
+        o = await mgr.descriptor("ms-o")
+        e = await mgr.descriptor("ms-e")
+        n = await mgr.descriptor("ms-n")
+
+    assert (o["desktop_display"], o["cdp_port"]) == (":2", 9222)
+    assert (e["desktop_display"], e["cdp_port"]) == (":3", 9223)
+    assert (n["desktop_display"], n["cdp_port"]) == (":4", 9224)
+    registry = __import__("json").loads((tmp_path / "registry.json").read_text())
+    assert registry["sessions"]["ms-o"]["adopted"] is True
+    assert len({v["profile_dir"] for v in registry["sessions"].values()}) == 3
+
+
+@pytest.mark.asyncio
+async def test_isolated_tcp_targets_are_distinct(tmp_path) -> None:
+    sessions = {
+        "ms-a": {"id": "ms-a", "workspace_key": "alpha"},
+        "ms-b": {"id": "ms-b", "workspace_key": "beta"},
+    }
+
+    class FakeDB:
+        async def get_managed_session(self, session_id: str):
+            return sessions[session_id]
+
+    studio = StudioConfig(
+        computer_use_enabled=True,
+        computer_session_isolation_enabled=True,
+        computer_runtime_dir=str(tmp_path),
+        computer_vnc_display_base=30,
+        computer_vnc_port=15930,
+        computer_cdp_port=19330,
+    )
+    mgr = ComputerUseManager(studio, FakeDB())
+    with patch.object(mgr, "_ensure_isolated_runtime", new=AsyncMock(return_value=None)),          patch.object(mgr, "_slot_available", return_value=True):
+        first = await mgr.tcp_target("ms-a")
+        second = await mgr.tcp_target("ms-b")
+    assert first == ("127.0.0.1", 15930)
+    assert second == ("127.0.0.1", 15931)
+
+
+@pytest.mark.asyncio
+async def test_isolated_runtime_separates_two_sessions_in_same_workspace(tmp_path) -> None:
+    sessions = {
+        "ms-a": {"id": "ms-a", "workspace_key": "same"},
+        "ms-b": {"id": "ms-b", "workspace_key": "same"},
+    }
+
+    class FakeDB:
+        async def get_managed_session(self, session_id: str):
+            return sessions[session_id]
+
+    studio = StudioConfig(
+        computer_use_enabled=True,
+        computer_session_isolation_enabled=True,
+        computer_runtime_dir=str(tmp_path),
+        computer_vnc_display_base=20,
+        computer_vnc_port=15920,
+        computer_cdp_port=19220,
+    )
+    mgr = ComputerUseManager(studio, FakeDB())
+    with patch.object(mgr, "_ensure_isolated_runtime", new=AsyncMock(return_value=None)):
+        a = await mgr.descriptor("ms-a")
+        b = await mgr.descriptor("ms-b")
+    assert a["desktop_display"] != b["desktop_display"]
+    assert a["cdp_port"] != b["cdp_port"]
+    registry = __import__("json").loads((tmp_path / "registry.json").read_text())
+    assert set(registry["sessions"]) == {"ms-a", "ms-b"}
+
+
+def test_settings_rejects_invalid_isolated_geometry() -> None:
+    with pytest.raises(ValueError, match="computer_geometry"):
+        StudioConfig(
+            computer_use_enabled=True,
+            computer_session_isolation_enabled=True,
+            computer_geometry="wide",
+        )
