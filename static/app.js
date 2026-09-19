@@ -858,7 +858,7 @@ function renderOverview(data){
       ${lastHandoff?.a2a?.task_id?`<div><span>A2A task</span><strong>${esc(lastHandoff.a2a.task_id)} · ${esc(lastHandoff.a2a.task?.status?.state||'submitted')}</strong></div>`:''}
       <div><span>Next fallback</span><strong>${esc(nextFallback)}</strong></div>
     </div>
-    <button class="button capsule-detail-button" data-go-view="sessions" type="button">View capsule details →</button>`;
+    <button class="button capsule-detail-button" data-go-view="sessions" data-capsule-id="${esc(capsuleId)}" type="button">View capsule details →</button>`;
 
   if(hasLedger){
     const ev=[...(liveCapsule.events||[])].reverse().slice(0,6);
@@ -877,6 +877,17 @@ function renderOverview(data){
   }
 
   renderAgentLanes(data);
+}
+
+function focusCapsuleLedgerItem(capsuleId){
+  if(!capsuleId)return false;
+  const item=[...document.querySelectorAll('.capsule-ledger-item[data-capsule-id]')]
+    .find(el=>el.dataset.capsuleId===String(capsuleId));
+  if(!item)return false;
+  document.querySelectorAll('.capsule-ledger-item[open]').forEach(el=>{if(el!==item)el.open=false;});
+  item.open=true;
+  item.scrollIntoView({behavior:'smooth',block:'center'});
+  return true;
 }
 
 function renderCapsuleLedger(data){
@@ -911,7 +922,7 @@ function renderCapsuleLedger(data){
       if(e.kind==='capsule.completed') text='Capsule completed';
       return `<div class="capsule-timeline-row"><span class="timeline-dot ${esc(e.kind.replace('capsule.',''))}"></span><div><strong>${esc(text)}</strong><small>${esc(when(e.created_at))} · ${esc(e.kind)}</small></div></div>`;
     }).join(''):'<div class="empty compact">No events recorded.</div>';
-    return `<details class="capsule-ledger-item ${esc(current)}" ${index===0?'open':''}>
+    return `<details class="capsule-ledger-item ${esc(current)}" data-capsule-id="${esc(capsule.capsule_id)}" ${index===0?'open':''}>
       <summary>
         <span class="capsule-ledger-id">${esc(capsule.capsule_id)}</span>
         <div class="capsule-ledger-title"><strong>${esc(capsule.title||capsule.capsule_id)}</strong><small>${esc(capsule.workspace||'No workspace')} · ${esc(route)}</small></div>
@@ -1200,7 +1211,7 @@ document.addEventListener('click',e=>uiAction(async()=>{
   const scheme=e.target.closest('[data-color-scheme]'); if(scheme){applyColorScheme(scheme.dataset.colorScheme);return;}
   const agentCheck=e.target.closest('[data-agent-check]'); if(agentCheck){await checkAgentRuntime(agentCheck.dataset.agentCheck);return;}
   const agentDetails=e.target.closest('[data-agent-details]'); if(agentDetails){await showAgentRuntimeDetails(agentDetails.dataset.agentDetails);return;}
-  const go=e.target.closest('[data-go-view]'); if(go){setView(go.dataset.goView);return;}
+  const go=e.target.closest('[data-go-view]'); if(go){setView(go.dataset.goView);if(go.dataset.capsuleId){if(latestData)renderCapsuleLedger(latestData);requestAnimationFrame(()=>focusCapsuleLedgerItem(go.dataset.capsuleId));}return;}
   const tunnel=e.target.closest('[data-tunnel-session]'); if(tunnel){sessionTunnelFilter=tunnel.dataset.tunnelSession;showSessionHistory=false;setView('sessions');if(latestData)renderSessions(latestData);return;}
   const restart=e.target.closest('[data-managed-restart]'); if(restart){await sendJson(`/api/managed/sessions/${encodeURIComponent(restart.dataset.managedRestart)}/restart`);await load();return;}
   const resume=e.target.closest('[data-managed-resume]'); if(resume){await sendJson(`/api/managed/sessions/${encodeURIComponent(resume.dataset.managedResume)}/resume`);await load();return;}
