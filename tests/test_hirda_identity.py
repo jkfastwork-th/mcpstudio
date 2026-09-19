@@ -9,8 +9,9 @@ def test_hirda_identity_is_user_facing_source_of_truth():
     app_js = (ROOT / "static" / "app.js").read_text()
     computer_js = (ROOT / "static" / "app.computer.js").read_text()
 
-    assert "<strong>HIRDA</strong>" in template
-    assert "One control plane. Many agents." in template
+    assert "/static/brand/hirda-sidebar-lockup-light.webp" in template
+    assert "/static/brand/hirda-sidebar-lockup-dark.webp" in template
+    assert "HIRDA · Multi-Agent Orchestration" in template
     assert "HIRDA Gateway" in template
     assert "Use HIRDA Studio for" in template
     assert "HIRDA Computer desktop" in template
