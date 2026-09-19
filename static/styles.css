@@ -1,5 +1,7 @@
+.sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
+
 :root{
-  color-scheme:light; --font-scale:1; font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  color-scheme:light; --font-scale:1; font-family:var(--font-ui),ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
   --bg:#080c12; --sidebar:#0a0f16; --surface:#0f1620; --surface-2:#121b27; --hover:#162131;
   --border:rgba(148,163,184,.12); --border-strong:rgba(148,163,184,.21);
   --text:#eef4fb; --soft:#a4b0c0; --muted:#69788b; --blue:#72a8ff; --green:#5ad68d; --amber:#f1bd61; --red:#ff747c;
@@ -121,10 +123,10 @@ code{color:#1967d2}
 .font-size-button{height:32px;min-width:36px;padding:0 9px;border:0;border-right:1px solid #e8eaed;background:#fff;color:#3c4043;cursor:pointer;font-weight:700;line-height:1}.font-size-button:last-child{border-right:0}.font-size-button:hover{background:#f1f3f4}.font-size-button:disabled{opacity:.38;cursor:not-allowed}.font-size-reset{min-width:52px;color:#1a73e8;font-size:calc(9px * var(--font-scale))}
 
 /* Four Google colors are reserved for meaningful status/brand accents, not decoration. */
-.focus-overview-grid .summary-card:nth-child(1){border-top:3px solid var(--google-blue)}
-.focus-overview-grid .summary-card:nth-child(2){border-top:3px solid var(--google-green)}
-.focus-overview-grid .summary-card:nth-child(3){border-top:3px solid var(--google-yellow)}
-.focus-overview-grid .summary-card:nth-child(4){border-top:3px solid var(--google-red)}
+.focus-overview-grid .summary-card:nth-child(1){border-top:3px solid var(--hirda-brand-primary)}
+.focus-overview-grid .summary-card:nth-child(2){border-top:3px solid var(--hirda-brand-success)}
+.focus-overview-grid .summary-card:nth-child(3){border-top:3px solid var(--hirda-brand-warning)}
+.focus-overview-grid .summary-card:nth-child(4){border-top:3px solid var(--hirda-brand-danger)}
 
 @media(max-width:760px){.font-size-control{order:3}.focus-actions{flex-wrap:wrap}.font-size-button{min-width:42px}}
 
@@ -680,8 +682,12 @@ html,body{max-width:100%;overflow-x:hidden}
     position:fixed;
     left:0;right:0;bottom:0;
     z-index:9000;
-    display:grid;
-    grid-template-columns:repeat(5,minmax(0,1fr));
+    display:flex;
+    gap:4px;
+    overflow-x:auto;
+    overscroll-behavior-x:contain;
+    scrollbar-width:none;
+    scroll-snap-type:x proximity;
     min-height:62px;
     padding:5px 8px calc(5px + env(safe-area-inset-bottom,0px));
     border-top:1px solid var(--border);
@@ -689,10 +695,13 @@ html,body{max-width:100%;overflow-x:hidden}
     box-shadow:0 -8px 24px rgb(15 23 42 / .08);
     backdrop-filter:blur(16px);
   }
+  .mobile-nav::-webkit-scrollbar{display:none}
   .mobile-nav a{
     display:grid;
     place-items:center;
     align-content:center;
+    flex:0 0 76px;
+    scroll-snap-align:center;
     gap:2px;
     min-width:0;
     min-height:48px;

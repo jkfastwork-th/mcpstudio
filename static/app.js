@@ -1176,6 +1176,7 @@ async function runGlobalSearch(raw){
     [/(capsule|session|handoff)/,'sessions'],
     [/(agent|claude|codex|hermes)/,'agents'],
     [/(workspace|project)/,'workspaces'],
+    [/(guide|help|tutorial|how to|quick start)/,'guide'],
     [/(computer|browser|vnc|tool)/,'computer'],
     [/(system|health|slo|tunnel|alert|diagnostic|telemetry)/,'system'],
     [/(setting|theme|appearance|language|font|color scheme)/,'settings']
@@ -1184,7 +1185,7 @@ async function runGlobalSearch(raw){
   if(hit){setView(hit[1]);return;}
   await openAppDialog({
     title:'Search',
-    message:`No section matched “${raw}”. Try capsule, agent, workspace, computer, or settings.`,
+    message:`No section matched “${raw}”. Try capsule, agent, workspace, guide, computer, or settings.`,
     icon:'⌕',
     tone:'info',
     confirmText:'Close',

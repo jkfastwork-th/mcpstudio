@@ -38,6 +38,7 @@
 <img alt="" class="brand-lockup-dark" src="/static/brand/hirda-sidebar-lockup-dark.webp"/>
 </div>
 </div>
+<div class="brand-a11y sr-only"><strong>HIRDA</strong><small>One control plane. Many agents.</small></div>
 <div class="environment-card compact-env">
 <span class="status-beacon"></span>
 <div><strong>Live</strong><small>All ingress through HIRDA Gateway</small></div>
@@ -47,6 +48,7 @@
 <a data-help="Inspect capsule state, routing, handoffs, and session history." data-view="sessions" href="#sessions"><span>◉</span>Capsule Lanes</a>
 <a data-help="Monitor Claude, Codex, and Hermes runtime availability." data-view="agents" href="#agents"><span>◈</span>Agents</a>
 <a data-help="Approved project folders, managed sessions and workspace safety." data-view="workspaces" href="#workspaces"><span>▢</span>Workspaces</a>
+<a data-help="Quick start, daily workflow, setup, and troubleshooting guidance." data-view="guide" href="#guide"><span>?</span>Guide</a>
 <a data-help="Shared browser desktop for OAuth, login and consent screens." data-view="computer" href="#computer"><span>▤</span>Computer</a>
 <a data-help="Runtime health, tunnels, alerts, SLO and operational diagnostics." data-view="system" href="#system"><span>◫</span>System</a>
 <a data-help="Appearance and interface preferences." data-view="settings" href="#settings"><span>⚙</span>Settings</a>
@@ -65,6 +67,7 @@
 <div class="header-actions focus-actions">
 <div class="reference-topbar-tools"><label class="reference-search" aria-label="Search"><span aria-hidden="true">⌕</span><input id="globalSearch" type="search" placeholder="Search capsules, tasks, or workspaces…"/></label><button class="reference-icon-button" id="notificationBtn" type="button" aria-label="Notifications" data-help="Show current open alerts."><span aria-hidden="true">♧</span><i></i></button><span class="reference-avatar" aria-label="Signed in as JK">JK</span></div>
 <span class="muted" id="lastUpdated">Waiting…</span>
+<div class="topbar-preference-controls" hidden>
 <div class="language-control" data-help="Change interface language. Your choice is saved in this browser."><label class="language-label" for="languageSelect">Language</label><select aria-label="Interface language" class="language-select" id="languageSelect"><option value="en">English</option><option value="th">ไทย</option></select></div><div aria-label="Color theme" class="theme-control" data-help="Switch between Light and Dark. Your choice is saved in this browser." role="group">
 <button aria-label="Use light theme" class="theme-button" data-help="Use the HIRDA light theme." id="themeLightBtn" type="button"><span aria-hidden="true">☀</span><span>Light</span></button>
 <button aria-label="Use dark theme" class="theme-button" data-help="Use the HIRDA dark theme." id="themeDarkBtn" type="button"><span aria-hidden="true">☾</span><span>Dark</span></button>
@@ -73,6 +76,7 @@
 <button aria-label="Decrease text size" class="font-size-button" data-help="Decrease text size." id="fontDecreaseBtn" type="button">A−</button>
 <button aria-label="Reset text size" class="font-size-button font-size-reset" data-help="Reset text size to the default 112%." id="fontResetBtn" type="button"><span id="fontScaleLabel">112%</span></button>
 <button aria-label="Increase text size" class="font-size-button" data-help="Increase text size." id="fontIncreaseBtn" type="button">A+</button>
+</div>
 </div>
 <button class="button secondary" data-help="Reload current HIRDA status from the server." id="refreshBtn" type="button">Refresh</button>
 <div class="pill unknown" data-help="Overall HIRDA health. HEALTHY means the control plane is responding normally." id="studioStatus" tabindex="0">UNKNOWN</div>
@@ -400,6 +404,7 @@
 <a data-view="sessions" href="#sessions"><span>◉</span><small>Capsule Lanes</small></a>
 <a data-view="agents" href="#agents"><span>◈</span><small>Agents</small></a>
 <a data-view="workspaces" href="#workspaces"><span>▢</span><small>Workspaces</small></a>
+<a data-view="guide" href="#guide"><span>?</span><small>Guide</small></a>
 <a data-view="computer" href="#computer"><span>▤</span><small>Computer</small></a>
 <a data-view="system" href="#system"><span>◫</span><small>System</small></a>
 <a data-view="settings" href="#settings"><span>⚙</span><small>Settings</small></a>
