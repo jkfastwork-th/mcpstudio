@@ -75,7 +75,168 @@ const I18N_TH={
   'Status reference':'อ้างอิงสถานะ',
   'Need context?':'ต้องการคำอธิบาย?',
   'Hover or focus a ? marker and key controls to see a short explanation.':'วางเมาส์หรือโฟกัสที่เครื่องหมาย ? และส่วนควบคุมสำคัญเพื่อดูคำอธิบายสั้น ๆ',
-  'Each project session stays pinned to one workspace and uses its own isolated Serena instance.':'แต่ละ project session จะ pin กับ workspace เดียวและใช้ Serena instance ที่แยกของตัวเอง'
+  'Each project session stays pinned to one workspace and uses its own isolated Serena instance.':'แต่ละ project session จะ pin กับ workspace เดียวและใช้ Serena instance ที่แยกของตัวเอง',
+
+  /* Canonical navigation + current page copy */
+  'Dashboard':'แดชบอร์ด',
+  'Capsule Lanes':'เลนแคปซูล',
+  'Agents':'เอเจนต์',
+  'Computer':'คอมพิวเตอร์',
+  'Settings':'การตั้งค่า',
+  'Appearance':'รูปลักษณ์',
+  'Theme':'ธีม',
+  'Text size':'ขนาดตัวอักษร',
+  'Color Scheme':'ชุดสี',
+  'Default':'ค่าเริ่มต้น',
+  'Claude Theme':'ธีม Claude',
+  'Codex Theme':'ธีม Codex',
+  'Hermes Theme':'ธีม Hermes',
+  'Owner':'เจ้าของ',
+  'Capsule Lane Overview':'ภาพรวมเลนแคปซูล',
+  'See where work entered, which agent owns it now, and where the capsule can move next.':'ดูว่างานเข้ามาจากจุดใด อยู่กับเอเจนต์ใด และแคปซูลจะไปขั้นตอนใดต่อ',
+  'Agent lanes':'เลนเอเจนต์',
+  'Capsule events':'เหตุการณ์แคปซูล',
+  'Routing colors':'สีเส้นทาง',
+  'reasoning · analysis':'การให้เหตุผล · การวิเคราะห์',
+  'code · execution':'โค้ด · การประมวลผล',
+  'coordination · handoff':'การประสานงาน · การส่งต่อ',
+  'CAPSULE LANES':'เลนแคปซูล',
+  'Inspect capsule state, routing, handoffs, and session history.':'ตรวจสอบสถานะแคปซูล เส้นทางการทำงาน การส่งต่องาน และประวัติเซสชัน',
+  'AGENT RUNTIMES':'รันไทม์เอเจนต์',
+  'Monitor Claude, Codex, and Hermes runtime availability.':'ตรวจสอบความพร้อมใช้งานของรันไทม์ Claude, Codex และ Hermes',
+  'Monitor Claude, Codex, and Hermes runtime availability and active capsule load.':'ตรวจสอบความพร้อมใช้งานของรันไทม์ Claude, Codex และ Hermes รวมถึงภาระแคปซูลที่กำลังทำงาน',
+  'Manage approved projects, managed sessions, and workspace safety.':'จัดการโปรเจกต์ที่อนุมัติ เซสชันที่ HIRDA ดูแล และความปลอดภัยของเวิร์กสเปซ',
+  'SETTINGS':'การตั้งค่า',
+  'Appearance and interface preferences.':'รูปลักษณ์และการตั้งค่าหน้าจอ',
+  'Configure appearance, language, text size, and color preferences.':'ตั้งค่ารูปลักษณ์ ภาษา ขนาดตัวอักษร และชุดสี',
+  'Theme, language, text size, and color scheme.':'ธีม ภาษา ขนาดตัวอักษร และชุดสี',
+  'SYSTEM':'ระบบ',
+  'Runtime health, tunnels, alerts, SLO and operational diagnostics.':'สถานะรันไทม์ ทันเนล การแจ้งเตือน SLO และการวิเคราะห์ระบบ',
+  'Monitor runtime health, ingress, reliability, and diagnostics.':'ตรวจสอบสถานะรันไทม์ ช่องทางเข้า ความเสถียร และการวิเคราะห์ระบบ',
+  'Refresh status':'รีเฟรชสถานะ',
+  'Tunnels':'ทันเนล',
+  'Alerts & SLO':'การแจ้งเตือนและ SLO',
+  'Workers & work queue':'เวิร์กเกอร์และคิวงาน',
+  'Operations':'การดำเนินงานระบบ',
+  'Activity & audit':'กิจกรรมและการตรวจสอบ',
+  'Execution':'การประมวลผล',
+  'Telemetry':'เทเลเมทรี',
+  'COMPUTER USE':'การใช้งานคอมพิวเตอร์',
+  'DESKTOPS':'เดสก์ท็อป',
+  'Select a session':'เลือกเซสชัน',
+  'Shared browser desktop for OAuth, login and consent screens.':'เดสก์ท็อปเบราว์เซอร์ร่วมสำหรับ OAuth การเข้าสู่ระบบ และหน้าจอยินยอม',
+  'Open a shared browser desktop for OAuth, sign-in, consent, and other human-in-the-loop actions.':'เปิดเดสก์ท็อปเบราว์เซอร์ร่วมสำหรับ OAuth การเข้าสู่ระบบ การยินยอม และขั้นตอนที่ต้องมีผู้ใช้ดำเนินการ',
+  'Approved project folders, managed sessions and workspace safety.':'โฟลเดอร์โปรเจกต์ที่อนุมัติ เซสชันที่ HIRDA ดูแล และความปลอดภัยของเวิร์กสเปซ',
+  'Live capsule routing, active agent lanes, handoffs, and system health.':'ดูเส้นทางแคปซูล เลนเอเจนต์ที่กำลังทำงาน การส่งต่องาน และสถานะระบบ',
+  'Appearance and interface preferences for HIRDA Studio.':'รูปลักษณ์และการตั้งค่าหน้าจอของ HIRDA Studio',
+  'Search capsules, tasks, or workspaces…':'ค้นหาแคปซูล งาน หรือเวิร์กสเปซ…',
+  'Notifications':'การแจ้งเตือน',
+  'Show current open alerts.':'แสดงการแจ้งเตือนที่ยังเปิดอยู่',
+  'Multi-Agent Orchestration':'ระบบประสานงานหลายเอเจนต์',
+  'English':'อังกฤษ',
+  'LIVE ORCHESTRATION':'การประสานงานแบบเรียลไทม์',
+  'Live visual preview':'ตัวอย่างสถานะแบบเรียลไทม์',
+  'CAPSULE PIPELINE':'เส้นทางแคปซูล',
+  'Stage 1–2 · live-derived preview':'ขั้นที่ 1–2 · ตัวอย่างจากข้อมูลสด',
+  'RECENT FLOW':'การทำงานล่าสุด',
+  'View capsules':'ดูแคปซูล',
+  'LANE LEGEND':'คำอธิบายเลน',
+  'Show sessions that have been stopped but can still be resumed.':'แสดงเซสชันที่หยุดแล้วแต่ยังสามารถกลับมาใช้งานต่อได้',
+  'Create a new isolated Serena session for one registered workspace.':'สร้างเซสชัน Serena แบบแยกสำหรับเวิร์กสเปซที่ลงทะเบียนไว้',
+  'Run an immediate health poll of registered MCP servers.':'ตรวจสุขภาพ MCP server ที่ลงทะเบียนไว้ทันที',
+  'Refresh Herdr agent and pane inventory.':'รีเฟรชรายการเอเจนต์และ pane จาก Herdr',
+  'Detailed worker, queue, audit, telemetry and compatibility data. Usually not needed for normal operation.':'ข้อมูลเชิงลึกของเวิร์กเกอร์ คิว การตรวจสอบ เทเลเมทรี และความเข้ากันได้ โดยทั่วไปไม่จำเป็นสำหรับการใช้งานปกติ',
+  'VNC transport':'การเชื่อมต่อ VNC',
+  'noVNC assets':'ไฟล์ noVNC',
+  'Token required':'ต้องใช้โทเคน',
+  'checking':'กำลังตรวจสอบ',
+  'Loading sessions…':'กำลังโหลดเซสชัน…',
+  'Loading computer status…':'กำลังโหลดสถานะคอมพิวเตอร์…',
+  'Desktop':'เดสก์ท็อป',
+  'Managed session':'เซสชันที่ HIRDA ดูแล',
+  'Token':'โทเคน',
+  'Computer token':'โทเคนคอมพิวเตอร์',
+  'Reconnect':'เชื่อมต่อใหม่',
+  'Disconnect':'ตัดการเชื่อมต่อ',
+  'Fullscreen':'เต็มหน้าจอ',
+  'HIRDA Computer desktop':'เดสก์ท็อป HIRDA Computer',
+  'Settings language':'ภาษาสำหรับการตั้งค่า',
+  'Search':'ค้นหา',
+  'Online':'ออนไลน์',
+  'Offline':'ออฟไลน์',
+  'Version':'เวอร์ชัน',
+  'Status':'สถานะ',
+  'Active Capsules':'แคปซูลที่กำลังทำงาน',
+  'AI Agents Online':'เอเจนต์ AI ออนไลน์',
+  'Handoffs Today':'การส่งต่องานวันนี้',
+  'Success Rate':'อัตราความสำเร็จ',
+  'Queue Length':'ความยาวคิว',
+  'Context Limit':'ขีดจำกัดบริบท',
+  'Last Error':'ข้อผิดพลาดล่าสุด',
+  'Check Runtime':'ตรวจรันไทม์',
+  'View Details':'ดูรายละเอียด',
+  'Ready':'พร้อม',
+  'Running':'กำลังทำงาน',
+  'Handoff source':'ต้นทางการส่งต่อ',
+  'Received':'รับงานแล้ว',
+  'Attention':'ต้องตรวจสอบ',
+  'persisted capsule events':'เหตุการณ์แคปซูลที่บันทึกไว้',
+  'session-derived preview':'ตัวอย่างจากข้อมูลเซสชัน',
+  'control plane healthy':'control plane ปกติ',
+  'No handoff yet':'ยังไม่มีการส่งต่อ',
+  'Active Capsule':'แคปซูลที่กำลังทำงาน',
+  'Completed':'เสร็จแล้ว',
+  'Task':'งาน',
+  'Workspace':'เวิร์กสเปซ',
+  'Current lane':'เลนปัจจุบัน',
+  'Current stage':'ขั้นตอนปัจจุบัน',
+  'Source':'ต้นทาง',
+  'Last handoff':'การส่งต่อล่าสุด',
+  'A2A task':'งาน A2A',
+  'Next fallback':'ตัวสำรองถัดไป',
+  'View capsule details →':'ดูรายละเอียดแคปซูล →',
+  'Workspace capsule preview':'ตัวอย่างแคปซูลของเวิร์กสเปซ',
+  'Ingress':'ช่องทางเข้า',
+  'Capsule Build':'สร้างแคปซูล',
+  'Context':'บริบท',
+  'Agent Runtime':'รันไทม์เอเจนต์',
+  'Result':'ผลลัพธ์',
+  'ingress':'ช่องทางเข้า',
+  'capsule build':'สร้างแคปซูล',
+  'context':'บริบท',
+  'agent runtime':'รันไทม์เอเจนต์',
+  'result':'ผลลัพธ์',
+  'CONNECTED':'เชื่อมต่อแล้ว',
+  'SESSIONS':'เซสชัน',
+  'RECONNECTS':'การเชื่อมต่อใหม่',
+  'View sessions →':'ดูเซสชัน →',
+  'No tunnels configured.':'ยังไม่ได้ตั้งค่าทันเนล',
+  'Healthy tunnels':'ทันเนลที่ปกติ',
+  'Auto reconnect':'เชื่อมต่อใหม่อัตโนมัติ',
+  'Public MCP gateway':'เกตเวย์ MCP สาธารณะ',
+  'Last poll':'ตรวจล่าสุด',
+  'Enabled':'เปิดใช้งาน',
+  'Disabled':'ปิดใช้งาน',
+  'tunnel id':'รหัสทันเนล',
+  'desired state':'สถานะที่ต้องการ',
+  'server id':'รหัสเซิร์ฟเวอร์',
+  'Availability':'ความพร้อมใช้งาน',
+  'MCP success':'ความสำเร็จของ MCP',
+  'MCP P95 latency':'เวลาแฝง MCP P95',
+  'Queue P95':'คิว P95',
+  'Worker saturation':'ภาระเวิร์กเกอร์',
+  'Reconnect / 100':'เชื่อมต่อใหม่ / 100',
+  'Restore drill':'การทดสอบกู้คืน',
+  'target':'เป้าหมาย',
+  'budget left':'งบคงเหลือ',
+  'Waiting for SLO samples.':'กำลังรอข้อมูลตัวอย่าง SLO',
+  'Supervisor':'ตัวควบคุม',
+  'Cancel pending':'รอยกเลิก',
+  'Detached':'แยกการเชื่อมต่อ',
+  'Open alerts':'การแจ้งเตือนที่เปิดอยู่',
+  'Schema':'สคีมา',
+  'DB integrity':'ความสมบูรณ์ของฐานข้อมูล',
+  'No open operational alerts.':'ไม่มีการแจ้งเตือนระบบที่เปิดอยู่'
 
 };
 let currentLanguage='en';
@@ -209,22 +370,60 @@ function loadFontScale(){
 
 const THEMES=['light','dark'];
 let currentTheme='light';
+
+function syncThemeControls(){
+  const isLight=currentTheme==='light';
+  const isDark=currentTheme==='dark';
+  const light=document.getElementById('themeLightBtn');
+  const dark=document.getElementById('themeDarkBtn');
+  if(light){
+    light.classList.toggle('active',isLight);
+    light.setAttribute('aria-pressed',String(isLight));
+  }
+  if(dark){
+    dark.classList.toggle('active',isDark);
+    dark.setAttribute('aria-pressed',String(isDark));
+  }
+  document.querySelectorAll('[data-proxy-click="themeLightBtn"]').forEach(button=>{
+    button.classList.toggle('active',isLight);
+    button.setAttribute('aria-pressed',String(isLight));
+  });
+  document.querySelectorAll('[data-proxy-click="themeDarkBtn"]').forEach(button=>{
+    button.classList.toggle('active',isDark);
+    button.setAttribute('aria-pressed',String(isDark));
+  });
+}
+
 function applyTheme(theme,{persist=true}={}){
   currentTheme=THEMES.includes(theme)?theme:'light';
   document.documentElement.dataset.theme=currentTheme;
   document.documentElement.style.colorScheme=currentTheme;
   const meta=document.querySelector('meta[name="theme-color"]');
-  if(meta)meta.setAttribute('content',currentTheme==='dark'?'#111318':'#ffffff');
-  const light=document.getElementById('themeLightBtn');
-  const dark=document.getElementById('themeDarkBtn');
-  if(light){light.classList.toggle('active',currentTheme==='light');light.setAttribute('aria-pressed',String(currentTheme==='light'));}
-  if(dark){dark.classList.toggle('active',currentTheme==='dark');dark.setAttribute('aria-pressed',String(currentTheme==='dark'));}
+  if(meta)meta.setAttribute('content',currentTheme==='dark'?'#0d1728':'#f4f7fb');
+  syncThemeControls();
   if(persist)localStorage.setItem('mcp-studio-theme',currentTheme);
 }
+
 function loadTheme(){
   const saved=localStorage.getItem('mcp-studio-theme');
   applyTheme(THEMES.includes(saved)?saved:'light',{persist:false});
 }
+
+const COLOR_SCHEMES=['default','claude','codex','hermes'];
+function applyColorScheme(scheme,{persist=true}={}){
+  const next=COLOR_SCHEMES.includes(scheme)?scheme:'default';
+  document.documentElement.dataset.colorScheme=next;
+  document.querySelectorAll('[data-color-scheme]').forEach(button=>{
+    const selected=button.dataset.colorScheme===next;
+    button.classList.toggle('selected',selected);
+    button.setAttribute('aria-pressed',String(selected));
+  });
+  if(persist)localStorage.setItem('mcp-studio-color-scheme',next);
+}
+function loadColorScheme(){
+  applyColorScheme(localStorage.getItem('mcp-studio-color-scheme')||'default',{persist:false});
+}
+
 
 function openAppDialog({title,message='',icon='?',tone='info',confirmText='Continue',cancelText='Cancel',showCancel=true,fields=[]}={}){
   const dialog=document.getElementById('appDialog');
@@ -250,10 +449,23 @@ function openAppDialog({title,message='',icon='?',tone='info',confirmText='Conti
     label.className='dialog-field';
     const span=document.createElement('span');
     span.textContent=tr(field.label||field.name);
-    const input=document.createElement(field.type==='textarea'?'textarea':'input');
+    let input;
+    if(field.type==='textarea'){
+      input=document.createElement('textarea');
+    }else if(field.type==='select'){
+      input=document.createElement('select');
+      (field.options||[]).forEach(option=>{
+        const el=document.createElement('option');
+        if(typeof option==='string'){el.value=option;el.textContent=tr(option);}
+        else{el.value=option.value;el.textContent=tr(option.label||option.value);}
+        input.appendChild(el);
+      });
+    }else{
+      input=document.createElement('input');
+      input.type=field.type||'text';
+    }
     input.id=`dialogField${index}`;
     input.name=field.name;
-    if(field.type!=='textarea')input.type=field.type||'text';
     input.value=field.value||'';
     if(field.placeholder)input.placeholder=tr(field.placeholder);
     if(field.required)input.required=true;
@@ -312,12 +524,14 @@ async function getJson(url, options){ const r = await fetch(url, options); if(!r
 async function sendJson(url, body){ return getJson(url,{method:'POST',headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)}); }
 
 const viewMeta = {
-  home:['Home','Production','Only what matters right now.'],
-  sessions:['Sessions','Sessions','Create one session per project. Isolation is automatic.'],
-  workspaces:['Workspaces','Workspaces','Manage approved projects, ownership and write safety.'],
+  home:['Dashboard','Dashboard','Live capsule routing, active agent lanes, handoffs, and system health.'],
+  sessions:['Capsule Lanes','Capsule Lanes','Inspect capsule state, routing, handoffs, and session history.'],
+  agents:['Agents','Agents','Monitor Claude, Codex, and Hermes runtime availability and active capsule load.'],
+  workspaces:['Workspaces','Workspaces','Manage approved projects, managed sessions, and workspace safety.'],
   guide:['Guide','Guide','Daily use first, then setup and troubleshooting.'],
-  computer:['Computer','Computer','Shared browser desktop for OAuth and human-in-the-loop actions.'],
-  system:['System','System health','Open diagnostics only when something needs investigation.']
+  computer:['Computer','Computer','Open a shared browser desktop for OAuth, sign-in, consent, and other human-in-the-loop actions.'],
+  system:['System','System','Monitor runtime health, ingress, reliability, and diagnostics.'],
+  settings:['Settings','Settings','Configure appearance, language, text size, and color preferences.']
 };
 
 function setView(view, updateHash=true){
@@ -363,8 +577,18 @@ function normalizeCapsuleStage(stage=''){
 
 function capsuleStageNodes(activeStage=''){
   const active=normalizeCapsuleStage(activeStage);
+  const icon=(key)=>{
+    const paths={
+      ingress:'<path d="M5 12h12M13 8l4 4-4 4"/><path d="M5 7v10"/>',
+      build:'<rect x="5" y="5" width="14" height="14" rx="3"/><path d="M9 9h6M9 13h6"/>',
+      context:'<rect x="5" y="5" width="14" height="14" rx="3"/><path d="M8 8h3v3H8zM13 8h3v3h-3zM8 13h3v3H8zM13 13h3v3h-3z"/>',
+      runtime:'<circle cx="12" cy="12" r="4"/><path d="M12 4v2M12 18v2M4 12h2M18 12h2M6.3 6.3l1.4 1.4M16.3 16.3l1.4 1.4M17.7 6.3l-1.4 1.4M7.7 16.3l-1.4 1.4"/>',
+      result:'<circle cx="12" cy="12" r="7"/><path d="m9 12 2 2 4-4"/>'
+    };
+    return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[key]}</svg>`;
+  };
   const stages=[['ingress','Ingress'],['build','Capsule Build'],['context','Context'],['runtime','Agent Runtime'],['result','Result']];
-  return stages.map(([key,label],i)=>`<div class="capsule-stage ${key===active?'active':''}"><span class="stage-node">${i+1}</span><small>${label}</small></div>`).join('');
+  return stages.map(([key,label])=>`<div class="capsule-stage ${key===active?'active':''}"><span class="stage-node">${icon(key)}</span><small>${label}</small></div>`).join('');
 }
 
 function capsuleContextProfile(capsule){
@@ -412,27 +636,39 @@ function renderAgentLanes(data){
   const fallback=[
     {id:'claude',name:'Claude',brand:'Anthropic',provider:'Anthropic',status:'unknown',installed:false},
     {id:'codex',name:'Codex',brand:'OpenAI',provider:'OpenAI',status:'unknown',installed:false},
-    {id:'hermes',name:'Hermes',brand:'Nous / custom',provider:'Nous / custom',status:'unknown',installed:false}
+    {id:'hermes',name:'Hermes',brand:'Local/Custom',provider:'Local/Custom',status:'unknown',installed:false}
   ];
   const cards=discovered.length?discovered:fallback;
   grid.innerHTML=cards.map(r=>{
     const id=String(r.id||'').toLowerCase();
-    const icon=id==='claude'?'✦':id==='codex'?'⌁':'◆';
-    const state=r.status||'unknown';
-    const model=r.model||r.last_used_model||'Model not reported';
-    const version=r.version||'Version unavailable';
+    const icon=id==='claude'?'✷':id==='codex'?'◎':'⬡';
+    const state=String(r.status||'unknown').toLowerCase();
+    const version=r.version||r.model||r.last_used_model||'—';
     const provider=r.provider||r.brand||'Unknown provider';
-    const free=r.free?'<span class="runtime-free">FREE</span>':'';
     const installed=r.installed!==false;
-    const meter=state==='running'?100:state==='ready'?84:state==='available'?68:state==='blocked'?34:installed?50:8;
+    const online=installed && !['blocked','unavailable','unknown'].includes(state);
+    const activeCapsules=Number(r.active_capsules??r.pane_count??0);
+    const queueLength=Number(r.queue_length??0);
+    const contextLimit=r.context_limit||r.context_window||'—';
+    const lastError=r.last_error||'—';
     return `<article class="agent-runtime-card ${esc(id)}">
-      <div class="agent-runtime-top"><span class="agent-runtime-icon">${icon}</span><div><h3>${esc(r.name||id)}</h3><small>${esc(provider)} ${free}</small></div><span class="runtime-pill runtime-${esc(state)}">${esc(installed?state:'not installed')}</span></div>
-      <div class="agent-runtime-health"><span>${esc(model)}</span><strong>${esc(r.pane_count||0)} pane${Number(r.pane_count||0)===1?'':'s'}</strong></div>
-      <div class="runtime-meter"><i style="width:${meter}%"></i></div>
-      <p>${esc(version)}</p>
-      <div class="runtime-tags"><span>${installed?'Installed':'Missing'}</span><span>Capsules</span><span>Handoff</span>${r.free?'<span>Free model</span>':''}</div>
-      ${id==='hermes'&&r.nous_free?`<div class="runtime-free-note"><strong>Nous Portal</strong><span>${esc(r.nous_free.preferred_model||'')}</span>${r.nous_free.active?'<b>Active</b>':'<small>Fallback candidate</small>'}</div>`:''}
-      <button class="button secondary small" type="button" disabled>Runtime broker next</button>
+      <div class="agent-runtime-top">
+        <span class="agent-runtime-icon">${icon}</span>
+        <div class="agent-runtime-title"><h3>${esc(r.name||id)}</h3><small>${esc(provider)}</small></div>
+        <span class="runtime-pill ${online?'runtime-online':'runtime-offline'}"><i></i>${online?'Online':'Offline'}</span>
+      </div>
+      <div class="agent-reference-facts">
+        <div><span>Version</span><strong>${esc(version)}</strong></div>
+        <div><span>Status</span><strong class="${online?'fact-ready':'fact-muted'}">${esc(online?'Ready':state)}</strong></div>
+        <div><span>Active Capsules</span><strong>${activeCapsules}</strong></div>
+        <div><span>Queue Length</span><strong>${queueLength}</strong></div>
+        <div><span>Context Limit</span><strong>${esc(contextLimit)}</strong></div>
+        <div><span>Last Error</span><strong>${esc(lastError)}</strong></div>
+      </div>
+      <div class="agent-reference-actions">
+        <button class="button secondary small" data-agent-check="${esc(id)}" type="button">Check Runtime</button>
+        <button class="button secondary small agent-log-button" data-agent-details="${esc(id)}" type="button">View Details</button>
+      </div>
     </article>`;
   }).join('');
 }
@@ -460,17 +696,17 @@ function renderOverview(data){
   const runtimeSummary=agentRuntimesData?.summary||{};
 
   document.getElementById('overviewCards').innerHTML=[
-    overviewCard('ACTIVE CAPSULES',String(hasLedger?(capsuleSummary.active||0):(activeSessions.length||running.length)),hasLedger?`${capsuleSummary.total||0} tracked in ledger`:`${running.length} managed sessions`,(capsuleSummary.active||activeSessions.length)?'busy':'healthy'),
-    overviewCard('AGENT LANES',String(runtimeSummary.ready??3),`${runtimeSummary.installed??3} installed · Claude · Codex · Hermes`,'healthy'),
-    overviewCard('HANDOFFS',String(hasLedger?(capsuleSummary.handoffs||0):Math.max(0,(activeSession?.use_count||0)-1)),hasLedger?'persisted capsule events':'session-derived preview',(capsuleSummary.handoffs||0)?'busy':'healthy'),
-    overviewCard('SYSTEM',healthy?'98%':'Attention',openAlerts?`${openAlerts} open alert${openAlerts===1?'':'s'}`:'control plane healthy',healthy?'healthy':'degraded')
+    overviewCard('Active Capsules',String(hasLedger?(capsuleSummary.active||0):(activeSessions.length||running.length)),hasLedger?`${capsuleSummary.total||0} tracked in ledger`:`${running.length} managed sessions`,(capsuleSummary.active||activeSessions.length)?'busy':'healthy'),
+    overviewCard('AI Agents Online',String(runtimeSummary.ready??3),`${runtimeSummary.installed??3} installed · Claude · Codex · Hermes`,'healthy'),
+    overviewCard('Handoffs Today',String(hasLedger?(capsuleSummary.handoffs||0):Math.max(0,(activeSession?.use_count||0)-1)),hasLedger?'persisted capsule events':'session-derived preview','degraded'),
+    overviewCard('Success Rate',healthy?'98%':'Attention',openAlerts?`${openAlerts} open alert${openAlerts===1?'':'s'}`:'control plane healthy',healthy?'healthy':'degraded')
   ].join('');
 
   const runtimeById=Object.fromEntries((agentRuntimesData?.runtimes||[]).map(r=>[r.id,r]));
   const laneDefs={
-    claude:{name:'Claude',sub:runtimeById.claude?.model||'Anthropic',y:92,color:'#f26a2e'},
-    codex:{name:'Codex',sub:runtimeById.codex?.model||'OpenAI Codex',y:189,color:'#10a37f'},
-    hermes:{name:'Hermes',sub:runtimeById.hermes?.model||'Nous / custom',y:286,color:'#7c3aed'}
+    claude:{name:'Claude',sub:runtimeById.claude?.model||'Anthropic',y:44,color:'#f26a2e'},
+    codex:{name:'Codex',sub:runtimeById.codex?.model||'OpenAI Codex',y:142,color:'#10a37f'},
+    hermes:{name:'Hermes',sub:runtimeById.hermes?.model||'Nous / custom',y:240,color:'#7c3aed'}
   };
   const fromAgent=String(lastHandoff?.from_agent||'').toLowerCase();
   const toAgent=String(lastHandoff?.to_agent||'').toLowerCase();
@@ -495,9 +731,9 @@ function renderOverview(data){
   if(lastHandoff && laneDefs[fromAgent] && laneDefs[toAgent]){
     const from=laneDefs[fromAgent], to=laneDefs[toAgent];
     const connectorId=lastHandoff.connector_id||capsuleId;
-    const fromTop=(from.y/390*100).toFixed(2);
-    const toTop=(to.y/390*100).toFixed(2);
-    connector=`<svg class="capsule-connector-layer" viewBox="0 0 1000 390" preserveAspectRatio="none" aria-label="Capsule handoff from ${esc(from.name)} to ${esc(to.name)}">
+    const fromTop=(from.y/284*100).toFixed(2);
+    const toTop=(to.y/284*100).toFixed(2);
+    connector=`<svg class="capsule-connector-layer" viewBox="0 0 1000 284" preserveAspectRatio="none" aria-label="Capsule handoff from ${esc(from.name)} to ${esc(to.name)}">
       <defs>
         <linearGradient id="handoffGradientLive" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${from.color}"/><stop offset="100%" stop-color="${to.color}"/></linearGradient>
         <marker id="handoffArrowLive" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="${to.color}"/></marker>
@@ -518,7 +754,7 @@ function renderOverview(data){
   const lastText=lastHandoff?`${laneDefs[fromAgent]?.name||fromAgent} → ${laneDefs[toAgent]?.name||toAgent}`:'No handoff yet';
   const nextFallback=currentAgent==='claude'?'Codex / Hermes':currentAgent==='codex'?'Hermes':'Codex';
   const stageLabel=String(currentStage||'').replaceAll('_',' ');
-  hero.innerHTML=`<div class="capsule-card-heading compact"><div><span class="eyebrow">CAPSULE STATE</span><h3>${esc(capsuleId)}</h3></div><span class="state-live-dot">${liveCapsule?.status==='completed'?'✓ Completed':'● Live'}</span></div>
+  hero.innerHTML=`<div class="capsule-card-heading compact"><div><span class="capsule-active-label">Active Capsule</span><h3>${esc(capsuleId)}</h3></div><span class="state-live-dot">${liveCapsule?.status==='completed'?'✓ Completed':'● Live'}</span></div>
     ${hasLedger?renderCapsuleContextBar(liveCapsule):''}
     <div class="capsule-state-list">
       <div><span>Task</span><strong>${esc(hasLedger?liveCapsule.title:(activeSession?.name||'Workspace capsule preview'))}</strong></div>
@@ -632,7 +868,21 @@ function renderManagedSessions(data){
     const stop=x.status!=='stopped'?`<button class="button danger small" data-managed-stop="${esc(x.id)}" ${x.connected_transports?'disabled':''}>Stop</button>`:'';
     return `<div class="managed-session-row"><div><strong>${esc(x.name)}</strong><small>${esc(shortId(x.id,18))}</small><span class="project-pin">🔒 PINNED</span></div><div><strong>${esc(x.workspace_key)}</strong><small>${esc(x.project_path)}</small></div><div>${badge(lifecycle)}<small>${esc(x.status)} · port ${esc(x.port||'—')}</small></div><div><strong>${esc(x.connected_transports||0)} transport${x.connected_transports===1?'':'s'}</strong><small>${esc(providers)} · ${esc(ago(last))}</small></div><div class="managed-actions">${resume}<button class="button secondary small" data-managed-rename="${esc(x.id)}" data-managed-name="${esc(x.name)}">Rename</button><button class="text-button" data-managed-history="${esc(x.id)}">History</button>${stop}</div></div>`;
   }).join('')}`:`<div class="empty ${status.enabled?'':'good'}">${status.enabled?'No managed sessions in this view.':'Managed session isolation is disabled in config.'}</div>`;
-  document.getElementById('managedWorkspacesPanel').innerHTML=ws.length?ws.map(w=>{const sessionCount=items.filter(x=>x.workspace_key===w.key).length;const activeCount=items.filter(x=>x.workspace_key===w.key&&x.status!=='stopped').length;const chatCommand=workspaceChatGPTCommand(w.key);return `<div class="workspace-registry-row workspace-registry-rich"><strong>${esc(w.name||w.key)}<small>${esc(w.key)}</small></strong><code>${esc(w.project_path)}</code><div class="workspace-registry-meta"><span class="project-pin">APPROVED</span><small>${activeCount} active · ${sessionCount} sessions</small><button class="button secondary small workspace-copy-command" data-copy-command="${esc(chatCommand)}" data-copy-text="Copy ChatGPT command" data-help="Copy the workspace selection command for ChatGPT." type="button">${esc(tr('Copy ChatGPT command'))}</button></div></div>`}).join(''):'<div class="empty">No approved workspaces registered.</div>';
+  document.getElementById('managedWorkspacesPanel').innerHTML=ws.length?`<div class="workspace-reference-table">
+    <div class="workspace-reference-row header"><span>Name</span><span>Path</span><span>Active Sessions</span><span>Status</span><span>Actions</span></div>
+    ${ws.map(w=>{
+      const sessionCount=items.filter(x=>x.workspace_key===w.key).length;
+      const activeCount=items.filter(x=>x.workspace_key===w.key&&x.status!=='stopped').length;
+      const chatCommand=workspaceChatGPTCommand(w.key);
+      return `<div class="workspace-reference-row">
+        <div class="workspace-reference-name"><span class="workspace-reference-icon">◇</span><strong>${esc(w.name||w.key)}</strong></div>
+        <code>${esc(w.project_path)}</code>
+        <strong>${activeCount}</strong>
+        <span class="workspace-reference-status ${activeCount?'active':'idle'}"><i></i>${activeCount?'Active':'Idle'}</span>
+        <div class="workspace-reference-actions"><button class="button secondary small" data-go-view="sessions" type="button">Open</button><button class="reference-kebab workspace-copy-command" data-copy-command="${esc(chatCommand)}" data-copy-text="Copy ChatGPT command" data-help="Copy the workspace selection command for ChatGPT." type="button" aria-label="More actions">•••</button></div>
+      </div>`;
+    }).join('')}
+  </div>`:'<div class="empty">No approved workspaces registered.</div>';
   const activeWorkspaceKeys=new Set(items.filter(x=>x.status!=='stopped').map(x=>x.workspace_key));
   const leaseCount=data.workerData?.leases?.length||0;
   document.getElementById('workspaceSummary').innerHTML=`<span class="mini-stat primary">Approved <strong>${ws.length}</strong></span><span class="mini-stat">In use <strong>${activeWorkspaceKeys.size}</strong></span><span class="mini-stat ${leaseCount?'warning':''}">Write leases <strong>${leaseCount}</strong></span>`;
@@ -731,9 +981,122 @@ async function load(){
   }
 }
 
+
+function runtimeDetailMessage(runtime){
+  if(!runtime)return 'Runtime information is unavailable.';
+  return [
+    `Status: ${runtime.status||'unknown'}`,
+    `Installed: ${runtime.installed===false?'No':'Yes'}`,
+    `Provider: ${runtime.provider||runtime.brand||'—'}`,
+    `Model: ${runtime.model||runtime.last_used_model||'—'}`,
+    `Version: ${runtime.version||'—'}`,
+    `Active panes: ${runtime.pane_count||0}`,
+    `Binary: ${runtime.binary||'not reported'}`
+  ].join('\n');
+}
+
+async function checkAgentRuntime(id){
+  const inventory=await getJson('/api/agents/runtimes?refresh=true');
+  if(latestData){
+    latestData.agentRuntimesData=inventory;
+    renderAgentLanes(latestData);
+  }
+  const runtime=(inventory.runtimes||[]).find(r=>String(r.id).toLowerCase()===String(id).toLowerCase());
+  await openAppDialog({
+    title:`${runtime?.name||id} runtime check`,
+    message:runtimeDetailMessage(runtime),
+    icon:runtime&&runtime.installed!==false?'✓':'!',
+    tone:runtime&&runtime.installed!==false?'info':'danger',
+    confirmText:'Close',
+    showCancel:false
+  });
+}
+
+async function showAgentRuntimeDetails(id){
+  const inventory=latestData?.agentRuntimesData||await getJson('/api/agents/runtimes');
+  const runtime=(inventory.runtimes||[]).find(r=>String(r.id).toLowerCase()===String(id).toLowerCase());
+  await openAppDialog({
+    title:`${runtime?.name||id} details`,
+    message:runtimeDetailMessage(runtime),
+    icon:'i',
+    tone:'info',
+    confirmText:'Close',
+    showCancel:false
+  });
+}
+
+async function handleSettingsAction(action){
+  if(action==='appearance'){
+    document.querySelector('.reference-settings-content')?.scrollIntoView({behavior:'smooth',block:'start'});
+    return;
+  }
+  if(['agents','sessions','workspaces','computer'].includes(action)){
+    setView(action);
+    return;
+  }
+  if(action==='system-status'){
+    setView('system');
+    return;
+  }
+  if(action==='about'){
+    const status=latestData?.status?.studio||{};
+    await openAppDialog({
+      title:'About HIRDA',
+      message:`HIRDA · Multi-Agent Orchestration\nVersion: ${status.version||'—'}\nStatus: ${status.status||'unknown'}`,
+      icon:'H',
+      tone:'info',
+      confirmText:'Close',
+      showCancel:false
+    });
+  }
+}
+
+async function showNotifications(){
+  const alerts=latestData?.alertsData?.alerts||[];
+  const message=alerts.length
+    ? alerts.slice(0,6).map(a=>`• ${String(a.severity||'info').toUpperCase()} · ${a.message||a.kind||'Alert'}`).join('\n')
+    : 'No open alerts.';
+  await openAppDialog({
+    title:alerts.length?`Open alerts (${alerts.length})`:'Notifications',
+    message,
+    icon:alerts.length?'!':'✓',
+    tone:alerts.length?'danger':'info',
+    confirmText:'Close',
+    showCancel:false
+  });
+}
+
+async function runGlobalSearch(raw){
+  const query=String(raw||'').trim().toLowerCase();
+  if(!query)return;
+  const routes=[
+    [/(dashboard|home|overview)/,'home'],
+    [/(capsule|session|handoff)/,'sessions'],
+    [/(agent|claude|codex|hermes)/,'agents'],
+    [/(workspace|project)/,'workspaces'],
+    [/(computer|browser|vnc|tool)/,'computer'],
+    [/(system|health|slo|tunnel|alert|diagnostic|telemetry)/,'system'],
+    [/(setting|theme|appearance|language|font|color scheme)/,'settings']
+  ];
+  const hit=routes.find(([pattern])=>pattern.test(query));
+  if(hit){setView(hit[1]);return;}
+  await openAppDialog({
+    title:'Search',
+    message:`No section matched “${raw}”. Try capsule, agent, workspace, computer, or settings.`,
+    icon:'⌕',
+    tone:'info',
+    confirmText:'Close',
+    showCancel:false
+  });
+}
+
 document.querySelectorAll('.primary-nav a[data-view], .mobile-nav a[data-view]').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();setView(a.dataset.view);}));
 document.addEventListener('click',e=>uiAction(async()=>{
   const copy=e.target.closest('[data-copy-command],[data-copy-source]'); if(copy){await copyChatGPTCommand(copy);return;}
+  const settingsAction=e.target.closest('[data-settings-action]'); if(settingsAction){await handleSettingsAction(settingsAction.dataset.settingsAction);return;}
+  const scheme=e.target.closest('[data-color-scheme]'); if(scheme){applyColorScheme(scheme.dataset.colorScheme);return;}
+  const agentCheck=e.target.closest('[data-agent-check]'); if(agentCheck){await checkAgentRuntime(agentCheck.dataset.agentCheck);return;}
+  const agentDetails=e.target.closest('[data-agent-details]'); if(agentDetails){await showAgentRuntimeDetails(agentDetails.dataset.agentDetails);return;}
   const go=e.target.closest('[data-go-view]'); if(go){setView(go.dataset.goView);return;}
   const tunnel=e.target.closest('[data-tunnel-session]'); if(tunnel){sessionTunnelFilter=tunnel.dataset.tunnelSession;showSessionHistory=false;setView('sessions');if(latestData)renderSessions(latestData);return;}
   const restart=e.target.closest('[data-managed-restart]'); if(restart){await sendJson(`/api/managed/sessions/${encodeURIComponent(restart.dataset.managedRestart)}/restart`);await load();return;}
@@ -779,6 +1142,8 @@ document.getElementById('sessionHistoryToggle').addEventListener('click',()=>{sh
 document.getElementById('refreshBtn').addEventListener('click',()=>uiAction(async()=>{const b=document.getElementById('refreshBtn');b.disabled=true;b.textContent=tr('Refreshing…');try{await load();}finally{b.disabled=false;b.textContent=tr('Refresh');}}));
 document.getElementById('pollBtn').addEventListener('click',()=>uiAction(async()=>{const b=document.getElementById('pollBtn');b.disabled=true;b.textContent=tr('Polling…');try{await getJson('/api/health/poll',{method:'POST'});await load();}finally{b.disabled=false;b.textContent=tr('Poll health');}}));
 document.getElementById('herdrBtn').addEventListener('click',()=>uiAction(async()=>{const b=document.getElementById('herdrBtn');b.disabled=true;b.textContent=tr('Refreshing…');try{await getJson('/api/herdr/refresh',{method:'POST'});await load();}finally{b.disabled=false;b.textContent=tr('Refresh Herdr');}}));
+document.getElementById('notificationBtn')?.addEventListener('click',()=>uiAction(showNotifications));
+document.getElementById('globalSearch')?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();uiAction(()=>runGlobalSearch(e.currentTarget.value));}});
 window.addEventListener('hashchange',()=>setView((location.hash||'#home').slice(1),false));
 
 
@@ -831,6 +1196,7 @@ window.addEventListener('scroll',()=>hideHelpTooltip(),{passive:true});
 window.addEventListener('resize',()=>hideHelpTooltip());
 
 loadTheme();
+loadColorScheme();
 loadFontScale();
 loadLanguage();
 setView(currentView,false);
@@ -868,6 +1234,9 @@ function renderComputerSessions(sessions){
     const name=esc(s.workspace_key||s.name||s.id);
     const workspace=esc((s.name&&s.name!==s.workspace_key)?s.name:(s.project_path||'Managed session'));
     const status=esc(s.status||'unknown');
+    const runtimeDisplays=(computerUiState.status&&computerUiState.status.runtime_displays)||{};
+    const runtimeDisplay=runtimeDisplays[s.id];
+    const runtimeLabel=Number.isInteger(runtimeDisplay)?('VNC :'+runtimeDisplay):'VNC unpaired';
     const selected=s.id===computerUiState.selectedSessionId;
     const accent=accents[index%accents.length];
     const permissions=s.tool_permissions||{};
@@ -879,7 +1248,7 @@ function renderComputerSessions(sessions){
       +permissionBadge('read','R')+permissionBadge('write','W')+permissionBadge('execute','X')+permissionBadge('destructive','D')+'</span>');
     return '<button class="computer-session-card'+(selected?' selected':'')+'" style="--session-accent:'+accent+'" type="button" data-computer-session="'+id+'" data-status="'+status+'" aria-pressed="'+(selected?'true':'false')+'">'
       +'<span class="computer-monitor-icon">'+computerMonitorSvg()+'<span class="computer-monitor-glow"></span></span>'
-      +'<span class="computer-session-copy"><strong>'+name+'</strong><small>'+workspace+'</small></span>'
+      +'<span class="computer-session-copy"><strong>'+name+'</strong><small>'+workspace+'</small><small class="computer-session-runtime">'+esc(runtimeLabel)+'</small></span>'
       +permissionRow
       +'<span class="computer-session-status"><i></i>'+status+'</span>'
       +'</button>';
@@ -913,7 +1282,7 @@ async function refreshComputerView(){
     renderComputerSessions(sessions);
     if(!status.enabled)computerMessage('Computer Use is disabled in HIRDA config.','warning');
     else if(!status.novnc_available)computerMessage('Local noVNC assets are missing.','warning');
-    else if(!status.websockify_reachable)computerMessage('Local websockify bridge is offline.','warning');
+    else if(!(status.runtime_mode==='session-isolated'?status.transport_ready:status.websockify_reachable))computerMessage(status.runtime_mode==='session-isolated'?'Session VNC transport is offline.':'Local websockify bridge is offline.','warning');
     else if(!sessions.length)computerMessage('Computer desktop is ready, but no managed sessions are available.','warning');
     else if(ready)computerMessage('Choose a monitor to open that session desktop.','good');
   }catch(err){
@@ -929,7 +1298,7 @@ async function connectComputerView(id){
     const status=computerUiState.status||await getJson('/api/computer/status');
     if(!status.enabled)throw new Error('Computer Use is disabled');
     if(!status.novnc_available)throw new Error('Local noVNC assets are missing');
-    if(!status.websockify_reachable)throw new Error('Local websockify bridge is offline');
+    if(!(status.runtime_mode==='session-isolated'?status.transport_ready:status.websockify_reachable))throw new Error(status.runtime_mode==='session-isolated'?'Session VNC transport is offline':'Local websockify bridge is offline');
     const descriptor=await getJson('/api/computer/descriptor/'+encodeURIComponent(id));
     computerUiState.descriptor=descriptor;
     computerUiState.selectedSessionId=id;
@@ -938,7 +1307,7 @@ async function connectComputerView(id){
     const name=document.getElementById('computerSelectedSessionName');
     const meta=document.getElementById('computerSelectedSessionMeta');
     if(name)name.textContent=session.name||session.workspace_key||id;
-    if(meta)meta.textContent=(session.workspace_key||'managed session')+' · '+(session.status||'unknown');
+    if(meta)meta.textContent=(session.workspace_key||'managed session')+' · '+(session.status||'unknown')+' · VNC '+(descriptor.desktop_display||'unpaired')+(descriptor.cdp_port?' · CDP '+descriptor.cdp_port:'');
     const websocketPath=descriptor.websocket_path||('/api/computer/vnc/ws/'+encodeURIComponent(id));
     // noVNC resolves its `path` setting relative to vnc.html. The viewer is
     // mounted at /computer/novnc/, so climb back to the application root first.
@@ -946,18 +1315,126 @@ async function connectComputerView(id){
     const tokenInput=document.getElementById('computerTokenInput');
     const token=(tokenInput&&tokenInput.value||'').trim();
     if(token)path+=(path.includes('?')?'&':'?')+'token='+encodeURIComponent(token);
-    const url=new URL(descriptor.viewer_url||'/computer/novnc/vnc.html',location.origin);
-    url.searchParams.set('autoconnect','true');
-    url.searchParams.set('resize','scale');
-    url.searchParams.set('path',path);
+
+    const vncPasswordInput=document.getElementById('computerVncPasswordInput');
+    const vncPassword=(vncPasswordInput&&vncPasswordInput.value||'').trim();
     const panel=document.getElementById('computerViewerPanel');
     const iframe=document.getElementById('computerViewer');
     if(panel)panel.hidden=false;
-    if(iframe)iframe.src=url.pathname+url.search;
+
+    if(descriptor.runtime_mode==='session-isolated'&&!vncPassword){
+      if(iframe)iframe.src='about:blank';
+      if(vncPasswordInput)vncPasswordInput.focus();
+      computerMessage('Enter the VNC password, then press Reconnect.','warning');
+      return;
+    }
+
+    const url=new URL(descriptor.viewer_url||'/computer/novnc/vnc.html',location.origin);
+    const viewerParams=new URLSearchParams();
+    viewerParams.set('autoconnect','true');
+    viewerParams.set('reconnect','0');
+    viewerParams.set('resize','scale');
+    viewerParams.set('path',path);
+    if(vncPassword)viewerParams.set('password',vncPassword);
+    // Use the fragment so credentials and viewer parameters are never sent to
+    // the static-file server or reverse proxy and cannot poison noVNC caches.
+    url.hash=viewerParams.toString();
+    if(iframe)iframe.src=url.pathname+url.hash;
     if(panel)panel.scrollIntoView({behavior:'smooth',block:'start'});
     computerMessage('Opened '+(session.name||session.workspace_key||'session')+' desktop. If noVNC asks for credentials, enter the existing VNC password.','good');
   }catch(err){
     computerMessage('Could not connect: '+err.message,'error');
+  }
+}
+
+async function repairComputerView(){
+  const id=computerUiState.selectedSessionId;
+  if(!id){computerMessage('Choose a managed session first.','warning');return;}
+
+  let targetInfo;
+  try{
+    targetInfo=await getJson('/api/computer/re-pair-targets/'+encodeURIComponent(id));
+  }catch(err){
+    computerMessage('Could not load re-pair targets: '+err.message,'error');
+    return;
+  }
+
+  const availableTargets=(targetInfo.targets||[]).filter(target=>target.available);
+  const targetOptions=[
+    {value:'auto',label:'Auto · next available desktop'},
+    ...availableTargets.map(target=>({value:String(target.display),label:'VNC :'+target.display}))
+  ];
+  const adopted=!!targetInfo.current_adopted;
+  const modeOptions=adopted
+    ? [{value:'fresh',label:'Fresh desktop'}]
+    : [
+        {value:'keep',label:'Keep browser session'},
+        {value:'fresh',label:'Fresh desktop'}
+      ];
+  const currentLabel=targetInfo.current_display==null?'unpaired':(':'+targetInfo.current_display);
+  const result=await openAppDialog({
+    title:'Re-pair Computer runtime',
+    message:adopted
+      ? 'Current desktop '+currentLabel+' is externally adopted. Choose a new target; Fresh desktop avoids sharing a live browser profile with the adopted runtime.'
+      : 'Move '+currentLabel+' to a specific free VNC desktop or let HIRDA choose automatically.',
+    icon:'↻',
+    tone:'info',
+    confirmText:'Re-pair',
+    fields:[
+      {
+        name:'mode',
+        label:'Browser state',
+        type:'select',
+        value:adopted?'fresh':'keep',
+        options:modeOptions
+      },
+      {
+        name:'target_display',
+        label:'Target desktop',
+        type:'select',
+        value:'auto',
+        options:targetOptions
+      }
+    ]
+  });
+  if(!result.confirmed)return;
+
+  const mode=result.values.mode||(adopted?'fresh':'keep');
+  const targetValue=result.values.target_display||'auto';
+  const targetDisplay=targetValue==='auto'?null:Number(targetValue);
+  const iframe=document.getElementById('computerViewer');
+  if(iframe)iframe.src='about:blank';
+  computerMessage('Re-pairing Computer runtime…','');
+
+  try{
+    const descriptor=await sendJson(
+      '/api/computer/re-pair/'+encodeURIComponent(id),
+      {mode,target_display:targetDisplay}
+    );
+    computerUiState.descriptor=descriptor;
+    computerUiState.selectedSessionId=id;
+    if(computerUiState.status){
+      computerUiState.status.runtime_displays=computerUiState.status.runtime_displays||{};
+      const nextDisplay=Number(String(descriptor.desktop_display||'').replace(':',''));
+      if(Number.isInteger(nextDisplay))computerUiState.status.runtime_displays[id]=nextDisplay;
+    }
+    renderComputerSessions(computerUiState.sessions);
+
+    const repair=descriptor.re_pair||{};
+    const from=repair.previous_display?('VNC '+repair.previous_display):'unpaired';
+    const to=descriptor.desktop_display?('VNC '+descriptor.desktop_display):'new desktop';
+    const passwordInput=document.getElementById('computerVncPasswordInput');
+    const hasPassword=!!(passwordInput&&passwordInput.value.trim());
+
+    if(hasPassword){
+      await connectComputerView(id);
+      computerMessage('Re-paired '+from+' → '+to+(mode==='keep'?' with browser session preserved.':' with a fresh browser profile.'),'good');
+    }else{
+      computerMessage('Re-paired '+from+' → '+to+'. Enter the VNC password and press Reconnect.','good');
+      if(passwordInput)passwordInput.focus();
+    }
+  }catch(err){
+    computerMessage('Re-pair failed: '+err.message,'error');
   }
 }
 
@@ -986,10 +1463,31 @@ document.addEventListener('click',function(event){
   if(sessionCard){connectComputerView(sessionCard.dataset.computerSession);return;}
   const target=event.target.closest&&event.target.closest('button');
   if(!target)return;
-  if(target.id==='computerReconnectBtn')connectComputerView(computerUiState.selectedSessionId);
+  if(target.id==='computerRePairBtn')repairComputerView();
+  else if(target.id==='computerReconnectBtn')connectComputerView(computerUiState.selectedSessionId);
   else if(target.id==='computerDisconnectBtn')disconnectComputerView();
   else if(target.id==='computerFullscreenBtn')fullscreenComputerView();
 });
 
 window.addEventListener('hashchange',function(){if(location.hash==='#computer')refreshComputerView();});
 if((location.hash||'#home')==='#computer')setTimeout(refreshComputerView,0);
+
+/* Reference settings proxies keep the compact topbar faithful without removing controls. */
+document.addEventListener('click',function(event){
+  const proxy=event.target.closest&&event.target.closest('[data-proxy-click]');
+  if(!proxy)return;
+  const target=document.getElementById(proxy.dataset.proxyClick||'');
+  if(target)target.click();
+});
+const referenceLanguageSelect=document.getElementById('referenceLanguageSelect');
+const hiddenLanguageSelect=document.getElementById('languageSelect');
+if(referenceLanguageSelect&&hiddenLanguageSelect){
+  referenceLanguageSelect.value=hiddenLanguageSelect.value||'en';
+  referenceLanguageSelect.addEventListener('change',function(){
+    hiddenLanguageSelect.value=referenceLanguageSelect.value;
+    hiddenLanguageSelect.dispatchEvent(new Event('change',{bubbles:true}));
+  });
+  hiddenLanguageSelect.addEventListener('change',function(){
+    referenceLanguageSelect.value=hiddenLanguageSelect.value;
+  });
+}

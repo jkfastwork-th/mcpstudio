@@ -5,11 +5,23 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1" name="viewport"/>
 <meta content="light dark" name="color-scheme"/>
-<meta content="#ffffff" name="theme-color"/>
+<meta content="#f4f7fb" name="theme-color"/>
+<script>
+(function(){
+  try{
+    var saved=localStorage.getItem('mcp-studio-theme');
+    var theme=(saved==='dark'||saved==='light')?saved:'light';
+    document.documentElement.dataset.theme=theme;
+    document.documentElement.style.colorScheme=theme;
+    var meta=document.querySelector('meta[name="theme-color"]');
+    if(meta)meta.setAttribute('content',theme==='dark'?'#0d1728':'#f4f7fb');
+  }catch(_err){}
+})();
+</script>
 <title>HIRDA · Agent Runtime & Control Plane</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-<link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Kanit:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
 <link href="/static/styles.css" rel="stylesheet"/>
 </head>
 <body>
@@ -17,23 +29,21 @@
 <aside class="sidebar focus-sidebar">
 <div class="brand">
 <div aria-hidden="true" class="brand-mark">H</div>
-<div><strong>HIRDA</strong><small>One control plane. Many agents.</small></div>
+<div><strong>HIRDA</strong><small>Multi-Agent Orchestration</small></div>
 </div>
 <div class="environment-card compact-env">
 <span class="status-beacon"></span>
 <div><strong>Live</strong><small>All ingress through HIRDA Gateway</small></div>
 </div>
 <nav aria-label="Primary navigation" class="primary-nav focus-nav capsule-primary-nav">
-<a class="active" data-help="Live capsule routing, current agent lane, handoffs and system health." data-view="home" href="#home"><span>▣</span>Dashboard</a>
-<a data-help="Capsule work, session state and handoff history." data-view="sessions" href="#sessions"><span>◉</span>Capsules</a>
-<a data-help="Claude, Codex and Hermes runtime availability and lane status." data-view="agents" href="#agents"><span>◈</span>Agents</a>
+<a class="active" data-help="Live capsule routing, active agent lanes, handoffs, and system health." data-view="home" href="#home"><span>▣</span>Dashboard</a>
+<a data-help="Inspect capsule state, routing, handoffs, and session history." data-view="sessions" href="#sessions"><span>◉</span>Capsule Lanes</a>
+<a data-help="Monitor Claude, Codex, and Hermes runtime availability." data-view="agents" href="#agents"><span>◈</span>Agents</a>
 <a data-help="Approved project folders, managed sessions and workspace safety." data-view="workspaces" href="#workspaces"><span>▢</span>Workspaces</a>
 <a data-help="Shared browser desktop for OAuth, login and consent screens." data-view="computer" href="#computer"><span>▤</span>Computer</a>
-<a data-help="Appearance, system controls and advanced diagnostics." data-view="system" href="#system"><span>⚙</span>Settings</a>
+<a data-help="Runtime health, tunnels, alerts, SLO and operational diagnostics." data-view="system" href="#system"><span>◫</span>System</a>
+<a data-help="Appearance and interface preferences." data-view="settings" href="#settings"><span>⚙</span>Settings</a>
 </nav>
-<div class="sidebar-footer">
-<div class="release-row"><span class="release-dot"></span><div><strong>v0.9.9</strong><small>Production isolated</small></div></div>
-</div>
 </aside>
 <div class="workspace">
 <header class="topbar focus-topbar">
@@ -43,6 +53,7 @@
 <p id="viewSubtitle">Only what matters right now.</p>
 </div>
 <div class="header-actions focus-actions">
+<div class="reference-topbar-tools"><label class="reference-search" aria-label="Search"><span aria-hidden="true">⌕</span><input id="globalSearch" type="search" placeholder="Search capsules, tasks, or workspaces…"/></label><button class="reference-icon-button" id="notificationBtn" type="button" aria-label="Notifications" data-help="Show current open alerts."><span aria-hidden="true">♧</span><i></i></button><span class="reference-avatar" aria-label="Signed in as JK">JK</span></div>
 <span class="muted" id="lastUpdated">Waiting…</span>
 <div class="language-control" data-help="Change interface language. Your choice is saved in this browser."><label class="language-label" for="languageSelect">Language</label><select aria-label="Interface language" class="language-select" id="languageSelect"><option value="en">English</option><option value="th">ไทย</option></select></div><div aria-label="Color theme" class="theme-control" data-help="Switch between Light and Dark. Your choice is saved in this browser." role="group">
 <button aria-label="Use light theme" class="theme-button" data-help="Use the light Google-inspired color theme." id="themeLightBtn" type="button"><span aria-hidden="true">☀</span><span>Light</span></button>
@@ -101,7 +112,7 @@
 </section>
 <section class="view-page" data-page="sessions">
 <div class="page-section-head focus-page-head">
-<div><span class="eyebrow">CAPSULES</span><h2>Capsules</h2><p>Inspect live capsule state, connector routes and the persisted handoff timeline.</p></div>
+<div><span class="eyebrow">CAPSULE LANES</span><h2>Capsule Lanes</h2><p>Inspect capsule state, routing, handoffs, and session history.</p></div>
 <div class="toolbar">
 <button class="button secondary small" data-help="Show sessions that have been stopped but can still be resumed." id="managedHistoryToggle">Show stopped</button>
 <button class="button small" data-help="Create a new isolated Serena session for one registered workspace." id="newManagedSessionBtn">+ New session</button>
@@ -157,7 +168,7 @@
 </section>
 <section class="view-page" data-page="agents">
 <div class="page-section-head focus-page-head capsule-section-head">
-  <div><span class="eyebrow">AGENT RUNTIMES</span><h2>Agents</h2><p>Claude, Codex and Hermes are the first-class lanes. Runtime detection and switching will bind here next.</p></div>
+  <div><span class="eyebrow">AGENT RUNTIMES</span><h2>Agents</h2><p>Monitor Claude, Codex, and Hermes runtime availability and active capsule load.</p></div>
 </div>
 <div class="agent-runtime-grid" id="agentRuntimeGrid"></div>
 <div class="agent-runtime-footnote panel-card">
@@ -250,11 +261,49 @@
 <div><strong>Need context?</strong><p>Hover or focus a ? marker and key controls to see a short explanation.</p></div>
 </div>
 </section>
-<section class="view-page" data-page="system">
+<section class="view-page" data-page="settings">
 <div class="page-section-head focus-page-head">
-<div><span class="eyebrow">SETTINGS</span><h2>Settings &amp; diagnostics</h2><p>Daily controls stay simple. Operational details remain available below when you need them.</p></div>
-<div class="toolbar"><button class="button secondary small" data-help="Run an immediate health poll of registered MCP servers." id="pollBtn">Poll health</button><button class="button secondary small" data-help="Refresh Herdr agent and pane inventory." id="herdrBtn">Refresh Herdr</button></div>
+<div><span class="eyebrow">SETTINGS</span><h2>Settings</h2><p>Configure appearance, language, text size, and color preferences.</p></div>
 </div>
+<div class="reference-settings-layout settings-only-layout panel-card">
+  <section class="reference-settings-content">
+    <div class="reference-settings-head"><div><h3>Appearance</h3><p>Theme, language, text size, and color scheme.</p></div></div>
+    <div class="reference-setting-group">
+      <span class="reference-setting-label">Theme</span>
+      <div class="reference-segmented reference-theme-toggle"><button class="reference-theme-light" data-proxy-click="themeLightBtn" type="button"><i class="setting-radio"></i>Light</button><button class="reference-theme-dark" data-proxy-click="themeDarkBtn" type="button"><i class="setting-radio"></i>Dark</button></div>
+    </div>
+    <div class="reference-setting-group">
+      <span class="reference-setting-label">Language</span>
+      <select class="reference-settings-select" id="referenceLanguageSelect" aria-label="Settings language"><option value="en">English</option><option value="th">ไทย</option></select>
+    </div>
+    <div class="reference-setting-group">
+      <span class="reference-setting-label">Text size</span>
+      <div class="reference-segmented"><button data-proxy-click="fontDecreaseBtn" type="button">A−</button><button data-proxy-click="fontResetBtn" type="button">Default</button><button data-proxy-click="fontIncreaseBtn" type="button">A+</button></div>
+    </div>
+    <div class="reference-setting-group">
+      <span class="reference-setting-label">Color Scheme</span>
+      <div class="reference-color-schemes">
+        <button class="selected" data-color-scheme="default" type="button"><i class="scheme-dot default"></i>Default</button>
+        <button data-color-scheme="claude" type="button"><i class="scheme-dot claude"></i>Claude Theme</button>
+        <button data-color-scheme="codex" type="button"><i class="scheme-dot codex"></i>Codex Theme</button>
+        <button data-color-scheme="hermes" type="button"><i class="scheme-dot hermes"></i>Hermes Theme</button>
+      </div>
+    </div>
+    <div class="reference-theme-preview">
+      <div class="claude"><span>✷</span><div><strong>Claude</strong><small>Anthropic</small></div></div>
+      <div class="codex"><span>◎</span><div><strong>Codex</strong><small>OpenAI</small></div></div>
+      <div class="hermes"><span>⬡</span><div><strong>Hermes</strong><small>Local / Custom</small></div></div>
+    </div>
+  </section>
+</div>
+</section>
+
+<section class="view-page" data-page="system">
+<div class="page-section-head focus-page-head operations-page-head">
+<div><span class="eyebrow">SYSTEM</span><h2>System</h2><p>Monitor runtime health, ingress, reliability, and diagnostics.</p></div>
+<div class="toolbar"><button class="button secondary small" data-proxy-click="refreshBtn" type="button">Refresh status</button><button class="button secondary small" data-help="Run an immediate health poll of registered MCP servers." id="pollBtn">Poll health</button><button class="button secondary small" data-help="Refresh Herdr agent and pane inventory." id="herdrBtn">Refresh Herdr</button></div>
+</div>
+
 <div class="system-essentials">
 <article class="panel-card"><div class="panel-head"><div><span class="eyebrow">INGRESS</span><h3>Tunnels</h3></div></div><div class="tunnel-grid" id="tunnelsPanel"></div></article>
 <article class="panel-card"><div class="panel-head"><div><span class="eyebrow">RELIABILITY</span><h3>Alerts &amp; SLO</h3></div></div><div id="sloPanel"></div></article>
@@ -280,8 +329,8 @@
 <div class="page-section-head focus-page-head computer-page-head">
   <div>
     <span class="eyebrow">COMPUTER USE</span>
-    <h2>Browser desktops</h2>
-    <p>Choose a managed session to open its shared browser desktop. VNC stays unloaded until you select a monitor.</p>
+    <h2>Computer</h2>
+    <p>Open a shared browser desktop for OAuth, sign-in, consent, and other human-in-the-loop actions.</p>
   </div>
   <div class="computer-status-block">
     <div class="computer-status-head"><span class="computer-status-pill" id="computerStatusPill">checking</span></div>
@@ -318,7 +367,12 @@
       <span>Token</span>
       <input id="computerTokenInput" type="password" autocomplete="off" placeholder="Computer token">
     </label>
+    <label class="computer-token-inline" id="computerVncPasswordWrap">
+      <span>VNC password</span>
+      <input id="computerVncPasswordInput" type="password" autocomplete="off" placeholder="VNC password">
+    </label>
     <div class="computer-viewer-actions">
+      <button class="button secondary small" id="computerRePairBtn" type="button">Re-pair</button>
       <button class="button secondary small" id="computerReconnectBtn" type="button">Reconnect</button>
       <button class="button secondary small" id="computerDisconnectBtn" type="button">Disconnect</button>
       <button class="button secondary small" id="computerFullscreenBtn" type="button">Fullscreen</button>
@@ -337,11 +391,12 @@
 </div>
 <nav aria-label="Mobile navigation" class="mobile-nav capsule-mobile-nav">
 <a class="active" data-view="home" href="#home"><span>▣</span><small>Dashboard</small></a>
-<a data-view="sessions" href="#sessions"><span>◉</span><small>Capsules</small></a>
+<a data-view="sessions" href="#sessions"><span>◉</span><small>Capsule Lanes</small></a>
 <a data-view="agents" href="#agents"><span>◈</span><small>Agents</small></a>
 <a data-view="workspaces" href="#workspaces"><span>▢</span><small>Workspaces</small></a>
 <a data-view="computer" href="#computer"><span>▤</span><small>Computer</small></a>
-<a data-view="system" href="#system"><span>⚙</span><small>Settings</small></a>
+<a data-view="system" href="#system"><span>◫</span><small>System</small></a>
+<a data-view="settings" href="#settings"><span>⚙</span><small>Settings</small></a>
 </nav>
 <div class="help-tooltip" hidden="" id="helpTooltip" role="tooltip"></div>
 <dialog aria-labelledby="appDialogTitle" class="app-dialog" id="appDialog">
