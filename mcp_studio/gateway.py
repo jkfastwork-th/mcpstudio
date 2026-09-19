@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -63,9 +64,10 @@ class GatewaySessionManager:
         """Authenticate and derive a stable client identity.
 
         Returns (token, client_id, client_type, identity_scope, identity_source).
-        identity_scope is intentionally explicit: bearer-derived identity is a
-        connector/install identity and MUST NOT be interpreted as a ChatGPT
-        conversation id.
+        Raw conversation identifiers are never persisted. When ChatGPT supplies
+        x-openai-session we hash it together with the authenticated connector
+        namespace so logical-session reclaim is conversation-scoped instead of
+        connector-wide.
         """
         expected = os.environ.get(self.settings.studio.gateway_token_env, "")
         supplied = request.headers.get("authorization", "")
@@ -77,9 +79,6 @@ class GatewaySessionManager:
             try:
                 oauth_claims = self.oauth.verify_access_token(token)
             except Exception as exc:
-                # A missing/invalid OAuth signing configuration is a server
-                # readiness issue, but it must not break the certified static
-                # gateway credential path.
                 raise HTTPException(status_code=503, detail=f"OAuth gateway authentication is not ready: {exc}")
         if self.settings.studio.gateway_auth_mode == "bearer":
             if not token:
@@ -102,20 +101,30 @@ class GatewaySessionManager:
                 raise HTTPException(status_code=503, detail="Gateway authentication is not configured")
 
         explicit = (request.headers.get("x-mcp-studio-client-id") or "").strip()
+        openai_session = (request.headers.get("x-openai-session") or "").strip()
         if explicit:
             client_id = explicit[:240]
             identity_scope = "explicit"
             identity_source = "x-mcp-studio-client-id"
+        elif openai_session:
+            if oauth_claims is not None:
+                connector_namespace = f"oauth:{oauth_claims.client_id}"
+            elif token:
+                connector_namespace = "bearer:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+            else:
+                ua = request.headers.get("user-agent", "anonymous")
+                connector_namespace = "anonymous:" + hashlib.sha256(ua.encode("utf-8")).hexdigest()
+            digest = hashlib.sha256(
+                (connector_namespace + "\0" + openai_session).encode("utf-8")
+            ).hexdigest()[:24]
+            client_id = "conversation-" + digest
+            identity_scope = "conversation"
+            identity_source = "x-openai-session-fingerprint"
         elif oauth_claims is not None:
-            # Stable across access-token refreshes without conflating this with
-            # a ChatGPT conversation id. The OAuth client registration is the
-            # connector identity.
             client_id = "oauth-" + hashlib.sha256(oauth_claims.client_id.encode("utf-8")).hexdigest()[:24]
             identity_scope = "connector"
             identity_source = "oauth-client-id"
         elif token:
-            # Static gateway bearer compatibility path used by certification
-            # and local administration. This remains connector-scoped.
             client_id = "bearer-" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:24]
             identity_scope = "connector"
             identity_source = "bearer-fingerprint"
@@ -156,7 +165,7 @@ class GatewaySessionManager:
             "user_agent": ua,
             "identity_scope": identity_scope,
             "identity_source": identity_source,
-            "conversation_identity_available": identity_scope == "explicit",
+            "conversation_identity_available": identity_scope in {"explicit", "conversation"},
             "observed_header_names": observed_header_names,
         }
 
@@ -497,6 +506,69 @@ class GatewaySessionManager:
                 raise RuntimeError(f"upstream initialized notification failed HTTP {initialized.status_code}")
         return upstream_id
 
+    @staticmethod
+    def _initialize_response_cache(
+        content: bytes,
+        *,
+        status_code: int,
+        content_type: str,
+    ) -> dict[str, Any]:
+        return {
+            "body_b64": base64.b64encode(content).decode("ascii"),
+            "status_code": int(status_code),
+            "content_type": str(content_type or "application/json"),
+        }
+
+    @staticmethod
+    def _cached_initialize_response(
+        session: dict[str, Any],
+        *,
+        request_id: Any,
+    ) -> tuple[bytes, int, str] | None:
+        cache = (session.get("metadata") or {}).get("initialize_response")
+        if not isinstance(cache, dict):
+            return None
+        encoded = cache.get("body_b64")
+        if not isinstance(encoded, str) or not encoded:
+            return None
+        try:
+            content = base64.b64decode(encoded.encode("ascii"), validate=True)
+            status_code = int(cache.get("status_code") or 200)
+        except (ValueError, TypeError):
+            return None
+        content_type = str(cache.get("content_type") or "application/json")
+
+        # A reclaimed external transport may choose a different JSON-RPC request
+        # id for initialize. Reuse the upstream result/capabilities while making
+        # the replay a valid response to the new request.
+        try:
+            if "text/event-stream" in content_type:
+                rewritten: list[str] = []
+                for line in content.decode("utf-8").splitlines(keepends=True):
+                    if line.startswith("data:"):
+                        suffix = "\n" if line.endswith("\n") else ""
+                        payload = line[5:].strip()
+                        item = json.loads(payload)
+                        if isinstance(item, dict) and "id" in item:
+                            item["id"] = request_id
+                            line = "data: " + json.dumps(
+                                item, ensure_ascii=False, separators=(",", ":")
+                            ) + suffix
+                    rewritten.append(line)
+                content = "".join(rewritten).encode("utf-8")
+            else:
+                item = json.loads(content)
+                if isinstance(item, dict) and "id" in item:
+                    item["id"] = request_id
+                    content = json.dumps(
+                        item, ensure_ascii=False, separators=(",", ":")
+                    ).encode("utf-8")
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+            # If an older/nonstandard upstream response cannot be rewritten,
+            # do not risk replaying an invalid initialize response.
+            return None
+        return content, status_code, content_type
+
     async def _close_upstream_session(self, server_url: str | None, upstream_id: str | None) -> None:
         if not server_url or not upstream_id:
             return
@@ -736,7 +808,7 @@ class GatewaySessionManager:
         if observation.get("openai_like") and client_type == "mcp-http":
             client_type = "openai-chatgpt"
         reclaim_allowed = (
-            identity_scope == "explicit"
+            identity_scope in {"explicit", "conversation"}
             or (identity_scope == "connector" and self.settings.studio.openai_connector_reclaim_enabled)
         )
         session_payload = {
@@ -770,6 +842,66 @@ class GatewaySessionManager:
             managed = await self.managed_sessions.ensure_running(str(managed_session_id))
             target_url = managed.get("endpoint") or f"http://127.0.0.1:{managed['port']}/mcp"
 
+        # ChatGPT may create a fresh external Streamable-HTTP transport for each
+        # tool call. Reclaimed logical sessions must keep the same gateway/upstream
+        # Serena session or Serena's workspace lease becomes stale immediately.
+        if reclaimed:
+            reusable = await self.db.find_reusable_gateway_session(
+                studio_session_id=studio_session["id"],
+                server_id=server.id,
+                managed_session_id=(str(managed_session_id) if managed_session_id else None),
+            )
+            if reusable is not None:
+                cached = self._cached_initialize_response(
+                    reusable, request_id=jsonrpc.get("id")
+                )
+                if cached is not None:
+                    content, status_code, content_type = cached
+                    reusable = await self.db.update_gateway_session_ingress(
+                        reusable["id"], ingress
+                    )
+                    await self.db.touch_gateway_session(reusable["id"])
+                    try:
+                        await self.db.heartbeat_session(
+                            studio_session["id"],
+                            {"metadata": {"gateway_reused": True, "last_ingress": ingress}},
+                        )
+                    except KeyError:
+                        pass
+                    response_headers = {
+                        "Mcp-Session-Id": reusable["id"],
+                        "X-MCP-Studio-Session-Id": studio_session["id"],
+                        "X-MCP-Studio-Reclaimed": "true",
+                        "X-MCP-Studio-Gateway-Reused": "true",
+                        "X-MCP-Studio-Generation": str(reusable.get("generation") or 1),
+                        "X-MCP-Studio-Identity-Scope": identity_scope,
+                        "X-MCP-Studio-Client-Class": (
+                            "openai-like" if observation.get("openai_like") else "generic-mcp"
+                        ),
+                        "Cache-Control": "no-store",
+                        "X-Content-Type-Options": "nosniff",
+                        "Content-Type": content_type,
+                    }
+                    if reusable.get("last_tunnel_id"):
+                        response_headers["X-MCP-Studio-Tunnel-Id"] = str(reusable["last_tunnel_id"])
+                    if reusable.get("managed_session_id"):
+                        response_headers["X-MCP-Studio-Managed-Session-Id"] = str(reusable["managed_session_id"])
+                    await self.db.add_event(
+                        "gateway.session.reused",
+                        f"Gateway session {reusable['id']} reused for {client_id}",
+                        server_id=server.id,
+                        data={
+                            "gateway_session_id": reusable["id"],
+                            "studio_session_id": studio_session["id"],
+                            "managed_session_id": reusable.get("managed_session_id"),
+                        },
+                    )
+                    return Response(
+                        content=content,
+                        status_code=status_code,
+                        headers=response_headers,
+                    )
+
         headers = self._proxy_headers(request)
         client, response = await self._send(
             server_url=target_url,
@@ -782,6 +914,7 @@ class GatewaySessionManager:
         upstream_id = response.headers.get("mcp-session-id")
         response_headers = self._response_headers(response)
         status_code = response.status_code
+        content_type = response.headers.get("content-type", "application/json")
         await response.aclose()
         await client.aclose()
         if status_code >= 400:
@@ -802,6 +935,11 @@ class GatewaySessionManager:
                 "identity_source": identity_source,
                 "client_observation": observation,
                 "ingress": ingress,
+                "initialize_response": self._initialize_response_cache(
+                    content,
+                    status_code=status_code,
+                    content_type=content_type,
+                ),
             },
             ingress=ingress,
             managed_session_id=(str(managed_session_id) if managed_session_id else None),
@@ -938,47 +1076,46 @@ class GatewaySessionManager:
                     is_error=True,
                 )
             managed_session: dict[str, Any] | None = None
-            if session.get("managed_session_id") and tool_name in set(self.settings.studio.managed_session_blocked_tools):
-                if tool_name == "activate_project":
-                    try:
-                        managed_session = await self.db.get_managed_session(str(session["managed_session_id"]))
-                    except KeyError:
-                        return local_tool_response(
-                            {
-                                "error": "TOOL_PERMISSION_SESSION_MISSING",
-                                "message": "Pinned managed session record is missing.",
-                            },
-                            is_error=True,
-                        )
-                    requested_project = str(tool_args.get("project") or "").strip()
-                    pinned_path = str(managed_session.get("project_path") or "").strip()
-                    pinned_key = str(managed_session.get("workspace_key") or "").strip()
-                    same_path = False
-                    if requested_project and pinned_path:
-                        try:
-                            requested_path = Path(requested_project).expanduser()
-                            if requested_path.is_absolute():
-                                same_path = requested_path.resolve(strict=False) == Path(pinned_path).expanduser().resolve(strict=False)
-                        except OSError:
-                            same_path = False
-                    if not requested_project or not (same_path or requested_project == pinned_key):
-                        return local_tool_response(
-                            {
-                                "error": "SESSION_PROJECT_PINNED",
-                                "message": f"activate_project may only re-activate pinned workspace {pinned_key!r}.",
-                                "workspace_key": pinned_key,
-                                "project_path": pinned_path,
-                            },
-                            is_error=True,
-                        )
-                else:
+            if session.get("managed_session_id") and tool_name == "activate_project":
+                try:
+                    managed_session = await self.db.get_managed_session(str(session["managed_session_id"]))
+                except KeyError:
                     return local_tool_response(
                         {
-                            "error": "SESSION_PROJECT_PINNED",
-                            "message": f"Tool {tool_name} is blocked because this transport is pinned to managed session {session['managed_session_id']}.",
+                            "error": "TOOL_PERMISSION_SESSION_MISSING",
+                            "message": "Pinned managed session record is missing.",
                         },
                         is_error=True,
                     )
+                requested_project = str(tool_args.get("project") or "").strip()
+                pinned_path = str(managed_session.get("project_path") or "").strip()
+                pinned_key = str(managed_session.get("workspace_key") or "").strip()
+                same_path = False
+                if requested_project and pinned_path:
+                    try:
+                        requested_path = Path(requested_project).expanduser()
+                        if requested_path.is_absolute():
+                            same_path = requested_path.resolve(strict=False) == Path(pinned_path).expanduser().resolve(strict=False)
+                    except OSError:
+                        same_path = False
+                if not requested_project or not (same_path or requested_project == pinned_key):
+                    return local_tool_response(
+                        {
+                            "error": "SESSION_PROJECT_PINNED",
+                            "message": f"activate_project may only re-activate pinned workspace {pinned_key!r}.",
+                            "workspace_key": pinned_key,
+                            "project_path": pinned_path,
+                        },
+                        is_error=True,
+                    )
+            elif session.get("managed_session_id") and tool_name in set(self.settings.studio.managed_session_blocked_tools):
+                return local_tool_response(
+                    {
+                        "error": "SESSION_PROJECT_PINNED",
+                        "message": f"Tool {tool_name} is blocked because this transport is pinned to managed session {session['managed_session_id']}.",
+                    },
+                    is_error=True,
+                )
             if session.get("managed_session_id") and self.settings.studio.managed_session_tool_permissions_enabled:
                 try:
                     if managed_session is None:

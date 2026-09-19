@@ -721,6 +721,34 @@ async def _permission_bound_gateway(tmp_path: Path, *, metadata: dict | None = N
 
 
 @pytest.mark.asyncio
+async def test_activate_project_cannot_escape_pin_when_blocked_tools_empty(tmp_path: Path, monkeypatch):
+    settings, db, gw, _ = await _permission_bound_gateway(tmp_path)
+    settings.studio.managed_session_blocked_tools = []
+    manager = GatewaySessionManager(settings, db, managed_sessions=FakeManagedPool())
+    called = False
+
+    async def fake_send(**kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("cross-project activate_project must not reach upstream")
+
+    monkeypatch.setattr(manager, "_send", fake_send)
+    body = json.dumps({
+        "jsonrpc": "2.0", "id": 19, "method": "tools/call",
+        "params": {"name": "activate_project", "arguments": {"project": "/tmp/not-the-pinned-project"}},
+    }).encode()
+    response = await manager.proxy_existing(
+        request=request_for(body, gw["id"]),
+        server=settings.servers[0],
+        body=body,
+        gateway_session_id=gw["id"],
+    )
+    text = json.loads(response.body)["result"]["content"][0]["text"]
+    assert "SESSION_PROJECT_PINNED" in text
+    assert called is False
+
+
+@pytest.mark.asyncio
 async def test_gateway_permission_blocks_write_for_read_only_session(tmp_path: Path, monkeypatch):
     settings, db, gw, managed = await _permission_bound_gateway(
         tmp_path,

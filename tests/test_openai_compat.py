@@ -85,6 +85,74 @@ def test_explicit_identity_is_marked_explicit(tmp_path: Path):
     assert source == "x-mcp-studio-client-id"
 
 
+def test_openai_session_identity_is_conversation_scoped_and_private(tmp_path: Path):
+    os.environ["MCP_STUDIO_TEST_TOKEN"] = "test-secret"
+    manager = GatewaySessionManager(settings(tmp_path), Database(str(tmp_path / "db.sqlite3")))
+    one = request(extra_headers=[(b"x-openai-session", b"conversation-one")])
+    two = request(extra_headers=[(b"x-openai-session", b"conversation-two")])
+
+    _, id_one, _, scope_one, source_one = manager.authenticate(one)
+    _, id_two, _, scope_two, source_two = manager.authenticate(two)
+
+    assert scope_one == scope_two == "conversation"
+    assert source_one == source_two == "x-openai-session-fingerprint"
+    assert id_one.startswith("conversation-")
+    assert id_two.startswith("conversation-")
+    assert id_one != id_two
+    assert "conversation-one" not in id_one
+    assert "conversation-two" not in id_two
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_initialize_reuses_gateway_and_upstream_session(tmp_path: Path, monkeypatch):
+    os.environ["MCP_STUDIO_TEST_TOKEN"] = "test-secret"
+    st = settings(tmp_path)
+    db = Database(st.studio.database)
+    await db.init()
+    manager = GatewaySessionManager(st, db)
+    sends = 0
+
+    async def fake_send(**kwargs):
+        nonlocal sends
+        sends += 1
+        return FakeClient(), httpx.Response(
+            200,
+            headers={"content-type": "application/json", "mcp-session-id": "up-stable"},
+            content=b'{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{}}}',
+            request=httpx.Request("POST", "http://upstream.invalid/mcp"),
+        )
+
+    monkeypatch.setattr(manager, "_send", fake_send)
+    req1 = request(extra_headers=[(b"x-openai-session", b"same-conversation")])
+    p1 = payload()
+    body1 = json.dumps(p1).encode()
+    _, cid1, ctype1, scope1, source1 = manager.authenticate(req1)
+    first = await manager.initialize(
+        request=req1, server=st.servers[0], body=body1, jsonrpc=p1,
+        client_id=cid1, client_type=ctype1, identity_scope=scope1, identity_source=source1,
+    )
+
+    req2 = request(extra_headers=[(b"x-openai-session", b"same-conversation")])
+    p2 = payload()
+    p2["id"] = 99
+    body2 = json.dumps(p2).encode()
+    _, cid2, ctype2, scope2, source2 = manager.authenticate(req2)
+    second = await manager.initialize(
+        request=req2, server=st.servers[0], body=body2, jsonrpc=p2,
+        client_id=cid2, client_type=ctype2, identity_scope=scope2, identity_source=source2,
+    )
+
+    assert cid2 == cid1
+    assert sends == 1
+    assert second.headers["mcp-session-id"] == first.headers["mcp-session-id"]
+    assert second.headers["x-mcp-studio-session-id"] == first.headers["x-mcp-studio-session-id"]
+    assert second.headers["x-mcp-studio-gateway-reused"] == "true"
+    assert json.loads(second.body)["id"] == 99
+    connected = [x for x in await db.list_gateway_sessions() if x["status"] == "connected"]
+    assert len(connected) == 1
+    assert connected[0]["upstream_session_id"] == "up-stable"
+
+
 def test_openai_observation_stores_names_not_secret_values(tmp_path: Path):
     os.environ["MCP_STUDIO_TEST_TOKEN"] = "test-secret"
     manager = GatewaySessionManager(settings(tmp_path), Database(str(tmp_path / "db.sqlite3")))

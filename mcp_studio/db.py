@@ -749,6 +749,41 @@ class Database:
                 return [self._gateway_session_item(row) for row in rows]
         return await self._run(op)
 
+    async def find_reusable_gateway_session(
+        self,
+        *,
+        studio_session_id: str,
+        server_id: str,
+        managed_session_id: str | None,
+    ) -> dict[str, Any] | None:
+        """Return the newest connected transport for a durable logical session.
+
+        The managed-session predicate is exact (including NULL) so a reclaimed
+        ChatGPT transport can never reuse an upstream that belongs to another
+        project pin.
+        """
+        def op() -> dict[str, Any] | None:
+            with self._connect() as db:
+                if managed_session_id is None:
+                    row = db.execute(
+                        """SELECT * FROM gateway_sessions
+                           WHERE studio_session_id=? AND server_id=? AND status='connected'
+                             AND managed_session_id IS NULL AND upstream_session_id IS NOT NULL
+                           ORDER BY last_seen_at DESC LIMIT 1""",
+                        (studio_session_id, server_id),
+                    ).fetchone()
+                else:
+                    row = db.execute(
+                        """SELECT * FROM gateway_sessions
+                           WHERE studio_session_id=? AND server_id=? AND status='connected'
+                             AND managed_session_id=? AND upstream_session_id IS NOT NULL
+                           ORDER BY last_seen_at DESC LIMIT 1""",
+                        (studio_session_id, server_id, managed_session_id),
+                    ).fetchone()
+                return self._gateway_session_item(row) if row is not None else None
+
+        return await self._run(op)
+
     async def update_gateway_session_ingress(self, gateway_id: str, ingress: dict[str, Any]) -> dict[str, Any]:
         """Backfill/update observed ingress without treating attribution as a security boundary."""
         now = _now()
