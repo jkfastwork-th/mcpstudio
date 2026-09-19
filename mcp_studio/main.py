@@ -26,7 +26,7 @@ from .agent_runtimes import AgentRuntimeInventory
 from .models import (
     SessionCreate, SessionHeartbeat, WorkerBind, WorkerHeartbeat, WorkerStatePatch,
     WorkSubmit, WorkFinish, WorkFail, WorkDetach, AlertAcknowledge, RetryDispatch, FaultInject, BatchDispatch,
-    SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate, ManagedGatewayAttach,
+    SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate, ComputerRepairRequest, ManagedGatewayAttach,
     CapsuleCreate, CapsuleStageUpdate, CapsuleHandoff, CapsuleComplete,
 )
 from .settings import Settings, load_settings
@@ -98,6 +98,20 @@ if _computer_novnc_dir.is_dir() and (_computer_novnc_dir / "vnc.html").is_file()
         StaticFiles(directory=str(_computer_novnc_dir)),
         name="computer-novnc",
     )
+
+
+@app.middleware("http")
+async def _novnc_no_cache(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith(("/computer/novnc/", "/static/")):
+        # noVNC and HIRDA load version-coupled JS/CSS assets. Revalidating
+        # avoids stale HTML/JS pairs that surface as generic connection errors
+        # or keep an older Computer Use client alive after a backend fix.
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
 
 app.include_router(make_gateway_router(settings, db, gateway_sessions))
 
@@ -1302,6 +1316,11 @@ async def clear_fault(work_id: str):
 # Computer Use / Web VNC
 # --------------------------------------------------------------------------
 
+def _computer_ws_subprotocol(websocket: WebSocket) -> str | None:
+    offered = websocket.scope.get("subprotocols") or []
+    return "binary" if "binary" in offered else None
+
+
 def _computer_token_ok(websocket: WebSocket) -> bool:
     expected = settings.studio.computer_auth_token
     if not expected:
@@ -1327,6 +1346,34 @@ async def computer_descriptor(managed_session_id: str):
         raise HTTPException(status_code=503, detail=str(exc))
 
 
+@app.get("/api/computer/re-pair-targets/{managed_session_id}")
+async def computer_re_pair_targets(managed_session_id: str):
+    try:
+        return await computer.repair_targets(managed_session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown managed session")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.post("/api/computer/re-pair/{managed_session_id}")
+async def computer_re_pair(managed_session_id: str, payload: ComputerRepairRequest):
+    try:
+        return await computer.repair_runtime(
+            managed_session_id,
+            payload.mode,
+            payload.target_display,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown managed session")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
 @app.get("/computer")
 async def computer_view():
     return RedirectResponse(url="/#computer", status_code=307)
@@ -1335,22 +1382,22 @@ async def computer_view():
 @app.websocket("/api/computer/vnc/ws/{managed_session_id}")
 async def computer_vnc_ws(websocket: WebSocket, managed_session_id: str):
     if not _computer_token_ok(websocket):
-        await websocket.accept()
+        await websocket.accept(subprotocol=_computer_ws_subprotocol(websocket))
         await websocket.close(code=4401, reason="Computer auth token required")
         return
 
     try:
         await computer.descriptor(managed_session_id)
     except KeyError:
-        await websocket.accept()
+        await websocket.accept(subprotocol=_computer_ws_subprotocol(websocket))
         await websocket.close(code=4404, reason="Unknown managed session")
         return
     except (RuntimeError, ValueError):
-        await websocket.accept()
+        await websocket.accept(subprotocol=_computer_ws_subprotocol(websocket))
         await websocket.close(code=1011, reason="Computer runtime unavailable")
         return
 
-    await websocket.accept()
+    await websocket.accept(subprotocol=_computer_ws_subprotocol(websocket))
 
     if computer.session_isolation_enabled:
         try:

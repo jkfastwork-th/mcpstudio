@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 from pathlib import Path
 from typing import Any
@@ -32,12 +33,38 @@ def _is_loopback(host: str) -> bool:
 
 
 def _tcp_probe(host: str, port: int, timeout: float = 0.5) -> bool:
-    """Best-effort TCP reachability probe."""
+    """Best-effort TCP reachability probe for connection-safe services."""
     try:
         with socket.create_connection((host, int(port)), timeout=timeout):
             return True
     except OSError:
         return False
+
+
+def _tcp_listener_present(port: int) -> bool:
+    """Check Linux TCP listener state without opening a connection.
+
+    TigerVNC counts connect-and-disconnect health probes as failed/incomplete
+    handshakes and can blacklist the loopback client. Reading /proc avoids
+    touching the VNC protocol while still letting us detect occupied/listening
+    runtime ports.
+    """
+    target_port = f"{int(port):04X}"
+    for proc_path in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")):
+        try:
+            lines = proc_path.read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 4 or fields[3] != "0A":
+                continue
+            local_address = fields[1]
+            if ":" not in local_address:
+                continue
+            if local_address.rsplit(":", 1)[1].upper() == target_port:
+                return True
+    return False
 
 
 _DEFAULT_NOVNC = "/usr/share/novnc"
@@ -125,7 +152,7 @@ class ComputerUseManager:
             return False
         return not (
             self._display_occupied(display)
-            or _tcp_probe(self._studio.computer_vnc_host, vnc_port, timeout=0.1)
+            or _tcp_listener_present(vnc_port)
             or _tcp_probe("127.0.0.1", cdp_port, timeout=0.1)
         )
 
@@ -189,6 +216,14 @@ class ComputerUseManager:
             await asyncio.sleep(0.2)
         return False
 
+    async def _wait_listener(self, port: int, timeout: float = 15.0) -> bool:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
+            if _tcp_listener_present(port):
+                return True
+            await asyncio.sleep(0.2)
+        return False
+
     def _write_desktop_script(self, runtime: dict[str, Any]) -> Path:
         root = Path(runtime["root"])
         desktop = root / "desktop"
@@ -218,10 +253,264 @@ class ComputerUseManager:
         script.chmod(0o700)
         return script
 
+    @staticmethod
+    def _chrome_pids_for_profile(profile_dir: str) -> list[int]:
+        token = f"--user-data-dir={Path(profile_dir)}"
+        pids: list[int] = []
+        proc_root = Path("/proc")
+        try:
+            entries = list(proc_root.iterdir())
+        except OSError:
+            return pids
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                args = [
+                    part.decode(errors="replace")
+                    for part in (entry / "cmdline").read_bytes().split(b"\0")
+                    if part
+                ]
+            except OSError:
+                continue
+            if token not in args:
+                continue
+            if any(arg.startswith("--type=") for arg in args):
+                continue
+            pids.append(int(entry.name))
+        return sorted(pids)
+
+    async def _stop_chrome(self, runtime: dict[str, Any]) -> None:
+        profile = str(runtime.get("profile_dir") or "")
+        if not profile:
+            return
+        pids = self._chrome_pids_for_profile(profile)
+        for pid in pids:
+            try:
+                pgid = os.getpgid(pid)
+                if pgid == pid:
+                    os.killpg(pgid, signal.SIGTERM)
+                else:
+                    os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                continue
+
+        deadline = asyncio.get_running_loop().time() + 5.0
+        while asyncio.get_running_loop().time() < deadline:
+            remaining = self._chrome_pids_for_profile(profile)
+            if not remaining:
+                return
+            await asyncio.sleep(0.2)
+
+        for pid in self._chrome_pids_for_profile(profile):
+            try:
+                pgid = os.getpgid(pid)
+                if pgid == pid:
+                    os.killpg(pgid, signal.SIGKILL)
+                else:
+                    os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                continue
+
+    async def _wait_listener_absent(self, port: int, timeout: float = 8.0) -> bool:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
+            if not _tcp_listener_present(port):
+                return True
+            await asyncio.sleep(0.2)
+        return not _tcp_listener_present(port)
+
+    async def _stop_vnc(self, runtime: dict[str, Any]) -> None:
+        if runtime.get("adopted"):
+            return
+        port = int(runtime["vnc_port"])
+        if not _tcp_listener_present(port):
+            return
+        vncserver = shutil.which("tigervncserver") or shutil.which("vncserver")
+        if not vncserver:
+            raise RuntimeError("tigervncserver is unavailable; cannot stop managed VNC runtime")
+        display = f":{int(runtime['display'])}"
+        root = Path(runtime["root"])
+        env = os.environ.copy()
+        env["HOME"] = str(root / "home")
+        proc = await asyncio.create_subprocess_exec(
+            vncserver, "-kill", display,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=env,
+        )
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+        if not await self._wait_listener_absent(port):
+            raise RuntimeError(f"VNC :{runtime['display']} did not stop cleanly")
+
+    async def _stop_isolated_runtime(self, runtime: dict[str, Any]) -> None:
+        if runtime.get("adopted"):
+            return
+        await self._stop_chrome(runtime)
+        await self._stop_vnc(runtime)
+
+    def _build_repair_runtime(
+        self,
+        session: dict[str, Any],
+        old_runtime: dict[str, Any],
+        mode: str,
+        target_display: int | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        registry = self._read_registry()
+        sessions: dict[str, Any] = registry.setdefault("sessions", {})
+        session_id = str(session["id"])
+        workspace_key = str(session.get("workspace_key") or session_id)
+
+        used = {
+            int(item.get("slot"))
+            for key, item in sessions.items()
+            if key != session_id
+            and isinstance(item, dict)
+            and str(item.get("slot", "")).isdigit()
+        }
+        old_slot = int(old_runtime["slot"]) if str(old_runtime.get("slot", "")).isdigit() else None
+        if old_slot is not None:
+            used.add(old_slot)
+
+        base_display = int(self._studio.computer_vnc_display_base)
+        if target_display is not None:
+            slot = int(target_display) - base_display
+            if slot < 0 or slot > 500:
+                raise ValueError(
+                    f"Target display :{target_display} is outside the managed Computer range"
+                )
+            if old_slot is not None and slot == old_slot:
+                raise ValueError(f"Target display :{target_display} is already assigned to this session")
+            if slot in used:
+                raise RuntimeError(f"Target display :{target_display} is already assigned")
+            if not self._slot_available(slot):
+                raise RuntimeError(f"Target display :{target_display} is not available")
+        else:
+            adopt_key = (self._studio.computer_adopt_workspace or "").strip()
+            slot = 1 if adopt_key else 0
+            while slot in used or not self._slot_available(slot):
+                slot += 1
+                if slot > 500:
+                    raise RuntimeError("Computer runtime slot allocation exhausted during re-pair")
+
+        display = base_display + slot
+        vnc_port = int(self._studio.computer_vnc_port) + slot
+        cdp_port = int(self._studio.computer_cdp_port) + slot
+        if vnc_port > 65535 or cdp_port > 65535:
+            raise RuntimeError("Computer runtime port allocation exhausted during re-pair")
+
+        root = Path(
+            old_runtime.get("root")
+            or self._runtime_root / f"{self._safe_runtime_key(workspace_key)}--{self._safe_runtime_key(session_id)}"
+        )
+        pairing_generation = int(old_runtime.get("pairing_generation") or 0) + 1
+        if mode == "keep":
+            profile_dir = str(old_runtime.get("profile_dir") or root / "chrome")
+        else:
+            profile_dir = str(root / f"chrome-pair-{pairing_generation}")
+
+        runtime = {
+            "session_id": session_id,
+            "workspace_key": workspace_key,
+            "slot": slot,
+            "adopted": False,
+            "display": display,
+            "vnc_port": vnc_port,
+            "cdp_port": cdp_port,
+            "root": str(root),
+            "profile_dir": profile_dir,
+            "desktop_script": str(root / "desktop-start.sh"),
+            "chrome_log": str(root / f"chrome-pair-{pairing_generation}.log"),
+            "pairing_generation": pairing_generation,
+            "pairing_mode": mode,
+            "previous_slot": old_runtime.get("slot"),
+        }
+        return registry, runtime
+
+    async def repair_targets(self, managed_session_id: str) -> dict[str, Any]:
+        if not self._enabled:
+            raise PermissionError("Computer Use is disabled")
+        if not self.session_isolation_enabled:
+            raise RuntimeError("Computer re-pair targets require session-isolated mode")
+
+        try:
+            session = await self._db.get_managed_session(managed_session_id)
+        except KeyError:
+            raise KeyError("Unknown managed session") from None
+
+        async with self._runtime_lock:
+            registry = self._read_registry()
+            sessions: dict[str, Any] = registry.setdefault("sessions", {})
+            current = sessions.get(managed_session_id)
+            current_slot = None
+            current_display = None
+            current_adopted = False
+            if isinstance(current, dict) and str(current.get("slot", "")).isdigit():
+                current_slot = int(current["slot"])
+                current_display = int(current["display"])
+                current_adopted = bool(current.get("adopted"))
+
+            owners: dict[int, dict[str, Any]] = {}
+            for session_id, runtime in sessions.items():
+                if not isinstance(runtime, dict) or not str(runtime.get("slot", "")).isdigit():
+                    continue
+                owners[int(runtime["slot"])] = {
+                    "session_id": session_id,
+                    "workspace_key": runtime.get("workspace_key"),
+                }
+
+            max_registered_slot = max(owners.keys(), default=0)
+            max_slot = min(max(max_registered_slot + 4, 8), 32)
+            base_display = int(self._studio.computer_vnc_display_base)
+            targets: list[dict[str, Any]] = []
+
+            for slot in range(0, max_slot + 1):
+                display = base_display + slot
+                owner = owners.get(slot)
+                if current_slot == slot:
+                    targets.append({
+                        "display": display,
+                        "available": False,
+                        "state": "current",
+                        "owner_session_id": managed_session_id,
+                        "owner_workspace_key": session.get("workspace_key"),
+                    })
+                    continue
+                if owner is not None:
+                    targets.append({
+                        "display": display,
+                        "available": False,
+                        "state": "assigned",
+                        "owner_session_id": owner.get("session_id"),
+                        "owner_workspace_key": owner.get("workspace_key"),
+                    })
+                    continue
+
+                available = self._slot_available(slot)
+                targets.append({
+                    "display": display,
+                    "available": bool(available),
+                    "state": "available" if available else "occupied",
+                    "owner_session_id": None,
+                    "owner_workspace_key": None,
+                })
+
+        return {
+            "session_id": managed_session_id,
+            "workspace_key": session.get("workspace_key"),
+            "current_display": current_display,
+            "current_adopted": current_adopted,
+            "targets": targets,
+        }
+
     async def _start_vnc(self, runtime: dict[str, Any]) -> None:
         host = self._studio.computer_vnc_host
         port = int(runtime["vnc_port"])
-        if _tcp_probe(host, port):
+        if _tcp_listener_present(port):
             return
         vncserver = shutil.which("tigervncserver") or shutil.which("vncserver")
         if not vncserver:
@@ -259,18 +548,29 @@ class ComputerUseManager:
             "-rfbauth", str(password_file),
             "-SecurityTypes", "VncAuth",
             "-xstartup", str(script),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
             env=env,
         )
-        try:
-            output, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
-        except asyncio.TimeoutError:
-            proc.kill()
-            output, _ = await proc.communicate()
-        if not await self._wait_tcp(host, port, timeout=12):
-            detail = (output or b"").decode(errors="replace")[-1200:]
-            raise RuntimeError(f"VNC :{runtime['display']} failed to start: {detail}")
+        if await self._wait_listener(port, timeout=12):
+            return
+
+        if proc.returncode is None:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=3)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+        raise RuntimeError(
+            f"VNC :{runtime['display']} failed to start; see {session_home / '.vnc'}"
+        )
 
     async def _start_chrome(self, runtime: dict[str, Any]) -> None:
         host = "127.0.0.1"
@@ -301,8 +601,19 @@ class ComputerUseManager:
                 "--remote-debugging-address=127.0.0.1",
                 "--no-first-run",
                 "--no-default-browser-check",
+                # Keep GPU-backed browser APIs available in isolated/VNC
+                # sessions even when the host has no physical GPU. WebGL and
+                # WebGPU use different SwiftShader paths on Linux: WebGPU
+                # requires the Vulkan-backed software adapter.
+                "--enable-gpu",
+                "--enable-unsafe-webgpu",
+                "--ignore-gpu-blocklist",
+                "--enable-features=Vulkan",
                 "--use-gl=angle",
-                "--use-angle=swiftshader",
+                "--use-angle=vulkan",
+                "--use-vulkan=swiftshader",
+                "--use-webgpu-adapter=swiftshader",
+                "--disable-vulkan-surface",
                 "--enable-unsafe-swiftshader",
                 "about:blank",
                 env=env,
@@ -320,7 +631,7 @@ class ComputerUseManager:
         if not _is_loopback(host):
             raise RuntimeError("VNC host is not loopback")
         if runtime.get("adopted"):
-            if not _tcp_probe(host, int(runtime["vnc_port"])):
+            if not _tcp_listener_present(int(runtime["vnc_port"])):
                 raise RuntimeError(f"Adopted VNC :{runtime['display']} is not running")
             if not _tcp_probe("127.0.0.1", int(runtime["cdp_port"])):
                 raise RuntimeError(f"Adopted Chrome CDP {runtime['cdp_port']} is not running")
@@ -347,6 +658,110 @@ class ComputerUseManager:
             await self._ensure_isolated_runtime(session, runtime)
         return session, runtime
 
+    async def repair_runtime(
+        self,
+        managed_session_id: str,
+        mode: str = "keep",
+        target_display: int | None = None,
+    ) -> dict[str, Any]:
+        if not self._enabled:
+            raise PermissionError("Computer Use is disabled")
+        if not self.session_isolation_enabled:
+            raise RuntimeError("Computer re-pair requires session-isolated mode")
+        if mode not in {"keep", "fresh"}:
+            raise ValueError("Computer re-pair mode must be 'keep' or 'fresh'")
+
+        try:
+            session = await self._db.get_managed_session(managed_session_id)
+        except KeyError:
+            raise KeyError("Unknown managed session") from None
+
+        initial_pair = False
+        previous_display: str | None = None
+        previous_slot: int | None = None
+        pairing_generation = 0
+
+        async with self._runtime_lock:
+            registry = self._read_registry()
+            sessions: dict[str, Any] = registry.setdefault("sessions", {})
+            old_runtime = sessions.get(managed_session_id)
+
+            if not isinstance(old_runtime, dict):
+                if target_display is not None:
+                    synthetic_old = {
+                        "slot": -1,
+                        "display": -1,
+                        "root": str(
+                            self._runtime_root
+                            / f"{self._safe_runtime_key(str(session.get('workspace_key') or managed_session_id))}--{self._safe_runtime_key(managed_session_id)}"
+                        ),
+                    }
+                    registry, runtime = self._build_repair_runtime(
+                        session, synthetic_old, mode, target_display
+                    )
+                    registry.setdefault("sessions", {})[managed_session_id] = runtime
+                    self._write_registry(registry)
+                    try:
+                        await self._ensure_isolated_runtime(session, runtime)
+                    except Exception:
+                        registry.setdefault("sessions", {}).pop(managed_session_id, None)
+                        self._write_registry(registry)
+                        raise
+                else:
+                    runtime = self._allocate_runtime(session)
+                    await self._ensure_isolated_runtime(session, runtime)
+                initial_pair = True
+                pairing_generation = int(runtime.get("pairing_generation") or 0)
+            else:
+                if old_runtime.get("adopted") and mode == "keep":
+                    raise RuntimeError(
+                        "Adopted Computer runtime cannot safely preserve browser state during re-pair; choose fresh desktop"
+                    )
+
+                previous_display = f":{int(old_runtime['display'])}"
+                previous_slot = int(old_runtime["slot"])
+                registry, runtime = self._build_repair_runtime(
+                    session, old_runtime, mode, target_display
+                )
+                sessions = registry.setdefault("sessions", {})
+
+                if not old_runtime.get("adopted"):
+                    await self._stop_isolated_runtime(old_runtime)
+
+                sessions[managed_session_id] = runtime
+                self._write_registry(registry)
+
+                try:
+                    await self._ensure_isolated_runtime(session, runtime)
+                except Exception as exc:
+                    sessions[managed_session_id] = old_runtime
+                    self._write_registry(registry)
+                    rollback_error: Exception | None = None
+                    if not old_runtime.get("adopted"):
+                        try:
+                            await self._ensure_isolated_runtime(session, old_runtime)
+                        except Exception as rollback_exc:
+                            rollback_error = rollback_exc
+                    if rollback_error is not None:
+                        raise RuntimeError(
+                            f"Computer re-pair failed: {exc}; rollback also failed: {rollback_error}"
+                        ) from exc
+                    raise
+
+                pairing_generation = int(runtime.get("pairing_generation") or 0)
+
+        descriptor = await self.descriptor(managed_session_id)
+        descriptor["re_pair"] = {
+            "initial_pair": initial_pair,
+            "mode": mode,
+            "browser_state_preserved": bool(mode == "keep" and not initial_pair),
+            "previous_display": previous_display,
+            "previous_slot": previous_slot,
+            "target_display": int(descriptor["desktop_display"].lstrip(":")),
+            "pairing_generation": pairing_generation,
+        }
+        return descriptor
+
     async def status(self) -> dict[str, Any]:
         novnc_dir = self._novnc_dir()
         if not self._enabled:
@@ -369,6 +784,12 @@ class ComputerUseManager:
                 and self._chrome_binary()
             )
             transport_ready = bool(tools_ready and _is_loopback(self._studio.computer_vnc_host))
+            registry = self._read_registry()
+            runtime_displays = {
+                str(session_id): int(runtime["display"])
+                for session_id, runtime in registry.get("sessions", {}).items()
+                if isinstance(runtime, dict) and str(runtime.get("display", "")).lstrip("-").isdigit()
+            }
             return {
                 "enabled": True,
                 "configured": bool(novnc_available and transport_ready),
@@ -379,6 +800,7 @@ class ComputerUseManager:
                 "auth_required": bool(self._studio.computer_auth_token),
                 "transport_ready": transport_ready,
                 "runtime_mode": "session-isolated",
+                "runtime_displays": runtime_displays,
             }
 
         websockify_up = _tcp_probe(

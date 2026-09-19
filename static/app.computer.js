@@ -49,16 +49,16 @@ async function loadComputerData(){
     }
 
     const novncMissing = !computer.novnc_available;
-    const websockifyOffline = !computer.websockify_reachable;
+    const transportOffline = !(computer.runtime_mode === 'session-isolated' ? computer.transport_ready : computer.websockify_reachable);
 
     statusEl.className = 'pill ' + (
-      novncMissing || websockifyOffline ? 'degraded' : 'healthy'
+      novncMissing || transportOffline ? 'degraded' : 'healthy'
     );
-    statusEl.textContent = novncMissing ? 'noVNC missing' : websockifyOffline ? 'websockify offline' : 'ready';
+    statusEl.textContent = novncMissing ? 'noVNC missing' : transportOffline ? 'transport offline' : 'ready';
 
     const reasons = [];
     if(novncMissing) reasons.push('local noVNC directory missing or incomplete');
-    if(websockifyOffline) reasons.push('local websockify bridge not reachable');
+    if(transportOffline) reasons.push(computer.runtime_mode === 'session-isolated' ? 'session VNC transport not ready' : 'local websockify bridge not reachable');
     messageEl.textContent = reasons.length ? reasons.join('; ') + '.' : 'Computer desktop ready.';
     messageEl.className = 'computer-message ' + (reasons.length ? 'error' : 'good');
 
@@ -105,8 +105,9 @@ async function connectComputer(){
       messageEl.className = 'computer-message error';
       return;
     }
-    if(!computerStatus.websockify_reachable){
-      messageEl.textContent = 'Local websockify is offline; cannot connect.';
+    const transportReady = computerStatus.runtime_mode === 'session-isolated' ? computerStatus.transport_ready : computerStatus.websockify_reachable;
+    if(!transportReady){
+      messageEl.textContent = computerStatus.runtime_mode === 'session-isolated' ? 'Session VNC transport is offline; cannot connect.' : 'Local websockify is offline; cannot connect.';
       messageEl.className = 'computer-message error';
       return;
     }

@@ -187,6 +187,11 @@ class ManagedSessionPermissionsUpdate(BaseModel):
     fail_closed_unknown: bool | None = None
 
 
+class ComputerRepairRequest(BaseModel):
+    mode: Literal["keep", "fresh"] = "keep"
+    target_display: int | None = Field(default=None, ge=0, le=65535)
+
+
 class ManagedGatewayAttach(BaseModel):
     managed_session_id: str = Field(min_length=1, max_length=120)
 

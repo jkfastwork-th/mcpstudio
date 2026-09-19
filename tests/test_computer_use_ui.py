@@ -44,6 +44,47 @@ def test_novnc_websocket_path_resolves_to_app_root() -> None:
     assert resolved == "https://studio.example/api/computer/vnc/ws/ms-test"
 
 
+def test_computer_ui_requires_vnc_password_and_uses_fragment_params() -> None:
+    html = (ROOT / "templates" / "index.html").read_text()
+    js = (ROOT / "static" / "app.js").read_text()
+    main = (ROOT / "mcp_studio" / "main.py").read_text()
+
+    assert 'id="computerVncPasswordInput"' in html
+    assert "descriptor.runtime_mode==='session-isolated'&&!vncPassword" in js
+    assert "viewerParams.set('password',vncPassword)" in js
+    assert "viewerParams.set('reconnect','0')" in js
+    assert "url.hash=viewerParams.toString()" in js
+    assert "url.searchParams.set('password'" not in js
+    assert 'request.url.path.startswith(("/computer/novnc/", "/static/"))' in main
+    assert 'response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"' in main
+
+
+def test_computer_ui_supports_runtime_re_pair() -> None:
+    html = (ROOT / "templates" / "index.html").read_text()
+    js = (ROOT / "static" / "app.js").read_text()
+    css = (ROOT / "static" / "styles.css").read_text()
+    main = (ROOT / "mcp_studio" / "main.py").read_text()
+
+    assert 'id="computerRePairBtn"' in html
+    assert "async function repairComputerView()" in js
+    assert "type:'select'" in js
+    assert "Keep browser session" in js
+    assert "Fresh desktop" in js
+    assert "getJson('/api/computer/re-pair-targets/'" in js
+    assert "target_display" in js
+    assert "Auto · next available desktop" in js
+    assert "current_adopted" in js
+    assert "runtime_displays" in js
+    assert "'VNC :'+runtimeDisplay" in js
+    assert "descriptor.desktop_display" in js
+    assert "computer-session-runtime" in js
+    assert "sendJson(" in js and "'/api/computer/re-pair/'" in js
+    assert "target.id==='computerRePairBtn'" in js
+    assert ".dialog-field select" in css
+    assert '@app.get("/api/computer/re-pair-targets/{managed_session_id}")' in main
+    assert '@app.post("/api/computer/re-pair/{managed_session_id}")' in main
+
+
 def test_computer_ui_surfaces_permissions_and_isolated_transport() -> None:
     js = (ROOT / "static" / "app.js").read_text()
     css = (ROOT / "static" / "styles.css").read_text()
@@ -52,3 +93,12 @@ def test_computer_ui_surfaces_permissions_and_isolated_transport() -> None:
     assert "status.runtime_mode==='session-isolated'?status.transport_ready" in js
     assert ".computer-permission-badge.allowed" in css
     assert ".computer-permission-badge.blocked" in css
+    assert "if(!status.websockify_reachable)" not in js
+    assert "if(!computerStatus.websockify_reachable)" not in js
+
+
+def test_computer_legacy_ui_uses_mode_aware_transport() -> None:
+    js = (ROOT / "static" / "app.computer.js").read_text()
+    assert "computer.runtime_mode === 'session-isolated' ? computer.transport_ready : computer.websockify_reachable" in js
+    assert "computerStatus.runtime_mode === 'session-isolated' ? computerStatus.transport_ready : computerStatus.websockify_reachable" in js
+    assert "if(!computerStatus.websockify_reachable)" not in js
