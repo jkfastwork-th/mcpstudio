@@ -41,7 +41,7 @@ STATIC_DATA_HANDLERS = {
     "data-copy-source": "closest('[data-copy-command],[data-copy-source]')",
     "data-copy-command": "closest('[data-copy-command],[data-copy-source]')",
     "data-proxy-click": "closest('[data-proxy-click]')",
-    "data-color-scheme": "closest('[data-color-scheme]')",
+    "data-color-scheme": "closest('button[data-color-scheme]')",
 }
 
 DYNAMIC_ACTION_HANDLERS = {
@@ -148,11 +148,19 @@ def test_navigation_and_go_view_targets_resolve_to_real_pages():
         assert re.search(rf"\b{re.escape(target)}:\[", JS), f"{target} missing from viewMeta"
 
 
-def test_overview_capsule_detail_opens_matching_ledger_item():
+def test_delegated_color_scheme_handler_is_scoped_to_buttons():
+    assert "closest('button[data-color-scheme]')" in JS
+    assert "closest('[data-color-scheme]')" not in JS
+
+
+def test_overview_capsule_detail_opens_matching_ledger_or_session_detail():
     assert 'data-go-view="sessions" data-capsule-id="${esc(capsuleId)}"' in JS
+    assert 'data-managed-session-id="${esc(activeSession.id)}"' in JS
     assert 'data-capsule-id="${esc(capsule.capsule_id)}"' in JS
     assert "function focusCapsuleLedgerItem(capsuleId)" in JS
-    assert "requestAnimationFrame(()=>focusCapsuleLedgerItem(go.dataset.capsuleId))" in JS
+    assert "const focused=focusCapsuleLedgerItem(go.dataset.capsuleId)" in JS
+    assert "if(!focused&&go.dataset.managedSessionId)" in JS
+    assert "renderManagedHistory(await getJson(" in JS
 
 
 def test_proxy_controls_target_real_controls():

@@ -858,7 +858,7 @@ function renderOverview(data){
       ${lastHandoff?.a2a?.task_id?`<div><span>A2A task</span><strong>${esc(lastHandoff.a2a.task_id)} · ${esc(lastHandoff.a2a.task?.status?.state||'submitted')}</strong></div>`:''}
       <div><span>Next fallback</span><strong>${esc(nextFallback)}</strong></div>
     </div>
-    <button class="button capsule-detail-button" data-go-view="sessions" data-capsule-id="${esc(capsuleId)}" type="button">View capsule details →</button>`;
+    <button class="button capsule-detail-button" data-go-view="sessions" data-capsule-id="${esc(capsuleId)}"${!hasLedger&&activeSession?.id?` data-managed-session-id="${esc(activeSession.id)}"`:'' } type="button">View capsule details →</button>`;
 
   if(hasLedger){
     const ev=[...(liveCapsule.events||[])].reverse().slice(0,6);
@@ -1208,10 +1208,10 @@ document.querySelectorAll('.primary-nav a[data-view], .mobile-nav a[data-view]')
 document.addEventListener('click',e=>uiAction(async()=>{
   const copy=e.target.closest('[data-copy-command],[data-copy-source]'); if(copy){await copyChatGPTCommand(copy);return;}
   const settingsAction=e.target.closest('[data-settings-action]'); if(settingsAction){await handleSettingsAction(settingsAction.dataset.settingsAction);return;}
-  const scheme=e.target.closest('[data-color-scheme]'); if(scheme){applyColorScheme(scheme.dataset.colorScheme);return;}
+  const scheme=e.target.closest('button[data-color-scheme]'); if(scheme){applyColorScheme(scheme.dataset.colorScheme);return;}
   const agentCheck=e.target.closest('[data-agent-check]'); if(agentCheck){await checkAgentRuntime(agentCheck.dataset.agentCheck);return;}
   const agentDetails=e.target.closest('[data-agent-details]'); if(agentDetails){await showAgentRuntimeDetails(agentDetails.dataset.agentDetails);return;}
-  const go=e.target.closest('[data-go-view]'); if(go){setView(go.dataset.goView);if(go.dataset.capsuleId){if(latestData)renderCapsuleLedger(latestData);requestAnimationFrame(()=>focusCapsuleLedgerItem(go.dataset.capsuleId));}return;}
+  const go=e.target.closest('[data-go-view]'); if(go){setView(go.dataset.goView);if(go.dataset.capsuleId){if(latestData)renderCapsuleLedger(latestData);const focused=focusCapsuleLedgerItem(go.dataset.capsuleId);if(!focused&&go.dataset.managedSessionId){renderManagedHistory(await getJson(`/api/managed/sessions/${encodeURIComponent(go.dataset.managedSessionId)}/history`));}}return;}
   const tunnel=e.target.closest('[data-tunnel-session]'); if(tunnel){sessionTunnelFilter=tunnel.dataset.tunnelSession;showSessionHistory=false;setView('sessions');if(latestData)renderSessions(latestData);return;}
   const restart=e.target.closest('[data-managed-restart]'); if(restart){await sendJson(`/api/managed/sessions/${encodeURIComponent(restart.dataset.managedRestart)}/restart`);await load();return;}
   const resume=e.target.closest('[data-managed-resume]'); if(resume){await sendJson(`/api/managed/sessions/${encodeURIComponent(resume.dataset.managedResume)}/resume`);await load();return;}
