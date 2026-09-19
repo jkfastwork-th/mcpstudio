@@ -21,8 +21,28 @@ This release builds on the certified M6.2.3C production cutover. Routing, projec
 - optional idle auto-stop, disabled by default
 - schema v7
 - compatibility fixes for prior M6.2.3 certification scripts
+- HIRDA-native Graft read-only context plane with per-workspace enable/disable, deterministic rollout, circuit breaker and Serena-only fallback signaling
+- ChatGPT controls `mcpstudio_graft_status`, `mcpstudio_graft_configure`, `mcpstudio_graft_query`, `mcpstudio_graft_rollback`, and `mcpstudio_graft_rearm`
 
 See `M6_2_4_SESSION_UX_LIFECYCLE.md` for the lifecycle model.
+
+## HIRDA Graft context plane
+
+Graft is integrated as a **sidecar read-only context accelerator**, not as an editor. It can discover, trace, grep, map, inspect file APIs and check freshness; Serena remains source of truth and the sole edit authority under the existing managed-session lease/permission policy.
+
+Graft state is durable per workspace. A failure/rejection opens a latched circuit and returns `fallback_required=true` with `mode=serena-only`. Rearming is always explicit.
+
+The Graft sidecar authority profile is fixed:
+
+```text
+read context            yes
+execute Graft queries   yes
+source edit authority   no
+destructive authority   no
+cognitive-memory write  no
+```
+
+Enabling Graft does **not** remove Serena's existing write authority. See `HIRDA_GRAFT_READ_ONLY_CONTEXT.md`.
 
 ## Upgrade
 

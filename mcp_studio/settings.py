@@ -108,6 +108,16 @@ class StudioConfig:
     managed_session_default_destructive_allowed: bool = False
     managed_session_tool_permissions_fail_closed: bool = True
     managed_session_tool_scope_enforced: bool = True
+
+    # HIRDA Graft read-only context plane. Graft is a discovery/context
+    # accelerator only: enabling it never grants source-write, destructive,
+    # or cognitive-memory authority.
+    graft_enabled: bool = False
+    graft_cli_path: str = ""
+    graft_node_executable: str = "node"
+    graft_request_timeout_seconds: float = 30.0
+    graft_default_rollout_percent: float = 100.0
+
     # M6.2.4 lifecycle polish. Zero keeps idle auto-stop disabled by default;
     # operators can opt in once their workload pattern is understood.
     managed_session_idle_stop_seconds: int = 0

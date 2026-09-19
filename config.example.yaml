@@ -39,6 +39,14 @@ studio:
   #managed_session_tool_permissions_fail_closed: true
   #managed_session_tool_scope_enforced: true
 
+  # HIRDA Graft read-only context plane.
+  # Enabling this does not grant Graft source write/destructive authority.
+  #graft_enabled: false
+  #graft_cli_path: /opt/graft/dist/cli.js
+  #graft_node_executable: node
+  #graft_request_timeout_seconds: 30
+  #graft_default_rollout_percent: 100
+
   # M6.2.5 Computer Use / Web VNC MVP.
   #computer_use_enabled: false
   #computer_vnc_host: 127.0.0.1

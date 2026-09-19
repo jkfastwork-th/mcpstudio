@@ -187,6 +187,29 @@ class ManagedSessionPermissionsUpdate(BaseModel):
     fail_closed_unknown: bool | None = None
 
 
+class GraftConfigureRequest(BaseModel):
+    enabled: bool | None = None
+    rollout_percent: float | None = Field(default=None, ge=0, le=100)
+
+
+class GraftQueryRequest(BaseModel):
+    question: str | None = Field(default=None, max_length=32000)
+    tool: Literal[
+        "graft_find_code",
+        "graft_file_api",
+        "graft_check_freshness",
+        "graft_trace_calls",
+        "graft_find_all",
+        "graft_repo_map",
+    ] | None = None
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    request_id: str | None = Field(default=None, max_length=240)
+
+
+class GraftRollbackRequest(BaseModel):
+    reason: str = Field(default="operator-rollback", min_length=1, max_length=500)
+
+
 class ComputerRepairRequest(BaseModel):
     mode: Literal["keep", "fresh"] = "keep"
     target_display: int | None = Field(default=None, ge=0, le=65535)

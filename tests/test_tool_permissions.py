@@ -34,6 +34,7 @@ def test_classifies_serena_read_write_and_destructive_tools():
 def test_shell_classifier_keeps_read_write_execute_separate():
     assert classify_shell_command("git status && git diff --stat") == "read"
     assert classify_shell_command("pytest -q tests") == "execute"
+    assert classify_shell_command("python3 -m unittest -v tests.test_tool_permissions") == "execute"
     assert classify_shell_command("git add x.py && git commit -m test") == "write"
     assert classify_shell_command("git reset --hard HEAD") == "destructive"
     assert classify_shell_command("python -c 'open(\"x\",\"w\").write(\"x\")'") == "unknown"

@@ -2418,6 +2418,21 @@ class Database:
                 return [self._managed_workspace_item(row) for row in rows]
         return await self._run(op)
 
+    async def update_managed_workspace_metadata(
+        self, key: str, metadata: dict[str, Any]
+    ) -> dict[str, Any]:
+        now = _now()
+        def op() -> None:
+            with self._connect() as db:
+                cur = db.execute(
+                    "UPDATE managed_workspaces SET metadata_json=?, updated_at=? WHERE key=?",
+                    (json.dumps(metadata, ensure_ascii=False), now, key),
+                )
+                if cur.rowcount != 1:
+                    raise KeyError(key)
+        await self._run(op)
+        return await self.get_managed_workspace(key)
+
     async def find_managed_workspace_by_project(self, project_path: str) -> dict[str, Any] | None:
         def op() -> dict[str, Any] | None:
             with self._connect() as db:

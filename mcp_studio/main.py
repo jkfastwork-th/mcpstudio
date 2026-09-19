@@ -26,7 +26,8 @@ from .agent_runtimes import AgentRuntimeInventory
 from .models import (
     SessionCreate, SessionHeartbeat, WorkerBind, WorkerHeartbeat, WorkerStatePatch,
     WorkSubmit, WorkFinish, WorkFail, WorkDetach, AlertAcknowledge, RetryDispatch, FaultInject, BatchDispatch,
-    SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate, ComputerRepairRequest, ManagedGatewayAttach,
+    SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate,
+    GraftConfigureRequest, GraftQueryRequest, GraftRollbackRequest, ComputerRepairRequest, ManagedGatewayAttach,
     CapsuleCreate, CapsuleStageUpdate, CapsuleHandoff, CapsuleComplete,
 )
 from .settings import Settings, load_settings
@@ -38,6 +39,7 @@ from .oauth import OAuthManager, OAuthError
 from .operations import OperationsManager
 from .observability import ObservabilityManager
 from .computer import ComputerUseManager
+from .graft import GraftManager, GraftError
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -54,7 +56,8 @@ execution = ExecutionSupervisor(settings, db, herdr, scheduler)
 connectivity = ConnectivityManager(settings, db)
 oauth = OAuthManager(settings, db)
 managed_sessions = ManagedSessionManager(settings, db)
-gateway_sessions = GatewaySessionManager(settings, db, oauth, managed_sessions)
+graft = GraftManager(settings, db)
+gateway_sessions = GatewaySessionManager(settings, db, oauth, managed_sessions, graft)
 operations = OperationsManager(settings, db)
 observability = ObservabilityManager(settings, db)
 computer = ComputerUseManager(settings.studio, db)
@@ -514,6 +517,73 @@ async def managed_workspace_register(payload: ManagedWorkspaceRegister):
         raise HTTPException(status_code=400, detail=str(exc))
     except ManagedSessionError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.get("/api/managed/workspaces/{workspace_key}/graft")
+async def managed_workspace_graft_status(workspace_key: str):
+    try:
+        return await graft.status(workspace_key)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown managed workspace")
+
+
+@app.patch("/api/managed/workspaces/{workspace_key}/graft")
+async def managed_workspace_graft_configure(
+    workspace_key: str, payload: GraftConfigureRequest
+):
+    try:
+        result = await graft.configure(
+            workspace_key,
+            enabled=payload.enabled,
+            rollout_percent=payload.rollout_percent,
+            actor="ui/api",
+        )
+        # Graft is a sidecar context plane. Serena keeps its existing
+        # managed-session write/lease policy and remains the only editor.
+        return result
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown managed workspace")
+    except GraftError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/managed/workspaces/{workspace_key}/graft/query")
+async def managed_workspace_graft_query(
+    workspace_key: str, payload: GraftQueryRequest
+):
+    try:
+        return await graft.query(
+            workspace_key,
+            question=payload.question,
+            tool=payload.tool,
+            arguments=payload.arguments,
+            request_id=payload.request_id,
+            actor="ui/api",
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown managed workspace")
+    except GraftError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/managed/workspaces/{workspace_key}/graft/rollback")
+async def managed_workspace_graft_rollback(
+    workspace_key: str, payload: GraftRollbackRequest
+):
+    try:
+        return await graft.rollback(
+            workspace_key, reason=payload.reason, actor="ui/api"
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown managed workspace")
+
+
+@app.post("/api/managed/workspaces/{workspace_key}/graft/rearm")
+async def managed_workspace_graft_rearm(workspace_key: str):
+    try:
+        return await graft.rearm(workspace_key, actor="ui/api")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown managed workspace")
 
 
 @app.get("/api/managed/sessions")

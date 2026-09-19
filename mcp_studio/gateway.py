@@ -20,6 +20,7 @@ from .settings import Settings
 from .oauth import OAuthManager
 from .managed_sessions import ManagedSessionManager, ManagedSessionError, ManagedSessionConflict, WorkspaceNotAllowed
 from .tool_permissions import decide_tool_call
+from .graft import GraftManager, GraftError
 
 
 CONTROL_TOOL_NAMES = (
@@ -54,11 +55,13 @@ class GatewaySessionManager:
     def __init__(
         self, settings: Settings, db: Database, oauth: OAuthManager | None = None,
         managed_sessions: ManagedSessionManager | None = None,
+        graft: GraftManager | None = None,
     ):
         self.settings = settings
         self.db = db
         self.oauth = oauth
         self.managed_sessions = managed_sessions
+        self.graft = graft
 
     def authenticate(self, request: Request) -> tuple[str, str, str, str, str]:
         """Authenticate and derive a stable client identity.
@@ -357,6 +360,73 @@ class GatewaySessionManager:
                 "name": "mcpstudio_detach_session",
                 "description": "Detach this transport from its managed project and return to the neutral Studio upstream.",
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            {
+                "name": "mcpstudio_graft_status",
+                "description": "Show HIRDA Graft read-only context status for a workspace/session. Defaults to the currently attached managed session.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "workspace": {"type": "string"},
+                        "session": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "mcpstudio_graft_configure",
+                "description": "Enable/disable HIRDA Graft read-only sidecar context for a workspace and set deterministic canary rollout. Serena keeps its existing managed-session write/lease authority.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "workspace": {"type": "string"},
+                        "session": {"type": "string"},
+                        "enabled": {"type": "boolean"},
+                        "rollout_percent": {"type": "number", "minimum": 0, "maximum": 100},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "mcpstudio_graft_query",
+                "description": "Run one read-only Graft context query under HIRDA's circuit breaker. On failure/rejection it returns Serena-only fallback_required and opens the workspace circuit.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "workspace": {"type": "string"},
+                        "session": {"type": "string"},
+                        "question": {"type": "string"},
+                        "tool": {"type": "string", "enum": ["graft_find_code", "graft_file_api", "graft_check_freshness", "graft_trace_calls", "graft_find_all", "graft_repo_map"]},
+                        "arguments": {"type": "object"},
+                        "request_id": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "mcpstudio_graft_rollback",
+                "description": "Open the workspace Graft circuit immediately. Subsequent context requests must use Serena-only until explicitly rearmed.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "workspace": {"type": "string"},
+                        "session": {"type": "string"},
+                        "reason": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "mcpstudio_graft_rearm",
+                "description": "Explicitly rearm the workspace Graft circuit after operator review.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "workspace": {"type": "string"},
+                        "session": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
             },
             {
                 "name": "mcpstudio_close_session",
@@ -662,6 +732,25 @@ class GatewaySessionManager:
             return result["gateway_session"]
         return session
 
+    async def _resolve_graft_workspace(
+        self, gateway_session_id: str, args: dict[str, Any]
+    ) -> str:
+        if args.get("workspace"):
+            key = str(args.get("workspace") or "").strip()
+            await self.db.get_managed_workspace(key)
+            return key
+        if args.get("session"):
+            session = await self._resolve_managed_session(str(args.get("session") or ""))
+            return str(session["workspace_key"])
+        gateway = await self.db.get_gateway_session(gateway_session_id)
+        managed_id = gateway.get("managed_session_id")
+        if not managed_id:
+            raise GraftError(
+                "Graft workspace is required when no managed session is attached"
+            )
+        session = await self.managed_sessions.get_session(str(managed_id))
+        return str(session["workspace_key"])
+
     async def _handle_management_tool(self, gateway_session_id: str, name: str, args: dict[str, Any]) -> Any:
         if not self.managed_sessions:
             raise ManagedSessionError("managed sessions are unavailable")
@@ -690,6 +779,40 @@ class GatewaySessionManager:
             }
             session = await self.managed_sessions.update_permissions(target["id"], changes, actor="chatgpt/mcp")
             return {"session": session, "permissions": await self.managed_sessions.permissions(target["id"])}
+        if name.startswith("mcpstudio_graft_"):
+            if not self.graft:
+                raise GraftError("HIRDA Graft integration is unavailable")
+            workspace_key = await self._resolve_graft_workspace(gateway_session_id, args)
+            if name == "mcpstudio_graft_status":
+                return await self.graft.status(workspace_key)
+            if name == "mcpstudio_graft_configure":
+                result = await self.graft.configure(
+                    workspace_key,
+                    enabled=(bool(args["enabled"]) if "enabled" in args else None),
+                    rollout_percent=(float(args["rollout_percent"]) if "rollout_percent" in args else None),
+                    actor="chatgpt/mcp",
+                )
+                # Graft is a HIRDA sidecar context plane. Do not alter the
+                # managed Serena session's write authority; Serena remains the sole
+                # editor under its existing lease/permission policy.
+                return result
+            if name == "mcpstudio_graft_query":
+                return await self.graft.query(
+                    workspace_key,
+                    question=(str(args.get("question")) if args.get("question") is not None else None),
+                    tool=(str(args.get("tool")) if args.get("tool") is not None else None),
+                    arguments=(dict(args.get("arguments") or {})),
+                    request_id=(str(args.get("request_id")) if args.get("request_id") is not None else None),
+                    actor="chatgpt/mcp",
+                )
+            if name == "mcpstudio_graft_rollback":
+                return await self.graft.rollback(
+                    workspace_key,
+                    reason=str(args.get("reason") or "operator-rollback"),
+                    actor="chatgpt/mcp",
+                )
+            if name == "mcpstudio_graft_rearm":
+                return await self.graft.rearm(workspace_key, actor="chatgpt/mcp")
         if name == "mcpstudio_session_history":
             target = await self._resolve_managed_session(str(args.get("session") or ""))
             return await self.managed_sessions.history(target["id"])
@@ -1063,7 +1186,7 @@ class GatewaySessionManager:
                 result = await self._handle_management_tool(gateway_session_id, tool_name, tool_args)
                 session = await self.db.get_gateway_session(gateway_session_id)
                 return local_tool_response(result)
-            except (ManagedSessionError, ManagedSessionConflict, WorkspaceNotAllowed, KeyError) as exc:
+            except (ManagedSessionError, ManagedSessionConflict, WorkspaceNotAllowed, GraftError, KeyError) as exc:
                 return local_tool_response({"error": str(exc)}, is_error=True)
 
         if request.method == "POST" and rpc_method == "tools/call" and self.managed_sessions and self.managed_sessions.enabled:

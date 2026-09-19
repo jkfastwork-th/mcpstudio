@@ -112,7 +112,7 @@ def _segment_class(segment: str) -> ToolClass:
     if command in _EXECUTE_COMMANDS:
         return "execute"
     if command in {"python", "python3"}:
-        if len(tokens) >= 3 and tokens[1:3] in (["-m", "pytest"], ["-m", "compileall"]):
+        if len(tokens) >= 3 and tokens[1:3] in (["-m", "pytest"], ["-m", "unittest"], ["-m", "compileall"]):
             return "execute"
         return "unknown"
     return "unknown"
