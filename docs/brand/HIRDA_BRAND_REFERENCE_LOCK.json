@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "brand": "HIRDA",
+  "status": "approved",
+  "approved_date": "2026-09-19",
+  "source_board": {
+    "filename": "ChatGPT Image Sep 19, 2026, 03_18_05 PM.png",
+    "width": 1536,
+    "height": 1024,
+    "sha256": "0c3093bc30a03381e4f7c1d02dd1e4ba02c56e7973b25f7d930353d9e71eb9bf",
+    "role": "human_visual_source_of_truth"
+  },
+  "identity": {
+    "name": "HIRDA",
+    "tagline": "MANY AGENTS. ONE SYSTEM.",
+    "mark": "three-headed faceted origami dragon",
+    "sidebar_lockup": "full_monochrome_lockup"
+  },
+  "colors": {
+    "primary": "#3569F4",
+    "secondary": "#665AF7",
+    "accent": "#7EA2FF",
+    "dark_bg": "#0C1525",
+    "light_bg": "#F4F7FB",
+    "success": "#10A37F",
+    "warning": "#D97706",
+    "danger": "#DC2626"
+  },
+  "typography": {
+    "ui": "Kanit",
+    "technical": "JetBrains Mono"
+  },
+  "sidebar": {
+    "light_asset": "/static/brand/hirda-sidebar-lockup-light.webp",
+    "dark_asset": "/static/brand/hirda-sidebar-lockup-dark.webp",
+    "light_asset_sha256": "b9b6bd4bd3b5e638d0c73f0eced044d2fd72e9cfdf2e7e5324570239834a8270",
+    "dark_asset_sha256": "9d6f6354963602036a339ab32de295446b3621fa9cbe67c87b6d731aa3123d5e",
+    "light_surface": "#F4F7FB",
+    "dark_surface": "#0C1525",
+    "must_preserve_aspect_ratio": true,
+    "must_not_redraw": true,
+    "must_not_add_frame": true
+  },
+  "theme_rules": {
+    "light_sidebar_is_light": true,
+    "dark_sidebar_is_dark": true,
+    "light_and_dark_share_geometry": true,
+    "provider_colors_are_accents_not_brand": true
+  }
+}

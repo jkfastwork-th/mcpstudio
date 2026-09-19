@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 150" role="img" aria-labelledby="title desc">
+<title id="title">HIRDA three-headed origami dragon</title>
+<desc id="desc">Three angular dragon heads assembled from separated origami facets.</desc>
+<defs>
+  <linearGradient id="hirdaBlue" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#F4F7FB"/>
+    <stop offset=".38" stop-color="#AFC7FF"/>
+    <stop offset=".72" stop-color="#3569F4"/>
+    <stop offset="1" stop-color="#665AF7"/>
+  </linearGradient>
+  <linearGradient id="hirdaDeep" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#DCE7FF"/>
+    <stop offset=".55" stop-color="#668EFF"/>
+    <stop offset="1" stop-color="#243A91"/>
+  </linearGradient>
+</defs>
+
+<!-- left head -->
+<g>
+  <polygon points="12,61 31,49 43,51 27,62" fill="url(#hirdaBlue)"/>
+  <polygon points="29,46 47,33 43,51" fill="#EAF0FF"/>
+  <polygon points="45,32 57,41 43,51" fill="#7EA2FF"/>
+  <polygon points="27,65 45,55 56,64 39,72" fill="url(#hirdaDeep)"/>
+  <polygon points="14,64 27,65 23,78" fill="#F4F7FB"/>
+  <polygon points="39,74 55,67 48,83" fill="#3558C9"/>
+  <polygon points="51,45 63,53 55,58" fill="#665AF7"/>
+  <polygon points="33,56 38,55 35,60" fill="#9FEAFF"/>
+</g>
+
+<!-- right head -->
+<g>
+  <polygon points="168,61 149,49 137,51 153,62" fill="url(#hirdaBlue)"/>
+  <polygon points="151,46 133,33 137,51" fill="#EAF0FF"/>
+  <polygon points="135,32 123,41 137,51" fill="#7EA2FF"/>
+  <polygon points="153,65 135,55 124,64 141,72" fill="url(#hirdaDeep)"/>
+  <polygon points="166,64 153,65 157,78" fill="#F4F7FB"/>
+  <polygon points="141,74 125,67 132,83" fill="#3558C9"/>
+  <polygon points="129,45 117,53 125,58" fill="#665AF7"/>
+  <polygon points="147,56 142,55 145,60" fill="#9FEAFF"/>
+</g>
+
+<!-- center head -->
+<g>
+  <polygon points="90,13 104,38 90,52 76,38" fill="#F4F7FB"/>
+  <polygon points="74,19 84,38 72,43 66,27" fill="#AFC7FF"/>
+  <polygon points="106,19 96,38 108,43 114,27" fill="#7EA2FF"/>
+  <polygon points="61,25 73,39 63,44 55,31" fill="#3569F4"/>
+  <polygon points="119,25 107,39 117,44 125,31" fill="#665AF7"/>
+  <polygon points="72,45 88,54 76,73 63,55" fill="url(#hirdaDeep)"/>
+  <polygon points="108,45 92,54 104,73 117,55" fill="url(#hirdaDeep)"/>
+  <polygon points="88,56 90,91 76,73" fill="#EAF0FF"/>
+  <polygon points="92,56 90,91 104,73" fill="#7EA2FF"/>
+  <polygon points="72,51 78,53 75,59" fill="#9FEAFF"/>
+  <polygon points="108,51 102,53 105,59" fill="#9FEAFF"/>
+</g>
+
+<!-- separated chest / shared body -->
+<g>
+  <polygon points="56,79 78,96 67,119 45,101" fill="#AFC7FF"/>
+  <polygon points="124,79 102,96 113,119 135,101" fill="#7EA2FF"/>
+  <polygon points="80,97 90,109 100,97 90,128" fill="#F4F7FB"/>
+  <polygon points="68,121 87,132 90,144 61,127" fill="#3569F4"/>
+  <polygon points="112,121 93,132 90,144 119,127" fill="#665AF7"/>
+</g>
+</svg>

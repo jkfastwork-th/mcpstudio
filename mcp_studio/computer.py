@@ -41,6 +41,17 @@ def _tcp_probe(host: str, port: int, timeout: float = 0.5) -> bool:
         return False
 
 
+def _unix_socket_probe(path: Path, timeout: float = 0.3) -> bool:
+    """Best-effort readiness probe for local Wayland compositor sockets."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(timeout)
+            client.connect(str(path))
+        return True
+    except OSError:
+        return False
+
+
 def _tcp_listener_present(port: int) -> bool:
     """Check Linux TCP listener state without opening a connection.
 
@@ -103,6 +114,81 @@ class ComputerUseManager:
             if found:
                 return found
         return None
+
+    @staticmethod
+    def _host_gpu_available() -> bool:
+        dri = Path("/dev/dri")
+        try:
+            if dri.is_dir():
+                for node in dri.glob("renderD*"):
+                    if os.access(node, os.R_OK | os.W_OK):
+                        return True
+        except OSError:
+            pass
+        nvidia = (Path("/dev/nvidia0"), Path("/dev/nvidiactl"))
+        return all(node.exists() and os.access(node, os.R_OK | os.W_OK) for node in nvidia)
+
+    def _resolved_gpu_mode(self) -> str:
+        mode = str(self._studio.computer_gpu_mode or "auto").strip().lower()
+        if mode == "auto":
+            return "hardware" if self._host_gpu_available() else "swiftshader"
+        return mode
+
+    def _weston_binary(self) -> str | None:
+        return shutil.which("weston")
+
+    def _nested_wayland_enabled(self) -> bool:
+        return bool(
+            self.session_isolation_enabled
+            and self._resolved_gpu_mode() == "hardware"
+            and self._weston_binary()
+        )
+
+    def _gpu_presentation_mode(self) -> str:
+        if self._nested_wayland_enabled():
+            return "nested-wayland"
+        return "x11"
+
+    def _wayland_runtime_dir(self, runtime: dict[str, Any]) -> Path:
+        return Path(runtime["root"]) / "wayland-runtime"
+
+    @staticmethod
+    def _wayland_socket_name() -> str:
+        return "wayland-mcp"
+
+    def _wayland_socket_path(self, runtime: dict[str, Any]) -> Path:
+        return self._wayland_runtime_dir(runtime) / self._wayland_socket_name()
+
+    def _weston_pid_file(self, runtime: dict[str, Any]) -> Path:
+        return Path(runtime["root"]) / "weston.pid"
+
+    def _weston_log_path(self, runtime: dict[str, Any]) -> Path:
+        return Path(runtime["root"]) / "weston.log"
+
+    def _chrome_gpu_args(self) -> list[str]:
+        common = [
+            "--enable-gpu",
+            "--enable-unsafe-webgpu",
+            "--ignore-gpu-blocklist",
+        ]
+        if self._resolved_gpu_mode() == "hardware":
+            if self.session_isolation_enabled:
+                # Xvnc does not expose DRI3, so Chromium cannot safely present
+                # its Vulkan compositor directly on X11. Run Chrome as a
+                # Wayland client inside a nested Weston window instead; this
+                # keeps Chrome compositing on GL while Chromium's supported
+                # Linux WebGPU-on-Vulkan interop path uses the host GPU.
+                return common + ["--ozone-platform=wayland"]
+            return common
+        return common + [
+            "--enable-features=Vulkan",
+            "--use-gl=angle",
+            "--use-angle=vulkan",
+            "--use-vulkan=swiftshader",
+            "--use-webgpu-adapter=swiftshader",
+            "--disable-vulkan-surface",
+            "--enable-unsafe-swiftshader",
+        ]
 
     def _vnc_password_file(self) -> Path:
         return Path(self._studio.computer_vnc_password_file).expanduser()
@@ -220,6 +306,15 @@ class ComputerUseManager:
         deadline = asyncio.get_running_loop().time() + timeout
         while asyncio.get_running_loop().time() < deadline:
             if _tcp_listener_present(port):
+                return True
+            await asyncio.sleep(0.2)
+        return False
+
+
+    async def _wait_unix_socket(self, path: Path, timeout: float = 12.0) -> bool:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
+            if _unix_socket_probe(path):
                 return True
             await asyncio.sleep(0.2)
         return False
@@ -351,6 +446,7 @@ class ComputerUseManager:
         if runtime.get("adopted"):
             return
         await self._stop_chrome(runtime)
+        await self._stop_weston(runtime)
         await self._stop_vnc(runtime)
 
     def _build_repair_runtime(
@@ -572,6 +668,118 @@ class ComputerUseManager:
             f"VNC :{runtime['display']} failed to start; see {session_home / '.vnc'}"
         )
 
+
+    async def _start_weston(self, runtime: dict[str, Any]) -> None:
+        if not self.session_isolation_enabled or self._resolved_gpu_mode() != "hardware":
+            return
+        weston = self._weston_binary()
+        if not weston:
+            raise RuntimeError("Weston is required for hardware GPU presentation under isolated VNC")
+
+        runtime_dir = self._wayland_runtime_dir(runtime)
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        runtime_dir.chmod(0o700)
+        socket_path = self._wayland_socket_path(runtime)
+        if _unix_socket_probe(socket_path):
+            return
+        try:
+            socket_path.unlink()
+        except FileNotFoundError:
+            pass
+
+        root = Path(runtime["root"])
+        session_home = root / "home"
+        xauthority = session_home / ".Xauthority"
+        if not xauthority.is_file():
+            raise RuntimeError(f"VNC Xauthority is missing for nested Wayland: {xauthority}")
+
+        match = re.fullmatch(r"(\d+)x(\d+)", str(self._studio.computer_geometry or ""))
+        width, height = (match.group(1), match.group(2)) if match else ("1440", "900")
+        log_path = self._weston_log_path(runtime)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        env = os.environ.copy()
+        env["DISPLAY"] = f":{int(runtime['display'])}"
+        env["XAUTHORITY"] = str(xauthority)
+        env["XDG_RUNTIME_DIR"] = str(runtime_dir)
+        env["HOME"] = str(session_home)
+
+        log_handle = log_path.open("ab")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                weston,
+                "--backend=x11-backend.so",
+                f"--socket={self._wayland_socket_name()}",
+                f"--width={width}",
+                f"--height={height}",
+                "--idle-time=0",
+                env=env,
+                stdout=log_handle,
+                stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,
+            )
+        finally:
+            log_handle.close()
+
+        self._weston_pid_file(runtime).write_text(f"{proc.pid}\n")
+        if await self._wait_unix_socket(socket_path, timeout=12):
+            return
+
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        raise RuntimeError(f"Weston failed to start; see {log_path}")
+
+    def _weston_pid_for_runtime(self, runtime: dict[str, Any]) -> int | None:
+        pid_file = self._weston_pid_file(runtime)
+        try:
+            pid = int(pid_file.read_text().strip())
+        except (OSError, ValueError):
+            return None
+        try:
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ")
+            environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\x00")
+        except OSError:
+            return None
+        expected_runtime = f"XDG_RUNTIME_DIR={self._wayland_runtime_dir(runtime)}".encode()
+        if b"weston" not in cmdline or b"--socket=wayland-mcp" not in cmdline:
+            return None
+        if expected_runtime not in environ:
+            return None
+        return pid
+
+    async def _stop_weston(self, runtime: dict[str, Any]) -> None:
+        pid = self._weston_pid_for_runtime(runtime)
+        if pid is not None:
+            try:
+                pgid = os.getpgid(pid)
+                if pgid == pid:
+                    os.killpg(pgid, signal.SIGTERM)
+                else:
+                    os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            deadline = asyncio.get_running_loop().time() + 4.0
+            while asyncio.get_running_loop().time() < deadline:
+                if not Path(f"/proc/{pid}").exists():
+                    break
+                await asyncio.sleep(0.2)
+            if Path(f"/proc/{pid}").exists():
+                try:
+                    pgid = os.getpgid(pid)
+                    if pgid == pid:
+                        os.killpg(pgid, signal.SIGKILL)
+                    else:
+                        os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+
+        for path in (self._weston_pid_file(runtime), self._wayland_socket_path(runtime)):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
     async def _start_chrome(self, runtime: dict[str, Any]) -> None:
         host = "127.0.0.1"
         port = int(runtime["cdp_port"])
@@ -591,7 +799,11 @@ class ComputerUseManager:
         env["XDG_CONFIG_HOME"] = str(root / "desktop" / "config")
         env["XDG_CACHE_HOME"] = str(root / "desktop" / "cache")
         env["XDG_STATE_HOME"] = str(root / "desktop" / "state")
-        env["XDG_RUNTIME_DIR"] = str(root / "desktop" / "runtime")
+        if self._nested_wayland_enabled():
+            env["XDG_RUNTIME_DIR"] = str(self._wayland_runtime_dir(runtime))
+            env["WAYLAND_DISPLAY"] = self._wayland_socket_name()
+        else:
+            env["XDG_RUNTIME_DIR"] = str(root / "desktop" / "runtime")
         log_handle = log_path.open("ab")
         try:
             await asyncio.create_subprocess_exec(
@@ -601,20 +813,7 @@ class ComputerUseManager:
                 "--remote-debugging-address=127.0.0.1",
                 "--no-first-run",
                 "--no-default-browser-check",
-                # Keep GPU-backed browser APIs available in isolated/VNC
-                # sessions even when the host has no physical GPU. WebGL and
-                # WebGPU use different SwiftShader paths on Linux: WebGPU
-                # requires the Vulkan-backed software adapter.
-                "--enable-gpu",
-                "--enable-unsafe-webgpu",
-                "--ignore-gpu-blocklist",
-                "--enable-features=Vulkan",
-                "--use-gl=angle",
-                "--use-angle=vulkan",
-                "--use-vulkan=swiftshader",
-                "--use-webgpu-adapter=swiftshader",
-                "--disable-vulkan-surface",
-                "--enable-unsafe-swiftshader",
+                *self._chrome_gpu_args(),
                 "about:blank",
                 env=env,
                 stdout=log_handle,
@@ -637,6 +836,7 @@ class ComputerUseManager:
                 raise RuntimeError(f"Adopted Chrome CDP {runtime['cdp_port']} is not running")
             return
         await self._start_vnc(runtime)
+        await self._start_weston(runtime)
         await self._start_chrome(runtime)
 
     async def ensure_runtime(self, managed_session_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -774,14 +974,22 @@ class ComputerUseManager:
                 "cdp_port": int(self._studio.computer_cdp_port),
                 "auth_required": False,
                 "runtime_mode": "session-isolated" if self.session_isolation_enabled else "shared",
+                "gpu_mode": self._resolved_gpu_mode(),
+                "gpu_hardware_available": self._host_gpu_available(),
+                "gpu_presentation_mode": self._gpu_presentation_mode(),
+                "weston_available": bool(self._weston_binary()),
             }
 
         novnc_available = bool(novnc_dir and Path(novnc_dir).is_dir())
         if self.session_isolation_enabled:
+            hardware_wayland_ready = bool(
+                self._resolved_gpu_mode() != "hardware" or self._weston_binary()
+            )
             tools_ready = bool(
                 (shutil.which("tigervncserver") or shutil.which("vncserver"))
                 and self._vnc_password_file().is_file()
                 and self._chrome_binary()
+                and hardware_wayland_ready
             )
             transport_ready = bool(tools_ready and _is_loopback(self._studio.computer_vnc_host))
             registry = self._read_registry()
@@ -800,6 +1008,10 @@ class ComputerUseManager:
                 "auth_required": bool(self._studio.computer_auth_token),
                 "transport_ready": transport_ready,
                 "runtime_mode": "session-isolated",
+                "gpu_mode": self._resolved_gpu_mode(),
+                "gpu_hardware_available": self._host_gpu_available(),
+                "gpu_presentation_mode": self._gpu_presentation_mode(),
+                "weston_available": bool(self._weston_binary()),
                 "runtime_displays": runtime_displays,
             }
 
@@ -819,6 +1031,10 @@ class ComputerUseManager:
             "websockify_reachable": websockify_up,
             "transport_ready": websockify_up,
             "runtime_mode": "shared",
+            "gpu_mode": self._resolved_gpu_mode(),
+            "gpu_hardware_available": self._host_gpu_available(),
+            "gpu_presentation_mode": self._gpu_presentation_mode(),
+            "weston_available": bool(self._weston_binary()),
         }
 
     async def descriptor(self, managed_session_id: str) -> dict[str, Any]:
@@ -836,6 +1052,10 @@ class ComputerUseManager:
             "cdp_port": int(runtime["cdp_port"]),
             "desktop_display": f":{int(runtime['display'])}",
             "runtime_mode": "session-isolated" if self.session_isolation_enabled else "shared",
+            "gpu_mode": self._resolved_gpu_mode(),
+            "gpu_hardware_available": self._host_gpu_available(),
+            "gpu_presentation_mode": self._gpu_presentation_mode(),
+            "weston_available": bool(self._weston_binary()),
         }
 
     def websocket_target(self) -> str:

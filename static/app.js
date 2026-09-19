@@ -30,7 +30,7 @@ const I18N_TH={
   'STATUS CHEAT SHEET':'ความหมายสถานะ','What the labels mean':'ความหมายของป้ายสถานะ','Session is running and available.':'เซสชันกำลังรันและพร้อมใช้งาน','IDLE':'ว่าง','Session is healthy but not currently busy.':'เซสชันปกติแต่ไม่ได้กำลังทำงาน','STOPPED':'หยุดแล้ว','Session is preserved and can be resumed.':'เซสชันยังถูกเก็บไว้และ resume ได้','WRITE ACTIVE':'กำลังล็อกเขียน','Exclusive write lease is currently held.':'กำลังถือ exclusive write lease','UNBOUND':'ยังไม่ผูก','Client reached HIRDA but has not selected a managed session.':'Client ถึง HIRDA แล้วแต่ยังไม่ได้เลือก managed session','ERROR':'ผิดพลาด','Open System and inspect the alert or session detail.':'เปิด System แล้วตรวจ alert หรือรายละเอียด session',
   'Hover help is available throughout the UI.':'มีคำอธิบายเมื่อวางเมาส์ทั่วทั้ง UI','Move the pointer over a ? icon, important button, status badge, or navigation item. Keyboard users can focus the same controls to show the explanation.':'วางเมาส์เหนือไอคอน ?, ปุ่มสำคัญ, ป้ายสถานะ หรือเมนูเพื่อดูคำอธิบาย ผู้ใช้คีย์บอร์ดสามารถ focus ที่จุดเดียวกันได้',
   'SYSTEM':'ระบบ','System health':'สุขภาพระบบ','Use this page only when something needs investigation.':'ใช้หน้านี้เมื่อจำเป็นต้องตรวจสอบปัญหา','Poll health':'ตรวจสุขภาพ','Refresh Herdr':'รีเฟรช Herdr','Tunnels':'Tunnels','RELIABILITY':'ความเสถียร','Alerts & SLO':'Alerts & SLO','Advanced diagnostics':'วิเคราะห์ขั้นสูง','Workers & work queue':'Workers และคิวงาน','Operations':'การปฏิบัติการ','Activity & audit':'กิจกรรมและ Audit','Execution':'การทำงาน','Servers':'เซิร์ฟเวอร์','Telemetry':'Telemetry','OpenAI compatibility':'ความเข้ากันได้กับ OpenAI',
-  'Refreshing…':'กำลังรีเฟรช…','Polling…':'กำลังตรวจ…','Confirm action':'ยืนยันการทำงาน','Continue':'ดำเนินการต่อ','Close':'ปิด','Action failed':'ดำเนินการไม่สำเร็จ','Rename session':'เปลี่ยนชื่อเซสชัน','Choose a clear name for this pinned project session.':'ตั้งชื่อที่เข้าใจง่ายให้เซสชันโปรเจกต์นี้','Rename':'เปลี่ยนชื่อ','Stop isolated Serena session?':'หยุด Serena session ที่แยกไว้หรือไม่?','The pinned project stays registered and can be resumed later. Connected clients must be detached first.':'โปรเจกต์ที่ pin ไว้ยังคงลงทะเบียนอยู่และ resume ได้ภายหลัง ต้อง detach client ที่เชื่อมต่ออยู่ก่อน','Stop session':'หยุดเซสชัน','Register workspace':'ลงทะเบียนเวิร์กสเปซ','Only approved workspaces can receive isolated project sessions.':'เฉพาะ workspace ที่อนุมัติแล้วเท่านั้นที่สร้าง isolated project session ได้','Register':'ลงทะเบียน','Workspace key':'Workspace key','Absolute project path':'Absolute project path','Display name':'ชื่อที่แสดง',
+  'Refreshing…':'กำลังรีเฟรช…','Polling…':'กำลังตรวจ…','Confirm action':'ยืนยันการทำงาน','Continue':'ดำเนินการต่อ','Close':'ปิด','Action failed':'ดำเนินการไม่สำเร็จ','Rename session':'เปลี่ยนชื่อเซสชัน','Choose a clear name for this pinned project session.':'ตั้งชื่อที่เข้าใจง่ายให้เซสชันโปรเจกต์นี้','Rename':'เปลี่ยนชื่อ','Stop isolated Serena session?':'หยุด Serena session ที่แยกไว้หรือไม่?','The pinned project stays registered and can be resumed later. Connected clients must be detached first.':'โปรเจกต์ที่ pin ไว้ยังคงลงทะเบียนอยู่และ resume ได้ภายหลัง ต้อง detach client ที่เชื่อมต่ออยู่ก่อน','Stop session':'หยุดเซสชัน','Choose a project session':'เลือกโปรเจกต์เซสชัน','Select a managed project session before attaching this client transport.':'เลือก managed project session ก่อนผูก client transport นี้','Register workspace':'ลงทะเบียนเวิร์กสเปซ','Only approved workspaces can receive isolated project sessions.':'เฉพาะ workspace ที่อนุมัติแล้วเท่านั้นที่สร้าง isolated project session ได้','Register':'ลงทะเบียน','Workspace key':'Workspace key','Absolute project path':'Absolute project path','Display name':'ชื่อที่แสดง',
   'Technical details':'รายละเอียดทางเทคนิค','Everything is running normally':'ระบบทำงานปกติ','System needs attention':'ระบบต้องตรวจสอบ','No action needed':'ไม่ต้องดำเนินการ','No running project sessions. Create one when you need a project.':'ยังไม่มี project session ที่กำลังรัน สร้างใหม่เมื่อเริ่มทำงานกับโปรเจกต์','No ingress configured.':'ยังไม่ได้กำหนด ingress','Nothing needs attention.':'ไม่มีสิ่งที่ต้องดำเนินการ','No approved workspaces registered.':'ยังไม่มี workspace ที่ลงทะเบียน','No managed sessions in this view.':'ไม่มี managed session ในมุมมองนี้','Managed session isolation is disabled in config.':'Managed session isolation ถูกปิดใน config','Register a workspace first':'ลงทะเบียน workspace ก่อน',
   'ACTIVE':'ใช้งาน','HEALTHY':'ปกติ','DOWN':'ล่ม','DEGRADED':'ผิดปกติ','BUSY':'กำลังทำงาน','RUNNING':'กำลังรัน','READY':'พร้อม','CONNECTED':'เชื่อมต่อ','STALE':'หมดอายุ','CLOSED':'ปิดแล้ว','UNKNOWN':'ไม่ทราบ','FAILED':'ล้มเหลว','COMPLETED':'เสร็จแล้ว','RECONNECTING':'กำลังเชื่อมต่อใหม่','DETACHED':'แยกออกแล้ว',
   'Language':'ภาษา','Change interface language. Your choice is saved in this browser.':'เปลี่ยนภาษาของหน้าจอ ระบบจะจำค่าที่เลือกไว้ในเบราว์เซอร์','Interface language':'ภาษาหน้าจอ','Reset text size to the default 112%.':'คืนขนาดตัวอักษรเป็นค่าเริ่มต้น 112%','Adjust UI text size. This setting is saved in your browser.':'ปรับขนาดตัวอักษรของ UI ระบบจะจำค่าไว้ในเบราว์เซอร์','Decrease text size.':'ลดขนาดตัวอักษร','Increase text size.':'เพิ่มขนาดตัวอักษร','Switch between Light and Dark. Your choice is saved in this browser.':'สลับธีมสว่าง/มืด ระบบจะจำค่าที่เลือกไว้','Use the light Google-inspired color theme.':'ใช้ธีมสว่างโทน Google','Use the dark Google-inspired color theme.':'ใช้ธีมมืดโทน Google','Reload current HIRDA status from the server.':'โหลดสถานะ HIRDA ล่าสุดจากเซิร์ฟเวอร์','Overall HIRDA health. HEALTHY means the control plane is responding normally.':'สุขภาพโดยรวมของ HIRDA; HEALTHY หมายถึง control plane ตอบสนองปกติ',
@@ -88,6 +88,7 @@ const I18N_TH={
   'Text size':'ขนาดตัวอักษร',
   'Color Scheme':'ชุดสี',
   'Default':'ค่าเริ่มต้น',
+  'HIRDA Theme':'ธีม HIRDA',
   'Claude Theme':'ธีม Claude',
   'Codex Theme':'ธีม Codex',
   'Hermes Theme':'ธีม Hermes',
@@ -105,6 +106,7 @@ const I18N_TH={
   'AGENT RUNTIMES':'รันไทม์เอเจนต์',
   'Monitor Claude, Codex, and Hermes runtime availability.':'ตรวจสอบความพร้อมใช้งานของรันไทม์ Claude, Codex และ Hermes',
   'Monitor Claude, Codex, and Hermes runtime availability and active capsule load.':'ตรวจสอบความพร้อมใช้งานของรันไทม์ Claude, Codex และ Hermes รวมถึงภาระแคปซูลที่กำลังทำงาน',
+  'Monitor runtime availability, authentication health, rate limits, and active capsule load.':'ตรวจสอบความพร้อมใช้งานของรันไทม์ สุขภาพการยืนยันตัวตน ข้อจำกัดอัตราใช้งาน และภาระแคปซูลที่กำลังทำงาน',
   'Manage approved projects, managed sessions, and workspace safety.':'จัดการโปรเจกต์ที่อนุมัติ เซสชันที่ HIRDA ดูแล และความปลอดภัยของเวิร์กสเปซ',
   'SETTINGS':'การตั้งค่า',
   'Appearance and interface preferences.':'รูปลักษณ์และการตั้งค่าหน้าจอ',
@@ -165,7 +167,28 @@ const I18N_TH={
   'Online':'ออนไลน์',
   'Offline':'ออฟไลน์',
   'Version':'เวอร์ชัน',
+  'Model':'โมเดล',
   'Status':'สถานะ',
+  'Authentication':'การยืนยันตัวตน',
+  'Rate limit':'ข้อจำกัดอัตราใช้งาน',
+  'Verified':'ยืนยันแล้ว',
+  'Observed OK':'สังเกตแล้วว่าปกติ',
+  'Credential configured':'ตั้งค่าข้อมูลยืนยันตัวตนแล้ว',
+  'Auth error':'การยืนยันตัวตนผิดพลาด',
+  'Logged in':'เข้าสู่ระบบแล้ว',
+  'Healthy':'ปกติ',
+  'Limited':'ถูกจำกัด',
+  'Exhausted':'โควตาหมด',
+  'Reported':'มีข้อมูลรายงาน',
+  'Not reported':'ยังไม่มีข้อมูลรายงาน',
+  'Interactive only':'ดูได้เฉพาะในโหมดโต้ตอบ',
+  'Not available':'ไม่มีข้อมูล',
+  'Not verified':'ยังไม่ได้ยืนยัน',
+  'Available':'พร้อมเรียกใช้งาน',
+  'Blocked':'ติดขัด',
+  'Unavailable':'ไม่พร้อมใช้งาน',
+  'Unknown':'ไม่ทราบ',
+  'Active panes':'Pane ที่กำลังใช้งาน',
   'Active Capsules':'แคปซูลที่กำลังทำงาน',
   'AI Agents Online':'เอเจนต์ AI ออนไลน์',
   'Handoffs Today':'การส่งต่องานวันนี้',
@@ -526,7 +549,7 @@ async function sendJson(url, body){ return getJson(url,{method:'POST',headers:{'
 const viewMeta = {
   home:['Dashboard','Dashboard','Live capsule routing, active agent lanes, handoffs, and system health.'],
   sessions:['Capsule Lanes','Capsule Lanes','Inspect capsule state, routing, handoffs, and session history.'],
-  agents:['Agents','Agents','Monitor Claude, Codex, and Hermes runtime availability and active capsule load.'],
+  agents:['Agents','Agents','Monitor runtime availability, authentication health, rate limits, and active capsule load.'],
   workspaces:['Workspaces','Workspaces','Manage approved projects, managed sessions, and workspace safety.'],
   guide:['Guide','Guide','Daily use first, then setup and troubleshooting.'],
   computer:['Computer','Computer','Open a shared browser desktop for OAuth, sign-in, consent, and other human-in-the-loop actions.'],
@@ -629,6 +652,70 @@ function renderCapsuleLane({agent,sub,colorClass,active=false,activeStage='',cap
   </div>`;
 }
 
+function runtimeHealthClass(status){
+  const value=String(status||'unknown').toLowerCase();
+  if(['logged_in','healthy'].includes(value))return 'fact-ready';
+  if(['configured','reported','interactive_only'].includes(value))return 'fact-info';
+  if(value==='limited')return 'fact-warning';
+  if(['error','exhausted'].includes(value))return 'fact-danger';
+  return 'fact-muted';
+}
+
+function authHealthLabel(health){
+  const h=health||{};
+  const status=String(h.status||'unknown').toLowerCase();
+  if(['logged_in','healthy'].includes(status))return tr('Logged in');
+  if(status==='configured')return tr('Credential configured');
+  if(status==='error')return tr('Auth error');
+  if(status==='unavailable')return tr('Unavailable');
+  return tr('Not verified');
+}
+
+function limitHealthLabel(health){
+  const h=health||{};
+  const status=String(h.status||'unknown').toLowerCase();
+  const labels={
+    healthy:'Healthy',
+    limited:'Limited',
+    exhausted:'Exhausted',
+    reported:'Reported',
+    interactive_only:'Interactive only',
+    unavailable:'Unavailable',
+    unknown:'Not available'
+  };
+  const base=tr(labels[status]||'Not reported');
+  return h.remaining!=null && h.remaining!==''?`${base} · ${h.remaining}`:base;
+}
+
+function runtimePresence(runtime){
+  const r=runtime||{};
+  const state=String(r.status||'unknown').toLowerCase();
+  const observed=Boolean(r.observed || Number(r.pane_count||0)>0);
+  if(['blocked','error','failed'].includes(state)){
+    return {label:'Attention',className:'runtime-attention',online:false};
+  }
+  if(observed && ['running','ready','available'].includes(state)){
+    return {label:'Online',className:'runtime-online',online:true};
+  }
+  if(r.installed!==false && state!=='unavailable'){
+    return {label:'Available',className:'runtime-available',online:false};
+  }
+  return {label:'Offline',className:'runtime-offline',online:false};
+}
+
+function runtimeStateLabel(state){
+  const raw=String(state||'unknown').toLowerCase();
+  const labels={
+    running:'Running',
+    ready:'Ready',
+    available:'Available',
+    blocked:'Blocked',
+    unavailable:'Unavailable',
+    unknown:'Unknown'
+  };
+  return tr(labels[raw]||raw);
+}
+
 function renderAgentLanes(data){
   const grid=document.getElementById('agentRuntimeGrid');
   if(!grid) return;
@@ -643,27 +730,32 @@ function renderAgentLanes(data){
     const id=String(r.id||'').toLowerCase();
     const icon=id==='claude'?'✷':id==='codex'?'◎':'⬡';
     const state=String(r.status||'unknown').toLowerCase();
-    const version=r.version||r.model||r.last_used_model||'—';
+    const version=r.version||tr('Not reported');
+    const model=r.model||r.last_used_model||tr('Not reported');
     const provider=r.provider||r.brand||'Unknown provider';
-    const installed=r.installed!==false;
-    const online=installed && !['blocked','unavailable','unknown'].includes(state);
-    const activeCapsules=Number(r.active_capsules??r.pane_count??0);
-    const queueLength=Number(r.queue_length??0);
-    const contextLimit=r.context_limit||r.context_window||'—';
-    const lastError=r.last_error||'—';
+    const presence=runtimePresence(r);
+    const paneCount=Number(r.pane_count??0);
+    const queueLength=r.queue_length;
+    const contextLimit=r.context_limit||r.context_window;
+    const lastError=r.last_error;
+    const authHealth=r.auth_health||{status:'unknown'};
+    const limitHealth=r.limit_health||{status:'unknown'};
     return `<article class="agent-runtime-card ${esc(id)}">
       <div class="agent-runtime-top">
         <span class="agent-runtime-icon">${icon}</span>
         <div class="agent-runtime-title"><h3>${esc(r.name||id)}</h3><small>${esc(provider)}</small></div>
-        <span class="runtime-pill ${online?'runtime-online':'runtime-offline'}"><i></i>${online?'Online':'Offline'}</span>
+        <span class="runtime-pill ${presence.className}"><i></i>${esc(tr(presence.label))}</span>
       </div>
       <div class="agent-reference-facts">
         <div><span>Version</span><strong>${esc(version)}</strong></div>
-        <div><span>Status</span><strong class="${online?'fact-ready':'fact-muted'}">${esc(online?'Ready':state)}</strong></div>
-        <div><span>Active Capsules</span><strong>${activeCapsules}</strong></div>
-        <div><span>Queue Length</span><strong>${queueLength}</strong></div>
-        <div><span>Context Limit</span><strong>${esc(contextLimit)}</strong></div>
-        <div><span>Last Error</span><strong>${esc(lastError)}</strong></div>
+        <div><span>Model</span><strong>${esc(model)}</strong></div>
+        <div><span>Status</span><strong class="${presence.online?'fact-ready':state==='blocked'?'fact-danger':'fact-muted'}">${esc(runtimeStateLabel(state))}</strong></div>
+        <div><span>Authentication</span><strong class="${runtimeHealthClass(authHealth.status)}">${esc(authHealthLabel(authHealth))}</strong></div>
+        <div><span>Rate limit</span><strong class="${runtimeHealthClass(limitHealth.status)}">${esc(limitHealthLabel(limitHealth))}</strong></div>
+        <div><span>Active panes</span><strong>${paneCount}</strong></div>
+        ${queueLength==null?'':`<div><span>Queue Length</span><strong>${esc(queueLength)}</strong></div>`}
+        ${contextLimit==null?'':`<div><span>Context Limit</span><strong>${esc(contextLimit)}</strong></div>`}
+        ${lastError? `<div><span>Last Error</span><strong class="fact-danger">${esc(lastError)}</strong></div>` : ''}
       </div>
       <div class="agent-reference-actions">
         <button class="button secondary small" data-agent-check="${esc(id)}" type="button">Check Runtime</button>
@@ -766,7 +858,7 @@ function renderOverview(data){
       ${lastHandoff?.a2a?.task_id?`<div><span>A2A task</span><strong>${esc(lastHandoff.a2a.task_id)} · ${esc(lastHandoff.a2a.task?.status?.state||'submitted')}</strong></div>`:''}
       <div><span>Next fallback</span><strong>${esc(nextFallback)}</strong></div>
     </div>
-    <button class="button capsule-detail-button" data-go-view="sessions">View capsule details →</button>`;
+    <button class="button capsule-detail-button" data-go-view="sessions" type="button">View capsule details →</button>`;
 
   if(hasLedger){
     const ev=[...(liveCapsule.events||[])].reverse().slice(0,6);
@@ -864,9 +956,9 @@ function renderManagedSessions(data){
     const lifecycle=x.lifecycle_state||x.status;
     const providers=(x.ingress_providers||[]).join(', ')||'—';
     const last=x.last_used_at||x.last_transport_seen_at||x.last_started_at||x.updated_at;
-    const resume=x.status==='stopped'?`<button class="button small" data-managed-resume="${esc(x.id)}">Resume</button>`:`<button class="button secondary small" data-managed-restart="${esc(x.id)}" ${x.connected_transports?'disabled':''}>Restart</button>`;
-    const stop=x.status!=='stopped'?`<button class="button danger small" data-managed-stop="${esc(x.id)}" ${x.connected_transports?'disabled':''}>Stop</button>`:'';
-    return `<div class="managed-session-row"><div><strong>${esc(x.name)}</strong><small>${esc(shortId(x.id,18))}</small><span class="project-pin">🔒 PINNED</span></div><div><strong>${esc(x.workspace_key)}</strong><small>${esc(x.project_path)}</small></div><div>${badge(lifecycle)}<small>${esc(x.status)} · port ${esc(x.port||'—')}</small></div><div><strong>${esc(x.connected_transports||0)} transport${x.connected_transports===1?'':'s'}</strong><small>${esc(providers)} · ${esc(ago(last))}</small></div><div class="managed-actions">${resume}<button class="button secondary small" data-managed-rename="${esc(x.id)}" data-managed-name="${esc(x.name)}">Rename</button><button class="text-button" data-managed-history="${esc(x.id)}">History</button>${stop}</div></div>`;
+    const resume=x.status==='stopped'?`<button class="button small" data-managed-resume="${esc(x.id)}" type="button">Resume</button>`:`<button class="button secondary small" data-managed-restart="${esc(x.id)}" type="button" ${x.connected_transports?'disabled':''}>Restart</button>`;
+    const stop=x.status!=='stopped'?`<button class="button danger small" data-managed-stop="${esc(x.id)}" type="button" ${x.connected_transports?'disabled':''}>Stop</button>`:'';
+    return `<div class="managed-session-row"><div><strong>${esc(x.name)}</strong><small>${esc(shortId(x.id,18))}</small><span class="project-pin">🔒 PINNED</span></div><div><strong>${esc(x.workspace_key)}</strong><small>${esc(x.project_path)}</small></div><div>${badge(lifecycle)}<small>${esc(x.status)} · port ${esc(x.port||'—')}</small></div><div><strong>${esc(x.connected_transports||0)} transport${x.connected_transports===1?'':'s'}</strong><small>${esc(providers)} · ${esc(ago(last))}</small></div><div class="managed-actions">${resume}<button class="button secondary small" data-managed-rename="${esc(x.id)}" data-managed-name="${esc(x.name)}" type="button">Rename</button><button class="text-button" data-managed-history="${esc(x.id)}" type="button">History</button>${stop}</div></div>`;
   }).join('')}`:`<div class="empty ${status.enabled?'':'good'}">${status.enabled?'No managed sessions in this view.':'Managed session isolation is disabled in config.'}</div>`;
   document.getElementById('managedWorkspacesPanel').innerHTML=ws.length?`<div class="workspace-reference-table">
     <div class="workspace-reference-row header"><span>Name</span><span>Path</span><span>Active Sessions</span><span>Status</span><span>Actions</span></div>
@@ -879,7 +971,7 @@ function renderManagedSessions(data){
         <code>${esc(w.project_path)}</code>
         <strong>${activeCount}</strong>
         <span class="workspace-reference-status ${activeCount?'active':'idle'}"><i></i>${activeCount?'Active':'Idle'}</span>
-        <div class="workspace-reference-actions"><button class="button secondary small" data-go-view="sessions" type="button">Open</button><button class="reference-kebab workspace-copy-command" data-copy-command="${esc(chatCommand)}" data-copy-text="Copy ChatGPT command" data-help="Copy the workspace selection command for ChatGPT." type="button" aria-label="More actions">•••</button></div>
+        <div class="workspace-reference-actions"><button class="button secondary small" data-go-view="sessions" type="button">Open</button><button class="reference-kebab workspace-copy-command" data-copy-command="${esc(chatCommand)}" data-copy-text="Copy ChatGPT command" data-help="Copy the workspace selection command for ChatGPT." type="button" aria-label="Copy ChatGPT command">•••</button></div>
       </div>`;
     }).join('')}
   </div>`:'<div class="empty">No approved workspaces registered.</div>';
@@ -892,7 +984,7 @@ function renderManagedHistory(payload){
   const panel=document.getElementById('managedSessionHistoryPanel');
   const session=payload.session||{}; const audit=payload.audit||[]; const transports=payload.transports||[];
   panel.hidden=false;
-  panel.innerHTML=`<div class="history-head"><div><span class="eyebrow">SESSION HISTORY</span><h3>${esc(session.name||session.id)}</h3><p>${esc(session.workspace_key||'')} · ${esc(session.project_path||'')}</p></div><button class="text-button" data-managed-history-close>Close</button></div><div class="history-grid"><div><h4>Lifecycle</h4>${audit.length?audit.slice(0,30).map(a=>`<div class="history-item"><strong>${esc(a.action)}</strong><small>${esc(ago(a.created_at))} · ${esc(a.actor||'system')}</small></div>`).join(''):'<div class="empty">No lifecycle audit yet.</div>'}</div><div><h4>Transport history</h4>${transports.length?transports.slice(0,30).map(t=>`<div class="history-item"><strong>${esc(t.ingress_provider||t.last_tunnel_id||'direct')}</strong><small>${esc(t.status)} · ${esc(ago(t.last_seen_at))} · ${esc(shortId(t.id,14))}</small></div>`).join(''):'<div class="empty">No transport history yet.</div>'}</div></div>`;
+  panel.innerHTML=`<div class="history-head"><div><span class="eyebrow">SESSION HISTORY</span><h3>${esc(session.name||session.id)}</h3><p>${esc(session.workspace_key||'')} · ${esc(session.project_path||'')}</p></div><button class="text-button" data-managed-history-close type="button">Close</button></div><div class="history-grid"><div><h4>Lifecycle</h4>${audit.length?audit.slice(0,30).map(a=>`<div class="history-item"><strong>${esc(a.action)}</strong><small>${esc(ago(a.created_at))} · ${esc(a.actor||'system')}</small></div>`).join(''):'<div class="empty">No lifecycle audit yet.</div>'}</div><div><h4>Transport history</h4>${transports.length?transports.slice(0,30).map(t=>`<div class="history-item"><strong>${esc(t.ingress_provider||t.last_tunnel_id||'direct')}</strong><small>${esc(t.status)} · ${esc(ago(t.last_seen_at))} · ${esc(shortId(t.id,14))}</small></div>`).join(''):'<div class="empty">No transport history yet.</div>'}</div></div>`;
   panel.scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 
@@ -917,7 +1009,7 @@ function renderSessions(data){
   document.getElementById('sessionsPanel').innerHTML=visible.length?visible.map((g,i)=>{
     const logical=logicalById[g.studio_session_id]; const tunnel=tnames[g.last_tunnel_id]||g.last_tunnel_id||'Direct / unattributed';
     const bound=managedById[g.managed_session_id]; const options=managedItems.filter(x=>x.status==='ready').map(x=>`<option value="${esc(x.id)}" ${x.id===g.managed_session_id?'selected':''}>${esc(x.name)} · ${esc(x.workspace_key)}</option>`).join('');
-    const bindControls=g.status==='connected'?`<div class="transport-bind">${badge('healthy')}<select data-gateway-select="${esc(g.id)}"><option value="">Choose project session…</option>${options}</select><button class="button secondary small" data-gateway-attach="${esc(g.id)}">Attach</button>${g.managed_session_id?`<button class="text-button" data-gateway-detach="${esc(g.id)}">Unbind</button>`:''}</div>`:badge(g.status==='stale'?'degraded':g.status);
+    const bindControls=g.status==='connected'?`<div class="transport-bind">${badge('healthy')}<select data-gateway-select="${esc(g.id)}"><option value="">Choose project session…</option>${options}</select><button class="button secondary small" data-gateway-attach="${esc(g.id)}" type="button">Attach</button>${g.managed_session_id?`<button class="text-button" data-gateway-detach="${esc(g.id)}" type="button">Unbind</button>`:''}</div>`:badge(g.status==='stale'?'degraded':g.status);
     return `<div class="data-row"><div class="row-main"><strong>${esc(clientLabel(g,logical,i))}</strong><small>${esc(g.server_id||'MCP')} · last seen ${esc(ago(g.last_seen_at))}</small>${bound?`<span class="project-pin">🔒 ${esc(bound.workspace_key)}</span>`:''}${detailBlock([['gateway session',g.id],['studio session',g.studio_session_id],['managed session',g.managed_session_id||'—'],['generation',g.generation],['reconnects',g.reconnect_count],['attribution',g.attribution_method||'—']])}</div><div class="row-secondary">${esc(tunnel)}<small>${esc(g.ingress_host||'—')}${g.ingress_path?esc(g.ingress_path):''}</small></div>${bindControls}</div>`;
   }).join(''):'<div class="empty">No sessions match this view.</div>';
 }
@@ -937,7 +1029,7 @@ function renderWorkers(data){
 
 function renderTunnels(data){
   const {status}=data; const tmap=status.tunnel_sessions?.by_tunnel||{};
-  document.getElementById('tunnelsPanel').innerHTML=(status.tunnels||[]).length?(status.tunnels||[]).map(t=>{const ts=tmap[t.id]||{counts:{},total:0,reconnects:0};return `<article class="tunnel-card"><div class="tunnel-head"><div><h3>${esc(t.name)}</h3><small>${esc(t.provider)} · ${esc(t.managed?'managed':'external/direct')}</small></div>${badge(t.status||'unknown')}</div><div class="tunnel-metrics"><div><span>CONNECTED</span><strong>${esc(ts.counts?.connected||0)}</strong></div><div><span>SESSIONS</span><strong>${esc(ts.total||0)}</strong></div><div><span>RECONNECTS</span><strong>${esc(ts.reconnects||0)}</strong></div></div><div class="endpoint">${esc(t.endpoint||t.origin||'—')}</div><button class="text-button" data-tunnel-session="${esc(t.id)}">View sessions →</button>${detailBlock([['tunnel id',t.id],['desired state',t.desired_state||'—'],['server id',t.metadata?.server_id||'—']])}</article>`}).join(''):'<div class="empty">No tunnels configured.</div>';
+  document.getElementById('tunnelsPanel').innerHTML=(status.tunnels||[]).length?(status.tunnels||[]).map(t=>{const ts=tmap[t.id]||{counts:{},total:0,reconnects:0};return `<article class="tunnel-card"><div class="tunnel-head"><div><h3>${esc(t.name)}</h3><small>${esc(t.provider)} · ${esc(t.managed?'managed':'external/direct')}</small></div>${badge(t.status||'unknown')}</div><div class="tunnel-metrics"><div><span>CONNECTED</span><strong>${esc(ts.counts?.connected||0)}</strong></div><div><span>SESSIONS</span><strong>${esc(ts.total||0)}</strong></div><div><span>RECONNECTS</span><strong>${esc(ts.reconnects||0)}</strong></div></div><div class="endpoint">${esc(t.endpoint||t.origin||'—')}</div><button class="text-button" data-tunnel-session="${esc(t.id)}" type="button">View sessions →</button>${detailBlock([['tunnel id',t.id],['desired state',t.desired_state||'—'],['server id',t.metadata?.server_id||'—']])}</article>`}).join(''):'<div class="empty">No tunnels configured.</div>';
   const conn=status.connectivity||{}; const counts=conn.summary?.counts||{};
   document.getElementById('connectivityPanel').innerHTML=`<div class="keyline"><span>Status</span>${badge(conn.status||'unknown')}</div><div class="keyline"><span>Healthy tunnels</span><strong>${esc(counts.healthy||0)} / ${esc(conn.summary?.total||0)}</strong></div><div class="keyline"><span>Auto reconnect</span><strong>${status.studio.connectivity_auto_reconnect?'Enabled':'Disabled'}</strong></div><div class="keyline"><span>Public MCP gateway</span><strong>${status.studio.gateway_enabled?'Enabled':'Disabled'}</strong></div><div class="keyline"><span>Last poll</span><small>${esc(when(conn.last_poll_at))}</small></div>${conn.last_error?`<div class="warning">${esc(conn.last_error)}</div>`:''}`;
 }
@@ -984,12 +1076,21 @@ async function load(){
 
 function runtimeDetailMessage(runtime){
   if(!runtime)return 'Runtime information is unavailable.';
+  const auth=runtime.auth_health||{};
+  const limit=runtime.limit_health||{};
   return [
     `Status: ${runtime.status||'unknown'}`,
     `Installed: ${runtime.installed===false?'No':'Yes'}`,
     `Provider: ${runtime.provider||runtime.brand||'—'}`,
     `Model: ${runtime.model||runtime.last_used_model||'—'}`,
     `Version: ${runtime.version||'—'}`,
+    `Authentication: ${authHealthLabel(auth)}`,
+    `Auth source: ${auth.source||'none'}`,
+    `Auth detail: ${auth.detail||'—'}`,
+    `Rate limit: ${limitHealthLabel(limit)}`,
+    `Limit source: ${limit.source||'none'}`,
+    `Limit reset: ${limit.reset_at||'—'}`,
+    `Limit detail: ${limit.detail||'—'}`,
     `Active panes: ${runtime.pane_count||0}`,
     `Binary: ${runtime.binary||'not reported'}`
   ].join('\n');
@@ -1052,7 +1153,8 @@ async function handleSettingsAction(action){
 }
 
 async function showNotifications(){
-  const alerts=latestData?.alertsData?.alerts||[];
+  const alertsData=latestData?.alertsData||await getJson('/api/alerts?status=open&limit=20');
+  const alerts=alertsData?.alerts||[];
   const message=alerts.length
     ? alerts.slice(0,6).map(a=>`• ${String(a.severity||'info').toUpperCase()} · ${a.message||a.kind||'Alert'}`).join('\n')
     : 'No open alerts.';
@@ -1113,7 +1215,24 @@ document.addEventListener('click',e=>uiAction(async()=>{
     if(result.confirmed){await sendJson(`/api/managed/sessions/${encodeURIComponent(stop.dataset.managedStop)}/stop`);await load();}
     return;
   }
-  const attach=e.target.closest('[data-gateway-attach]'); if(attach){const id=attach.dataset.gatewayAttach;const sel=document.querySelector(`[data-gateway-select="${CSS.escape(id)}"]`);if(sel?.value){await sendJson(`/api/gateway/sessions/${encodeURIComponent(id)}/managed/attach`,{managed_session_id:sel.value});await load();}return;}
+  const attach=e.target.closest('[data-gateway-attach]'); if(attach){
+    const id=attach.dataset.gatewayAttach;
+    const sel=document.querySelector(`[data-gateway-select="${CSS.escape(id)}"]`);
+    if(!sel?.value){
+      await openAppDialog({
+        title:'Choose a project session',
+        message:'Select a managed project session before attaching this client transport.',
+        icon:'!',
+        tone:'info',
+        confirmText:'Close',
+        showCancel:false
+      });
+      return;
+    }
+    await sendJson(`/api/gateway/sessions/${encodeURIComponent(id)}/managed/attach`,{managed_session_id:sel.value});
+    await load();
+    return;
+  }
   const detach=e.target.closest('[data-gateway-detach]'); if(detach){await sendJson(`/api/gateway/sessions/${encodeURIComponent(detach.dataset.gatewayDetach)}/managed/detach`);await load();return;}
 }));
 document.getElementById('languageSelect').addEventListener('change',e=>applyLanguage(e.target.value));

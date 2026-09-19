@@ -5,6 +5,9 @@ __pycache__/
 .pytest_cache/
 .venv/
 
+# Node / browser tooling cache
+node_modules/
+
 # Runtime / local state
 data/
 backups/
@@ -19,6 +22,10 @@ config.yaml.*
 .oauth-signing-secret
 .env
 .env.*
+
+# Temporary binary-transfer staging
+static/brand/.*.part*
+static/brand/.*.b64
 
 # OS/editor noise
 .DS_Store

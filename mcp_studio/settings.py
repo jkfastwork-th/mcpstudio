@@ -139,6 +139,10 @@ class StudioConfig:
     computer_vnc_display_base: int = 2
     computer_vnc_password_file: str = "~/.vnc/passwd"
     computer_chrome_binary: str = ""
+    # GPU backend for isolated Chrome: auto prefers host hardware when a
+    # render device is present, hardware forces the native Vulkan adapter,
+    # and swiftshader keeps the software Vulkan fallback.
+    computer_gpu_mode: str = "auto"
     computer_geometry: str = "1440x900"
     computer_adopt_workspace: str | None = None
 
@@ -158,6 +162,10 @@ class StudioConfig:
                 raise ValueError("studio.computer_cdp_port must be between 1024 and 65535")
             if self.computer_auth_token and len(self.computer_auth_token) < 8:
                 raise ValueError("studio.computer_auth_token must be at least 8 characters when set")
+            gpu_mode = str(self.computer_gpu_mode or "auto").strip().lower()
+            if gpu_mode not in {"auto", "hardware", "swiftshader"}:
+                raise ValueError("studio.computer_gpu_mode must be auto, hardware, or swiftshader")
+            self.computer_gpu_mode = gpu_mode
             if self.computer_session_isolation_enabled:
                 if not (1 <= int(self.computer_vnc_display_base) <= 99):
                     raise ValueError("studio.computer_vnc_display_base must be between 1 and 99")
@@ -229,6 +237,10 @@ class StudioConfig:
                 raise ValueError("studio.computer_cdp_port must be between 1024 and 65535")
             if self.computer_auth_token and len(self.computer_auth_token) < 8:
                 raise ValueError("studio.computer_auth_token must be at least 8 characters when set")
+            gpu_mode = str(self.computer_gpu_mode or "auto").strip().lower()
+            if gpu_mode not in {"auto", "hardware", "swiftshader"}:
+                raise ValueError("studio.computer_gpu_mode must be auto, hardware, or swiftshader")
+            self.computer_gpu_mode = gpu_mode
             if self.computer_session_isolation_enabled:
                 if not (1 <= int(self.computer_vnc_display_base) <= 99):
                     raise ValueError("studio.computer_vnc_display_base must be between 1 and 99")
@@ -381,6 +393,10 @@ def load_settings(path: str | Path) -> Settings:
             raise ValueError("studio.computer_cdp_port must be between 1024 and 65535")
         if studio.computer_auth_token and len(studio.computer_auth_token) < 8:
             raise ValueError("studio.computer_auth_token must be at least 8 characters when set")
+        gpu_mode = str(studio.computer_gpu_mode or "auto").strip().lower()
+        if gpu_mode not in {"auto", "hardware", "swiftshader"}:
+            raise ValueError("studio.computer_gpu_mode must be auto, hardware, or swiftshader")
+        studio.computer_gpu_mode = gpu_mode
         if studio.computer_session_isolation_enabled:
             if not (1 <= int(studio.computer_vnc_display_base) <= 99):
                 raise ValueError("studio.computer_vnc_display_base must be between 1 and 99")

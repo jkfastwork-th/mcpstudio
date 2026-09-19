@@ -1,0 +1,23 @@
+{
+  "name": "HIRDA",
+  "short_name": "HIRDA",
+  "description": "Multi-Agent Orchestration",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0C1525",
+  "theme_color": "#3569F4",
+  "icons": [
+    {
+      "src": "/static/brand/hirda-app-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/brand/hirda-mask.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "monochrome"
+    }
+  ]
+}

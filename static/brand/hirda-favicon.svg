@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="HIRDA favicon">
+<rect x="2" y="2" width="60" height="60" rx="14" fill="#0C1525"/>
+<g>
+  <polygon points="32,8 39,22 32,29 25,22" fill="#F4F7FB"/>
+  <polygon points="21,12 27,23 20,26 16,17" fill="#7EA2FF"/>
+  <polygon points="43,12 37,23 44,26 48,17" fill="#3569F4"/>
+  <polygon points="17,26 27,25 31,32 22,39" fill="#3569F4"/>
+  <polygon points="47,26 37,25 33,32 42,39" fill="#665AF7"/>
+  <polygon points="30,31 32,50 22,39" fill="#F4F7FB"/>
+  <polygon points="34,31 32,50 42,39" fill="#7EA2FF"/>
+  <polygon points="23,26 27,27 25,30" fill="#9FEAFF"/>
+  <polygon points="41,26 37,27 39,30" fill="#9FEAFF"/>
+</g>
+</svg>

@@ -294,6 +294,103 @@ async def test_vnc_start_returns_on_listener_readiness_without_waiting_for_launc
     launcher.kill.assert_not_called()
 
 
+def test_gpu_mode_auto_prefers_hardware_when_render_device_exists() -> None:
+    studio = StudioConfig(
+        computer_use_enabled=True,
+        computer_gpu_mode="auto",
+        computer_session_isolation_enabled=True,
+    )
+    mgr = ComputerUseManager(studio, Database(":memory:"))
+
+    with patch.object(mgr, "_host_gpu_available", return_value=True):
+        assert mgr._resolved_gpu_mode() == "hardware"
+        args = mgr._chrome_gpu_args()
+
+    assert "--enable-unsafe-webgpu" in args
+    assert "--ozone-platform=wayland" in args
+    assert not any(arg.startswith("--enable-features=Vulkan") for arg in args)
+    assert "--use-angle=vulkan" not in args
+    assert "--disable-vulkan-surface" not in args
+    assert "--use-vulkan=swiftshader" not in args
+    assert "--use-webgpu-adapter=swiftshader" not in args
+
+
+def test_gpu_mode_auto_falls_back_to_swiftshader_without_render_device() -> None:
+    studio = StudioConfig(computer_use_enabled=True, computer_gpu_mode="auto")
+    mgr = ComputerUseManager(studio, Database(":memory:"))
+
+    with patch.object(mgr, "_host_gpu_available", return_value=False):
+        assert mgr._resolved_gpu_mode() == "swiftshader"
+        args = mgr._chrome_gpu_args()
+
+    assert "--use-vulkan=swiftshader" in args
+    assert "--use-webgpu-adapter=swiftshader" in args
+    assert "--enable-unsafe-swiftshader" in args
+
+
+def test_gpu_mode_explicit_hardware_ignores_auto_detection() -> None:
+    studio = StudioConfig(computer_use_enabled=True, computer_gpu_mode="hardware")
+    mgr = ComputerUseManager(studio, Database(":memory:"))
+
+    with patch.object(mgr, "_host_gpu_available", return_value=False):
+        assert mgr._resolved_gpu_mode() == "hardware"
+        assert "--use-vulkan=swiftshader" not in mgr._chrome_gpu_args()
+
+
+def test_hardware_gpu_uses_nested_wayland_when_weston_is_available() -> None:
+    studio = StudioConfig(
+        computer_use_enabled=True,
+        computer_gpu_mode="hardware",
+        computer_session_isolation_enabled=True,
+    )
+    mgr = ComputerUseManager(studio, Database(":memory:"))
+
+    with patch.object(mgr, "_weston_binary", return_value="/usr/bin/weston"):
+        assert mgr._nested_wayland_enabled() is True
+        assert mgr._gpu_presentation_mode() == "nested-wayland"
+
+
+def test_hardware_gpu_reports_x11_when_weston_is_missing() -> None:
+    studio = StudioConfig(
+        computer_use_enabled=True,
+        computer_gpu_mode="hardware",
+        computer_session_isolation_enabled=True,
+    )
+    mgr = ComputerUseManager(studio, Database(":memory:"))
+
+    with patch.object(mgr, "_weston_binary", return_value=None):
+        assert mgr._nested_wayland_enabled() is False
+        assert mgr._gpu_presentation_mode() == "x11"
+
+
+@pytest.mark.asyncio
+async def test_isolated_runtime_starts_vnc_then_weston_then_chrome() -> None:
+    studio = StudioConfig(computer_use_enabled=True, computer_session_isolation_enabled=True)
+    mgr = ComputerUseManager(studio, Database(":memory:"))
+    order: list[str] = []
+
+    async def mark_vnc(runtime) -> None:
+        order.append("vnc")
+
+    async def mark_weston(runtime) -> None:
+        order.append("weston")
+
+    async def mark_chrome(runtime) -> None:
+        order.append("chrome")
+
+    with (
+        patch.object(mgr, "_start_vnc", new=AsyncMock(side_effect=mark_vnc)),
+        patch.object(mgr, "_start_weston", new=AsyncMock(side_effect=mark_weston)),
+        patch.object(mgr, "_start_chrome", new=AsyncMock(side_effect=mark_chrome)),
+    ):
+        await mgr._ensure_isolated_runtime(
+            {"id": "ms-test", "workspace_key": "test"},
+            {"display": 9, "vnc_port": 5909, "cdp_port": 9229, "adopted": False},
+        )
+
+    assert order == ["vnc", "weston", "chrome"]
+
+
 # ------------------------------------------------------------------
 # Per-managed-session isolation
 # ------------------------------------------------------------------

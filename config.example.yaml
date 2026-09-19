@@ -55,5 +55,10 @@ studio:
   #computer_vnc_display_base: 2
   #computer_vnc_password_file: ~/.vnc/passwd
   #computer_chrome_binary: ""
+  # computer_gpu_mode: auto | hardware | swiftshader
+  # auto prefers a host render device and falls back to SwiftShader.
+  # In isolated VNC mode, hardware presentation uses nested Weston/Wayland
+  # so Chromium can keep GL compositing while WebGPU uses the host Vulkan GPU.
+  #computer_gpu_mode: auto
   #computer_geometry: 1440x900
   #computer_adopt_workspace: ""

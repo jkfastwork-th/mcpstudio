@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
 import time
@@ -16,6 +18,50 @@ class AgentRuntimeInventory:
         ("claude", "Claude", "Anthropic"),
         ("codex", "Codex", "OpenAI"),
         ("hermes", "Hermes", "Nous / custom"),
+    )
+
+    AUTH_ENV = {
+        "claude": ("ANTHROPIC_API_KEY",),
+        "codex": ("OPENAI_API_KEY",),
+        "hermes": ("NOUS_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"),
+    }
+    AUTH_FILES = {
+        "claude": (".claude/.credentials.json",),
+        "codex": (".codex/auth.json",),
+        "hermes": (),
+    }
+    AUTH_STATUS_KEYS = (
+        "auth_status",
+        "authentication_status",
+        "login_status",
+        "credential_status",
+    )
+    AUTH_BOOL_KEYS = ("authenticated", "is_authenticated", "logged_in")
+    LIMIT_STATUS_KEYS = (
+        "rate_limit_status",
+        "quota_status",
+        "limit_status",
+        "rate_limit_state",
+        "quota_state",
+    )
+    LIMIT_REMAINING_KEYS = (
+        "rate_limit_remaining",
+        "quota_remaining",
+        "remaining_quota",
+        "remaining_requests",
+    )
+    LIMIT_RESET_KEYS = (
+        "rate_limit_reset_at",
+        "quota_reset_at",
+        "reset_at",
+        "rate_limit_reset",
+    )
+    ERROR_KEYS = (
+        "last_error",
+        "error",
+        "error_message",
+        "status_message",
+        "message",
     )
 
     def __init__(self, herdr: Any, ttl_seconds: float = 30.0):
@@ -41,20 +87,31 @@ class AgentRuntimeInventory:
         return None
 
     @staticmethod
-    def _version(binary: str | None) -> str | None:
+    def _run_probe(binary: str | None, args: list[str], timeout: float = 4.0) -> dict[str, Any] | None:
         if not binary:
             return None
         try:
             proc = subprocess.run(
-                [binary, "--version"],
+                [binary, *args],
                 capture_output=True,
                 text=True,
-                timeout=2.0,
+                timeout=timeout,
                 check=False,
             )
         except Exception:
             return None
-        text = (proc.stdout or proc.stderr or "").strip().splitlines()
+        return {
+            "returncode": int(proc.returncode),
+            "stdout": (proc.stdout or "").strip()[:8000],
+            "stderr": (proc.stderr or "").strip()[:8000],
+        }
+
+    @classmethod
+    def _version(cls, binary: str | None) -> str | None:
+        probe = cls._run_probe(binary, ["--version"], timeout=2.0)
+        if not probe:
+            return None
+        text = (probe["stdout"] or probe["stderr"]).strip().splitlines()
         return text[0][:240] if text else None
 
     @staticmethod
@@ -125,6 +182,345 @@ class AgentRuntimeInventory:
             return "ready"
         return "available"
 
+
+    @classmethod
+    def _pane_bool(cls, panes: list[dict[str, Any]], *keys: str) -> bool | None:
+        for pane in panes:
+            for key in keys:
+                if key not in pane:
+                    continue
+                value = pane.get(key)
+                if isinstance(value, bool):
+                    return value
+                text = str(value or "").strip().lower()
+                if text in {"1", "true", "yes", "authenticated", "logged_in"}:
+                    return True
+                if text in {"0", "false", "no", "unauthenticated", "logged_out"}:
+                    return False
+        return None
+
+    @classmethod
+    def _pane_error_text(cls, panes: list[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        for pane in panes:
+            for key in cls.ERROR_KEYS:
+                value = pane.get(key)
+                if value not in (None, ""):
+                    parts.append(str(value))
+        return " | ".join(parts).lower()
+
+    @classmethod
+    def _credential_marker(cls, key: str) -> dict[str, Any] | None:
+        for env_name in cls.AUTH_ENV.get(key, ()):
+            if os.environ.get(env_name):
+                return {
+                    "source": "environment",
+                    "detail": "Credential environment is configured.",
+                }
+        home = Path.home()
+        for relative in cls.AUTH_FILES.get(key, ()):
+            if (home / relative).is_file():
+                return {
+                    "source": "credential_file",
+                    "detail": "Credential file is present.",
+                }
+        return None
+
+    @classmethod
+    def _cli_auth_health(
+        cls,
+        key: str,
+        *,
+        binary: str | None,
+        provider: str | None,
+    ) -> dict[str, Any] | None:
+        if not binary:
+            return None
+
+        if key == "claude":
+            probe = cls._run_probe(binary, ["auth", "status", "--json"])
+            if not probe:
+                return None
+            raw = probe["stdout"] or probe["stderr"]
+            try:
+                payload = json.loads(raw) if raw else {}
+            except Exception:
+                payload = {}
+            logged_in = payload.get("loggedIn") if isinstance(payload, dict) else None
+            if logged_in is True:
+                method = str(payload.get("authMethod") or "").strip()
+                subscription = str(payload.get("subscriptionType") or "").strip()
+                suffix = " · ".join(x for x in (method, subscription) if x)
+                return {
+                    "status": "logged_in",
+                    "authenticated": True,
+                    "source": "claude_auth_status",
+                    "detail": "Claude Code reports logged in." + (f" {suffix}" if suffix else ""),
+                }
+            if logged_in is False:
+                return {
+                    "status": "error",
+                    "authenticated": False,
+                    "source": "claude_auth_status",
+                    "detail": "Claude Code reports not logged in.",
+                }
+            lower = raw.lower()
+            if "logged in" in lower and "not logged in" not in lower:
+                return {
+                    "status": "logged_in",
+                    "authenticated": True,
+                    "source": "claude_auth_status",
+                    "detail": "Claude Code reports logged in.",
+                }
+            if "not logged in" in lower or probe["returncode"] != 0:
+                return {
+                    "status": "error",
+                    "authenticated": False,
+                    "source": "claude_auth_status",
+                    "detail": "Claude Code authentication check failed.",
+                }
+            return None
+
+        if key == "codex":
+            probe = cls._run_probe(binary, ["login", "status"])
+            if not probe:
+                return None
+            raw = f'{probe["stdout"]}\n{probe["stderr"]}'.strip()
+            lower = raw.lower()
+            if "logged in using" in lower:
+                mode = raw.split("Logged in using", 1)[-1].strip().splitlines()[0][:120]
+                return {
+                    "status": "logged_in",
+                    "authenticated": True,
+                    "source": "codex_login_status",
+                    "detail": f"Codex reports logged in using {mode}.",
+                }
+            if "not logged in" in lower or probe["returncode"] != 0:
+                return {
+                    "status": "error",
+                    "authenticated": False,
+                    "source": "codex_login_status",
+                    "detail": "Codex reports not logged in.",
+                }
+            return None
+
+        if key == "hermes" and provider:
+            probe = cls._run_probe(binary, ["auth", "status", str(provider)])
+            if not probe:
+                return None
+            raw = f'{probe["stdout"]}\n{probe["stderr"]}'.strip()
+            lower = raw.lower()
+            if "logged in" in lower and "logged out" not in lower:
+                return {
+                    "status": "logged_in",
+                    "authenticated": True,
+                    "source": "hermes_auth_status",
+                    "detail": f"Hermes reports {provider} logged in.",
+                }
+            if "logged out" in lower:
+                return {
+                    "status": "error",
+                    "authenticated": False,
+                    "source": "hermes_auth_status",
+                    "detail": f"Hermes reports {provider} logged out.",
+                }
+            return None
+
+        return None
+
+    @classmethod
+    def _auth_health(
+        cls,
+        key: str,
+        *,
+        binary: str | None,
+        provider: str | None,
+        installed: bool,
+        runtime_status: str,
+        panes: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        cli_health = cls._cli_auth_health(key, binary=binary, provider=provider)
+        if cli_health is not None:
+            return cli_health
+
+        explicit = cls._pane_value(panes, *cls.AUTH_STATUS_KEYS)
+        authenticated = cls._pane_bool(panes, *cls.AUTH_BOOL_KEYS)
+        error_text = cls._pane_error_text(panes)
+
+        if explicit:
+            normalized = explicit.strip().lower()
+            if normalized in {"ok", "healthy", "authenticated", "logged_in", "ready", "valid"}:
+                return {
+                    "status": "logged_in",
+                    "authenticated": True,
+                    "source": "pane_metadata",
+                    "detail": "Runtime metadata reports authenticated.",
+                }
+            if normalized in {
+                "error", "failed", "invalid", "unauthenticated", "logged_out",
+                "expired", "missing", "login_required",
+            }:
+                return {
+                    "status": "error",
+                    "authenticated": False,
+                    "source": "pane_metadata",
+                    "detail": f"Runtime reports authentication state: {explicit}.",
+                }
+
+        if authenticated is True:
+            return {
+                "status": "healthy",
+                "authenticated": True,
+                "source": "pane_metadata",
+                "detail": "Runtime reports authenticated.",
+            }
+        if authenticated is False:
+            return {
+                "status": "error",
+                "authenticated": False,
+                "source": "pane_metadata",
+                "detail": "Runtime reports unauthenticated.",
+            }
+
+        auth_error_signals = (
+            "401",
+            "authentication failed",
+            "authentication error",
+            "unauthorized",
+            "invalid api key",
+            "invalid_api_key",
+            "login required",
+            "not logged in",
+            "credential expired",
+            "token expired",
+        )
+        if any(signal in error_text for signal in auth_error_signals):
+            return {
+                "status": "error",
+                "authenticated": False,
+                "source": "runtime_error",
+                "detail": "Authentication failure observed in runtime status.",
+            }
+
+        marker = cls._credential_marker(key)
+        if marker:
+            return {
+                "status": "configured",
+                "authenticated": None,
+                **marker,
+            }
+
+        if not installed:
+            return {
+                "status": "unavailable",
+                "authenticated": None,
+                "source": "runtime",
+                "detail": "Runtime is not installed or observed.",
+            }
+
+        return {
+            "status": "unknown",
+            "authenticated": None,
+            "source": "none",
+            "detail": "No authentication health signal is available.",
+        }
+
+    @classmethod
+    def _limit_health(
+        cls,
+        key: str,
+        *,
+        installed: bool,
+        runtime_status: str,
+        panes: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        explicit = cls._pane_value(panes, *cls.LIMIT_STATUS_KEYS)
+        remaining = cls._pane_value(panes, *cls.LIMIT_REMAINING_KEYS)
+        reset_at = cls._pane_value(panes, *cls.LIMIT_RESET_KEYS)
+        rate_limited = cls._pane_bool(panes, "rate_limited")
+        quota_exhausted = cls._pane_bool(panes, "quota_exhausted")
+        error_text = cls._pane_error_text(panes)
+
+        status = None
+        detail = None
+        source = "none"
+
+        if explicit:
+            normalized = explicit.strip().lower()
+            source = "pane_metadata"
+            if normalized in {"ok", "healthy", "normal", "available", "clear"}:
+                status = "healthy"
+                detail = "Runtime reports no active quota or rate-limit issue."
+            elif normalized in {"exhausted", "quota_exhausted", "insufficient_quota"}:
+                status = "exhausted"
+                detail = f"Runtime reports limit state: {explicit}."
+            elif normalized in {"limited", "rate_limited", "throttled", "blocked", "429"}:
+                status = "limited"
+                detail = f"Runtime reports limit state: {explicit}."
+            else:
+                status = "reported"
+                detail = f"Runtime reports limit state: {explicit}."
+
+        if quota_exhausted is True:
+            status = "exhausted"
+            source = "pane_metadata"
+            detail = "Runtime reports exhausted quota."
+        elif rate_limited is True:
+            status = "limited"
+            source = "pane_metadata"
+            detail = "Runtime reports an active rate limit."
+
+        exhausted_signals = (
+            "insufficient_quota",
+            "quota exceeded",
+            "quota exhausted",
+            "usage limit reached",
+            "credit balance",
+        )
+        limited_signals = (
+            "rate limit",
+            "rate_limit",
+            "too many requests",
+            "429",
+            "throttl",
+        )
+        if any(signal in error_text for signal in exhausted_signals):
+            status = "exhausted"
+            source = "runtime_error"
+            detail = "Quota exhaustion signal observed in runtime status."
+        elif any(signal in error_text for signal in limited_signals):
+            status = "limited"
+            source = "runtime_error"
+            detail = "Rate-limit signal observed in runtime status."
+
+        if status is None and remaining is not None:
+            status = "reported"
+            source = "pane_metadata"
+            detail = "Runtime reports remaining quota or request capacity."
+
+        if status is None and not installed:
+            status = "unavailable"
+            source = "runtime"
+            detail = "Runtime is not installed or observed."
+
+        if status is None:
+            status = "interactive_only"
+            source = "cli_capability"
+            if key == "claude":
+                detail = "Claude Code exposes plan usage interactively; no stable headless quota probe is available."
+            elif key == "codex":
+                detail = "Codex login status does not expose quota; limits are available in the interactive client."
+            else:
+                detail = "No stable headless quota probe is available for the active Hermes provider."
+
+        return {
+            "status": status,
+            "remaining": remaining,
+            "reset_at": reset_at,
+            "source": source,
+            "detail": detail,
+        }
+
     def _build(self) -> dict[str, Any]:
         snapshot = self.herdr.snapshot if isinstance(self.herdr.snapshot, dict) else {}
         pane_list = self.herdr.pane_list(snapshot)
@@ -146,8 +542,24 @@ class AgentRuntimeInventory:
             last_used_model = self._hermes_last_used_model() if key == "hermes" else None
             observed = bool(panes)
             installed = bool(binary or observed)
+            runtime_status = self._status(installed, panes)
             effective_model = model or last_used_model
             free = bool(effective_model and ":free" in effective_model.lower())
+            auth_health = self._auth_health(
+                key,
+                binary=binary,
+                provider=provider or default_provider,
+                installed=installed,
+                runtime_status=runtime_status,
+                panes=panes,
+            )
+            limit_health = self._limit_health(
+                key,
+                installed=installed,
+                runtime_status=runtime_status,
+                panes=panes,
+            )
+            last_error = self._pane_value(panes, *self.ERROR_KEYS)
             item: dict[str, Any] = {
                 "id": key,
                 "name": label,
@@ -157,7 +569,10 @@ class AgentRuntimeInventory:
                 "observed": observed,
                 "binary": binary,
                 "version": self._version(binary),
-                "status": self._status(installed, panes),
+                "status": runtime_status,
+                "auth_health": auth_health,
+                "limit_health": limit_health,
+                "last_error": last_error,
                 "pane_count": len(panes),
                 "active_panes": [
                     {
@@ -196,6 +611,22 @@ class AgentRuntimeInventory:
                 "running": sum(1 for r in runtimes if r["status"] == "running"),
                 "ready": sum(1 for r in runtimes if r["status"] in {"ready", "available", "running"}),
                 "free_active": sum(1 for r in runtimes if r.get("free")),
+                "auth_healthy": sum(
+                    1 for r in runtimes
+                    if (r.get("auth_health") or {}).get("status") in {"logged_in", "healthy"}
+                ),
+                "auth_verified": sum(
+                    1 for r in runtimes
+                    if (r.get("auth_health") or {}).get("status") == "logged_in"
+                ),
+                "auth_configured": sum(
+                    1 for r in runtimes
+                    if (r.get("auth_health") or {}).get("status") in {"logged_in", "healthy", "configured"}
+                ),
+                "limit_constrained": sum(
+                    1 for r in runtimes
+                    if (r.get("limit_health") or {}).get("status") in {"limited", "exhausted"}
+                ),
             },
             "herdr_status": snapshot.get("status"),
             "refreshed_at_monotonic": time.monotonic(),

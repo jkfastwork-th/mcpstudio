@@ -805,7 +805,7 @@ html,body{max-width:100%;overflow-x:hidden}
 .agent-runtime-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.agent-runtime-card{background:#fff;border:1px solid var(--capsule-line);border-radius:16px;padding:18px;box-shadow:0 8px 26px rgba(16,24,40,.05)}.agent-runtime-card.claude{border-top:3px solid var(--capsule-claude)}.agent-runtime-card.codex{border-top:3px solid var(--capsule-codex)}.agent-runtime-card.hermes{border-top:3px solid var(--capsule-hermes)}
 .agent-runtime-top{display:grid;grid-template-columns:44px 1fr auto;gap:10px;align-items:center}.agent-runtime-top h3{margin:0}.agent-runtime-top small{color:#667085}.runtime-pill{font-size:10px;color:#667085;background:#f5f6f8;border-radius:999px;padding:4px 7px}.agent-runtime-health{display:flex;justify-content:space-between;margin-top:22px;font-size:12px}.agent-runtime-health span{color:#667085}
 .runtime-meter{height:7px;background:#eef1f5;border-radius:999px;margin:8px 0 16px;overflow:hidden}.runtime-meter i{display:block;height:100%;border-radius:999px}.claude .runtime-meter i{background:var(--capsule-claude)}.codex .runtime-meter i{background:var(--capsule-codex)}.hermes .runtime-meter i{background:var(--capsule-hermes)}
-.agent-runtime-card p{color:#667085;min-height:42px}.runtime-tags{display:flex;gap:6px;flex-wrap:wrap;margin:14px 0}.runtime-tags span{font-size:10px;padding:4px 7px;border:1px solid #e5e7eb;border-radius:999px;color:#667085}.agent-runtime-footnote{margin-top:14px;display:flex;gap:10px;align-items:center}.agent-runtime-footnote span{color:#667085}
+.agent-runtime-card p{color:#667085;min-height:42px}.runtime-tags{display:flex;gap:6px;flex-wrap:wrap;margin:14px 0}.runtime-tags span{font-size:10px;padding:4px 7px;border:1px solid #e5e7eb;border-radius:999px;color:#667085}
 [data-theme="dark"] .capsule-pipeline-card,[data-theme="dark"] .capsule-state-card,[data-theme="dark"] .capsule-events-card,[data-theme="dark"] .capsule-legend-card,[data-theme="dark"] .agent-runtime-card{background:#162238;border-color:#2a3954}
 [data-theme="dark"] .capsule-lane.claude{background:linear-gradient(90deg,#38251f,#231f24)}[data-theme="dark"] .capsule-lane.codex{background:linear-gradient(90deg,#17342d,#182827)}[data-theme="dark"] .capsule-lane.hermes{background:linear-gradient(90deg,#2d2145,#211f31)}
 [data-theme="dark"] .capsule-stage small,[data-theme="dark"] .lane-agent small,[data-theme="dark"] .capsule-state-list span,[data-theme="dark"] .capsule-event-row,[data-theme="dark"] .capsule-legend-list small{color:#aab6cb}
@@ -1108,13 +1108,24 @@ body{background:var(--ref-page)}
 .runtime-pill{display:inline-flex;align-items:center;gap:4px;padding:3px 5px;border-radius:5px;font-size:6.5px;font-weight:550}
 .runtime-pill i{width:5px;height:5px;border-radius:50%;background:currentColor}
 .runtime-pill.runtime-online{background:#eaf9f0;color:#11945a}
+.runtime-pill.runtime-available{background:#eef4ff;color:#3569f4}
+.runtime-pill.runtime-attention{background:#fff4ed;color:#c2410c}
 .runtime-pill.runtime-offline{background:#f3f5f8;color:#8491a4}
+html[data-theme="dark"] .runtime-pill.runtime-online{background:#15382b;color:#6fe0aa}
+html[data-theme="dark"] .runtime-pill.runtime-available{background:#182a49;color:#9db9ff}
+html[data-theme="dark"] .runtime-pill.runtime-attention{background:#3a261c;color:#ffae7a}
+html[data-theme="dark"] .runtime-pill.runtime-offline{background:#202b3d;color:#9aa9bd}
 .agent-reference-facts{display:grid;margin-top:7px}
 .agent-reference-facts>div{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;min-height:26px;border-bottom:1px solid #edf1f6}
 .agent-reference-facts>div:last-child{border-bottom:0}
 .agent-reference-facts span{color:#718199;font-size:7px}
 .agent-reference-facts strong{color:#19263d;font-size:7.2px;font-weight:550;text-align:right;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .agent-reference-facts .fact-ready{color:#0b9d59}.agent-reference-facts .fact-muted{color:#8996a9}
+.agent-reference-facts .fact-info{color:#2563eb}.agent-reference-facts .fact-warning{color:#d97706}.agent-reference-facts .fact-danger{color:#dc2626}
+html[data-theme="dark"] .agent-reference-facts .fact-ready{color:#5fd39a}
+html[data-theme="dark"] .agent-reference-facts .fact-info{color:#8fb3ff}
+html[data-theme="dark"] .agent-reference-facts .fact-warning{color:#f6b94f}
+html[data-theme="dark"] .agent-reference-facts .fact-danger{color:#ff7b7b}
 .agent-reference-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding-top:9px;margin-top:3px;border-top:1px solid #edf1f6}
 .agent-reference-actions .button{width:100%;font-size:7px}
 .agent-log-button{color:#4a5870!important}
@@ -2852,4 +2863,220 @@ html[data-theme] .reference-theme-toggle button.active{
   color:var(--hirda-accent-text);
   border-color:var(--hirda-accent);
   background:var(--hirda-accent-soft);
+}
+
+/* ==========================================================================
+   HIRDA Brand/IP v1 · three-headed origami dragon
+   ========================================================================== */
+:root{
+  --hirda-brand-primary:#3569F4;
+  --hirda-brand-secondary:#665AF7;
+  --hirda-brand-accent:#7EA2FF;
+  --hirda-brand-dark:#0C1525;
+  --hirda-brand-light:#F4F7FB;
+}
+
+/* Sidebar brand container */
+.focus-sidebar .brand{
+  align-items:center;
+  gap:10px;
+}
+
+/* The mobile shell has no sidebar, so retain the product identity in the fixed header. */
+.topbar-title-group{
+  display:flex;
+  align-items:flex-start;
+  min-width:0;
+}
+.mobile-brand-mark{
+  display:none;
+  width:31px;
+  height:31px;
+  flex:0 0 auto;
+  margin-right:9px;
+  border-radius:8px;
+  box-shadow:0 3px 10px rgba(22,42,78,.15);
+}
+
+/* Technical values use the HIRDA secondary typeface. */
+code,
+.endpoint,
+.workspace-reference-row code,
+.server-card code,
+.agent-reference-facts strong,
+.tunnel-metrics strong,
+#sloPanel .metrics strong{
+  font-family:"JetBrains Mono","SFMono-Regular",Consolas,monospace;
+  font-variant-numeric:tabular-nums;
+}
+
+/* Keep the approved HIRDA core palette as the default product theme. */
+html[data-theme="light"][data-color-scheme="default"],
+html[data-theme="light"]:not([data-color-scheme]){
+  --hirda-accent:var(--hirda-brand-primary);
+  --hirda-accent-2:var(--hirda-brand-secondary);
+  --hirda-accent-soft:#EAF1FF;
+  --hirda-accent-text:#2458DB;
+}
+html[data-theme="dark"][data-color-scheme="default"],
+html[data-theme="dark"]:not([data-color-scheme]){
+  --hirda-accent:var(--hirda-brand-primary);
+  --hirda-accent-2:var(--hirda-brand-secondary);
+  --hirda-accent-soft:#1A2B4B;
+  --hirda-accent-text:#9DB9FF;
+}
+
+/* A subtle three-lane brand cue on the active navigation item. */
+.capsule-primary-nav a.active{
+  position:relative;
+  overflow:hidden;
+}
+.capsule-primary-nav a.active:after{
+  content:"";
+  position:absolute;
+  right:8px;
+  top:50%;
+  width:14px;
+  height:10px;
+  transform:translateY(-50%);
+  opacity:.42;
+  background:
+    linear-gradient(135deg,transparent 42%,var(--hirda-brand-accent) 43% 53%,transparent 54%) 0 0/6px 10px no-repeat,
+    linear-gradient(135deg,transparent 42%,var(--hirda-brand-primary) 43% 53%,transparent 54%) 5px 0/6px 10px no-repeat,
+    linear-gradient(135deg,transparent 42%,var(--hirda-brand-secondary) 43% 53%,transparent 54%) 10px 0/6px 10px no-repeat;
+}
+
+@media(max-width:760px){
+  .mobile-brand-mark{display:block}
+  .topbar-title-group{align-items:center}
+}
+
+/* Sidebar approved full lockup: artwork already contains mark, HIRDA name and tagline. */
+.focus-sidebar .brand-lockup{
+  justify-content:center;
+  padding:clamp(6px,1.2dvh,10px) 0 clamp(12px,2.2dvh,18px);
+}
+.focus-sidebar .brand-lockup-image{
+  width:clamp(156px,18dvh,188px);
+  margin:0 auto;
+  background:transparent;
+  border:0;
+  box-shadow:none;
+}
+.focus-sidebar .brand-lockup-image img{
+  width:100%;
+  height:auto;
+  object-fit:contain;
+  border:0;
+  border-radius:0;
+  box-shadow:none;
+  filter:none;
+}
+
+/* One lockup only: display:none removes the inactive image from layout entirely. */
+.focus-sidebar .brand-lockup-image .brand-lockup-light{display:block}
+.focus-sidebar .brand-lockup-image .brand-lockup-dark{display:none}
+
+html[data-theme="light"] .focus-sidebar .brand-lockup-image .brand-lockup-light{display:block}
+html[data-theme="light"] .focus-sidebar .brand-lockup-image .brand-lockup-dark{display:none}
+
+html[data-theme="dark"] .focus-sidebar .brand-lockup-image .brand-lockup-light{display:none}
+html[data-theme="dark"] .focus-sidebar .brand-lockup-image .brand-lockup-dark{display:block}
+
+@media(max-height:650px) and (min-width:761px){
+  .focus-sidebar .brand-lockup-image{width:136px}
+}
+@media(min-height:950px) and (min-width:761px){
+  .focus-sidebar .brand-lockup-image{width:192px}
+}
+
+/* ==========================================================================
+   HIRDA Brand Reference Lock · approved board conformance
+   Source: docs/brand/HIRDA_BRAND_REFERENCE_LOCK.json
+   ========================================================================== */
+html[data-theme="light"] .app-shell{
+  background:
+    linear-gradient(
+      90deg,
+      var(--hirda-brand-light) 0,
+      var(--hirda-brand-light) var(--hirda-sidebar-width),
+      var(--ref-page) var(--hirda-sidebar-width),
+      var(--ref-page) 100%
+    );
+}
+html[data-theme="dark"] .app-shell{
+  background:
+    linear-gradient(
+      90deg,
+      var(--hirda-brand-dark) 0,
+      var(--hirda-brand-dark) var(--hirda-sidebar-width),
+      var(--ref-page) var(--hirda-sidebar-width),
+      var(--ref-page) 100%
+    );
+}
+
+html[data-theme="light"] .focus-sidebar{
+  background:var(--hirda-brand-light);
+  border-right:1px solid var(--ref-border);
+  color:var(--ref-text);
+}
+html[data-theme="dark"] .focus-sidebar{
+  background:var(--hirda-brand-dark);
+  border-right:1px solid #1d2b40;
+  color:#e8eef8;
+}
+
+html[data-theme="light"] .capsule-primary-nav a{
+  color:#53637d;
+}
+html[data-theme="light"] .capsule-primary-nav a:hover{
+  color:#2458db;
+  background:#eaf1ff;
+}
+html[data-theme="light"] .capsule-primary-nav a.active{
+  color:#2458db;
+  background:#dfe9ff;
+  box-shadow:inset 3px 0 0 var(--hirda-brand-primary);
+}
+html[data-theme="dark"] .capsule-primary-nav a{
+  color:#aebbd0;
+}
+html[data-theme="dark"] .capsule-primary-nav a:hover{
+  color:#f4f7fb;
+  background:#172943;
+}
+html[data-theme="dark"] .capsule-primary-nav a.active{
+  color:#fff;
+  background:linear-gradient(90deg,var(--hirda-brand-primary),var(--hirda-brand-secondary));
+  box-shadow:none;
+}
+
+html[data-theme="light"] .compact-env{
+  background:#fff;
+  border-color:#dfe6f1;
+  box-shadow:none;
+  color:#14213a;
+}
+html[data-theme="light"] .compact-env small{
+  color:#6f7f98;
+}
+html[data-theme="dark"] .compact-env{
+  background:#152239;
+  border-color:#2b3a53;
+  box-shadow:none;
+  color:#e8eef8;
+}
+html[data-theme="dark"] .compact-env small{
+  color:#9aabc1;
+}
+
+/* Approved sidebar lockups: use image assets as-is, never redraw them in CSS. */
+.focus-sidebar .brand-lockup-image{
+  background:transparent!important;
+  border:0!important;
+  box-shadow:none!important;
+}
+.focus-sidebar .brand-lockup-image img{
+  object-fit:contain;
+  filter:none!important;
 }

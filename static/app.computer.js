@@ -67,7 +67,7 @@ async function loadComputerData(){
       sessions.map(session => {
         const name = session.name || session.workspace_key || 'session';
         const status = session.status || 'unknown';
-        return `<option value="${esc(session.id)}">${esc(name)} — ${esc(status)}</option>`;
+        return `<option value="${esc(session.id)}">${esc(name)} \u2014 ${esc(status)}</option>`;
       }).join('');
     if(sessions.some(s=>s.id===selectedId)) sessionSelect.value = selectedId;
 

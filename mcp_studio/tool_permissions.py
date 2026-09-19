@@ -16,7 +16,7 @@ _READ_TOOLS = {
     "find_declaration", "read_file", "list_memories", "read_memory",
     "think_about_task_adherence", "think_about_collected_information",
     "think_about_whether_you_are_done", "herdr_list_panes", "herdr_get_agent",
-    "herdr_read_agent", "family_context_read",
+    "herdr_read_agent", "herdr_wait_agent", "family_context_read",
 }
 _WRITE_TOOLS = {
     "replace_content", "replace_symbol_body", "insert_after_symbol",
@@ -24,7 +24,7 @@ _WRITE_TOOLS = {
     "rename_memory", "create_text_file", "onboarding",
 }
 _DESTRUCTIVE_TOOLS = {"safe_delete_symbol", "delete_memory"}
-_EXECUTE_TOOLS = {"activate_project"}
+_EXECUTE_TOOLS = {"activate_project", "herdr_prompt_agent"}
 _SHELL_TOOLS = {"execute_shell_command", "shell", "run_command"}
 
 _DESTRUCTIVE_SHELL = re.compile(
@@ -46,10 +46,11 @@ _WRITE_SHELL = re.compile(
 _READ_COMMANDS = {
     "pwd", "ls", "cat", "grep", "rg", "find", "head", "tail", "wc", "stat",
     "printf", "echo", "which", "type", "realpath", "readlink", "env", "printenv",
+    "sort", "sed",
 }
 _EXECUTE_COMMANDS = {
     "pytest", "make", "cmake", "ctest", "ninja", "node", "npm", "pnpm", "yarn",
-    "cargo", "go", "ruff", "mypy", "eslint", "tsc",
+    "cargo", "go", "ruff", "mypy", "eslint", "tsc", "mcporter",
 }
 _PATH_ARGUMENT_KEYS = {
     "relative_path", "path", "file_path", "directory", "cwd", "workdir",

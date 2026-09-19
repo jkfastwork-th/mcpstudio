@@ -27,6 +27,8 @@ def test_classifies_serena_read_write_and_destructive_tools():
     assert classify_tool("replace_in_files", {"dry_run": False}) == "write"
     assert classify_tool("safe_delete_symbol", {}) == "destructive"
     assert classify_tool("activate_project", {"project": "alpha"}) == "execute"
+    assert classify_tool("herdr_prompt_agent", {"agent_id": "w1:pA"}) == "execute"
+    assert classify_tool("herdr_wait_agent", {"agent_id": "w1:pA"}) == "read"
 
 
 def test_shell_classifier_keeps_read_write_execute_separate():
@@ -36,6 +38,8 @@ def test_shell_classifier_keeps_read_write_execute_separate():
     assert classify_shell_command("git reset --hard HEAD") == "destructive"
     assert classify_shell_command("python -c 'open(\"x\",\"w\").write(\"x\")'") == "unknown"
     assert classify_shell_command("grep -E 'foo|bar' README.md") == "read"
+    assert classify_shell_command("find . -type f | sort | sed -n '1,20p'") == "read"
+    assert classify_shell_command("mcporter list") == "execute"
 
 
 def test_default_policy_blocks_destructive(tmp_path):

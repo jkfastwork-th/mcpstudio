@@ -482,6 +482,8 @@ async def capsule_complete(capsule_id: str, body: CapsuleComplete):
 
 @app.get("/api/agents/runtimes")
 async def agent_runtime_list(refresh: bool = False):
+    if refresh:
+        await herdr.refresh()
     return agent_runtimes.snapshot(force=refresh)
 
 

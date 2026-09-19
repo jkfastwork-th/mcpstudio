@@ -213,6 +213,11 @@ def test_runtime_inventory_detects_three_lanes_and_nous_free(monkeypatch):
         "_hermes_config",
         staticmethod(lambda: {}),
     )
+    monkeypatch.setattr(
+        AgentRuntimeInventory,
+        "_credential_marker",
+        classmethod(lambda cls, key: None),
+    )
 
     data = AgentRuntimeInventory(FakeHerdr(), ttl_seconds=60).snapshot(force=True)
     by_id = {item["id"]: item for item in data["runtimes"]}
@@ -224,5 +229,168 @@ def test_runtime_inventory_detects_three_lanes_and_nous_free(monkeypatch):
     assert by_id["hermes"]["model"] == "upstage/solar-pro4:free"
     assert by_id["hermes"]["free"] is True
     assert by_id["hermes"]["nous_free"]["active"] is True
+    assert by_id["hermes"]["auth_health"]["status"] == "unknown"
+    assert by_id["hermes"]["limit_health"]["status"] == "interactive_only"
+    assert by_id["codex"]["auth_health"]["status"] == "unknown"
+    assert by_id["codex"]["limit_health"]["status"] == "interactive_only"
     assert data["summary"]["installed"] == 3
     assert data["summary"]["free_active"] == 1
+    assert data["summary"]["auth_healthy"] == 0
+    assert data["summary"]["auth_verified"] == 0
+    assert data["summary"]["limit_constrained"] == 0
+
+
+class FakeHerdrHealth:
+    snapshot = {
+        "status": "healthy",
+        "panes": {
+            "panes": [
+                {
+                    "pane_id": "w1:claude",
+                    "workspace_id": "w1",
+                    "agent": "claude",
+                    "agent_status": "blocked",
+                    "auth_status": "unauthenticated",
+                    "last_error": "401 authentication failed",
+                },
+                {
+                    "pane_id": "w1:codex",
+                    "workspace_id": "w1",
+                    "agent": "codex",
+                    "agent_status": "idle",
+                    "auth_status": "authenticated",
+                    "rate_limit_status": "healthy",
+                    "rate_limit_remaining": "87%",
+                    "rate_limit_reset_at": "2026-09-19T13:00:00Z",
+                },
+                {
+                    "pane_id": "w1:hermes",
+                    "workspace_id": "w1",
+                    "agent": "hermes",
+                    "agent_status": "blocked",
+                    "last_error": "429 rate limit exceeded",
+                },
+            ]
+        },
+    }
+
+    @staticmethod
+    def pane_list(snapshot):
+        return snapshot["panes"]["panes"]
+
+
+def test_runtime_inventory_exposes_auth_and_limit_health(monkeypatch):
+    monkeypatch.setattr(
+        "mcp_studio.agent_runtimes.shutil.which",
+        lambda name: f"/usr/local/bin/{name}",
+    )
+    monkeypatch.setattr(
+        AgentRuntimeInventory,
+        "_version",
+        staticmethod(lambda binary: "v-test"),
+    )
+    monkeypatch.setattr(
+        AgentRuntimeInventory,
+        "_hermes_config",
+        staticmethod(lambda: {}),
+    )
+    monkeypatch.setattr(
+        AgentRuntimeInventory,
+        "_credential_marker",
+        classmethod(lambda cls, key: None),
+    )
+
+    data = AgentRuntimeInventory(FakeHerdrHealth(), ttl_seconds=60).snapshot(force=True)
+    by_id = {item["id"]: item for item in data["runtimes"]}
+
+    assert by_id["claude"]["auth_health"] == {
+        "status": "error",
+        "authenticated": False,
+        "source": "pane_metadata",
+        "detail": "Runtime reports authentication state: unauthenticated.",
+    }
+    assert by_id["claude"]["last_error"] == "401 authentication failed"
+    assert by_id["codex"]["auth_health"]["status"] == "logged_in"
+    assert by_id["codex"]["auth_health"]["authenticated"] is True
+    assert by_id["codex"]["limit_health"]["status"] == "healthy"
+    assert by_id["codex"]["limit_health"]["remaining"] == "87%"
+    assert by_id["codex"]["limit_health"]["reset_at"] == "2026-09-19T13:00:00Z"
+    assert by_id["hermes"]["limit_health"]["status"] == "limited"
+    assert by_id["hermes"]["limit_health"]["source"] == "runtime_error"
+    assert data["summary"]["auth_healthy"] == 1
+    assert data["summary"]["auth_verified"] == 1
+    assert data["summary"]["limit_constrained"] == 1
+
+
+def test_cli_auth_probes_use_runtime_native_status(monkeypatch):
+    def fake_probe(binary, args, timeout=4.0):
+        if binary.endswith("claude"):
+            return {
+                "returncode": 0,
+                "stdout": '{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"pro"}',
+                "stderr": "",
+            }
+        if binary.endswith("codex"):
+            return {
+                "returncode": 0,
+                "stdout": "",
+                "stderr": "Logged in using ChatGPT",
+            }
+        if binary.endswith("hermes"):
+            return {
+                "returncode": 0,
+                "stdout": "9router: logged in",
+                "stderr": "",
+            }
+        return None
+
+    monkeypatch.setattr(
+        AgentRuntimeInventory,
+        "_run_probe",
+        staticmethod(fake_probe),
+    )
+
+    claude = AgentRuntimeInventory._cli_auth_health(
+        "claude", binary="/usr/bin/claude", provider="Anthropic"
+    )
+    codex = AgentRuntimeInventory._cli_auth_health(
+        "codex", binary="/usr/bin/codex", provider="OpenAI"
+    )
+    hermes = AgentRuntimeInventory._cli_auth_health(
+        "hermes", binary="/usr/bin/hermes", provider="9router"
+    )
+
+    assert claude["status"] == "logged_in"
+    assert claude["authenticated"] is True
+    assert "claude.ai" in claude["detail"]
+    assert codex == {
+        "status": "logged_in",
+        "authenticated": True,
+        "source": "codex_login_status",
+        "detail": "Codex reports logged in using ChatGPT.",
+    }
+    assert hermes == {
+        "status": "logged_in",
+        "authenticated": True,
+        "source": "hermes_auth_status",
+        "detail": "Hermes reports 9router logged in.",
+    }
+
+
+def test_cli_auth_probe_reports_logged_out(monkeypatch):
+    monkeypatch.setattr(
+        AgentRuntimeInventory,
+        "_run_probe",
+        staticmethod(
+            lambda binary, args, timeout=4.0: {
+                "returncode": 1,
+                "stdout": "",
+                "stderr": "Not logged in",
+            }
+        ),
+    )
+    health = AgentRuntimeInventory._cli_auth_health(
+        "codex", binary="/usr/bin/codex", provider="OpenAI"
+    )
+    assert health["status"] == "error"
+    assert health["authenticated"] is False
