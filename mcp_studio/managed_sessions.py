@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import Database
+from .git_worktrees import is_registered_git_worktree_path
 from .mcp_client import MCPClient
 from .settings import Settings
 from .tool_permissions import effective_policy
@@ -80,7 +81,14 @@ class ManagedSessionManager:
         roots = self._roots()
         if not roots:
             raise WorkspaceNotAllowed("no managed_session_workspace_roots are configured")
-        if not any(path == root or root in path.parents for root in roots):
+        inside_approved_root = any(path == root or root in path.parents for root in roots)
+        allow_worktree_siblings = bool(
+            getattr(self.settings.studio, "managed_session_allow_git_worktree_siblings", False)
+        )
+        inside_registered_worktree = allow_worktree_siblings and any(
+            is_registered_git_worktree_path(root, path) for root in roots
+        )
+        if not inside_approved_root and not inside_registered_worktree:
             raise WorkspaceNotAllowed(f"project path is outside approved roots: {path}")
         return str(path)
 
@@ -667,6 +675,9 @@ class ManagedSessionManager:
             "cutover_enabled": self.settings.studio.managed_session_cutover_enabled,
             "legacy_upstream_role": "discovery_only" if self.settings.studio.managed_session_cutover_enabled else "normal",
             "approved_roots": list(self.settings.studio.managed_session_workspace_roots),
+            "allow_git_worktree_siblings": bool(
+                getattr(self.settings.studio, "managed_session_allow_git_worktree_siblings", False)
+            ),
             "idle_stop_seconds": int(self.settings.studio.managed_session_idle_stop_seconds or 0),
             "history_limit": int(self.settings.studio.managed_session_history_limit or 100),
             "tool_permissions_enabled": bool(self.settings.studio.managed_session_tool_permissions_enabled),

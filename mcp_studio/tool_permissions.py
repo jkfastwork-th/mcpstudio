@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from .git_worktrees import is_registered_git_worktree_path
+
 
 ToolClass = Literal["read", "write", "execute", "destructive", "unknown"]
 
@@ -13,18 +15,27 @@ _READ_TOOLS = {
     "initial_instructions", "get_current_config", "check_onboarding_performed",
     "list_dir", "find_file", "search_for_pattern", "get_symbols_overview",
     "find_symbol", "find_referencing_symbols", "find_implementations",
-    "find_declaration", "read_file", "list_memories", "read_memory",
+    "find_declaration", "get_diagnostics_for_file", "read_file", "list_memories", "read_memory",
     "think_about_task_adherence", "think_about_collected_information",
-    "think_about_whether_you_are_done", "herdr_list_panes", "herdr_get_agent",
-    "herdr_read_agent", "herdr_wait_agent", "family_context_read",
+    "think_about_whether_you_are_done",
+    "herdr_list_agents", "herdr_list_panes", "herdr_get_agent", "herdr_read_agent", "herdr_wait_agent",
+    "family_context_read", "fern_bridge_status", "fern_inbox_list_or_peek",
+    "mcpstudio_current_session", "mcpstudio_get_session", "mcpstudio_list_sessions",
+    "mcpstudio_list_workspaces", "mcpstudio_session_history",
 }
 _WRITE_TOOLS = {
     "replace_content", "replace_symbol_body", "insert_after_symbol",
     "insert_before_symbol", "rename_symbol", "write_memory", "edit_memory",
     "rename_memory", "create_text_file", "onboarding",
+    "mcpstudio_register_workspace", "mcpstudio_rename_session",
 }
 _DESTRUCTIVE_TOOLS = {"safe_delete_symbol", "delete_memory"}
-_EXECUTE_TOOLS = {"activate_project", "herdr_prompt_agent"}
+_EXECUTE_TOOLS = {
+    "activate_project", "herdr_prompt_agent",
+    "mcpstudio_use_workspace", "mcpstudio_create_session", "mcpstudio_use_session",
+    "mcpstudio_close_session", "mcpstudio_detach_session",
+    "fern_inbox_claim", "fern_reply_submit", "fern_interjection_decide",
+}
 _SHELL_TOOLS = {"execute_shell_command", "shell", "run_command"}
 
 _DESTRUCTIVE_SHELL = re.compile(
@@ -237,19 +248,47 @@ def _within(root: Path, candidate: Path) -> bool:
         return False
 
 
-def _argument_scope_violation(arguments: dict[str, Any], workspace_root: Path) -> str | None:
+def _within_scope(
+    root: Path,
+    candidate: Path,
+    *,
+    allow_git_worktree_siblings: bool = False,
+) -> bool:
+    if _within(root, candidate):
+        return True
+    return bool(
+        allow_git_worktree_siblings
+        and is_registered_git_worktree_path(root, candidate)
+    )
+
+
+def _argument_scope_violation(
+    arguments: dict[str, Any],
+    workspace_root: Path,
+    *,
+    allow_git_worktree_siblings: bool = False,
+) -> str | None:
     for key in _PATH_ARGUMENT_KEYS:
         value = arguments.get(key)
         if not isinstance(value, str) or not value.strip():
             continue
         raw = Path(value).expanduser()
         candidate = raw if raw.is_absolute() else workspace_root / raw
-        if not _within(workspace_root, candidate):
+        if not _within_scope(
+            workspace_root,
+            candidate,
+            allow_git_worktree_siblings=allow_git_worktree_siblings,
+        ):
             return f"argument {key} escapes workspace: {value}"
     return None
 
 
-def _shell_scope_violation(command: str, workspace_root: Path) -> str | None:
+def _shell_scope_violation(
+    command: str,
+    workspace_root: Path,
+    *,
+    allow_git_worktree_siblings: bool = False,
+) -> str | None:
     try:
         segments = _split_shell_segments(command)
         for segment in segments:
@@ -270,7 +309,11 @@ def _shell_scope_violation(command: str, workspace_root: Path) -> str | None:
                     continue
                 if candidate in _ALLOWED_EXTERNAL_PATHS:
                     continue
-                if not _within(workspace_root, candidate):
+                if not _within_scope(
+                    workspace_root,
+                    candidate,
+                    allow_git_worktree_siblings=allow_git_worktree_siblings,
+                ):
                     return f"shell path escapes workspace: {cleaned}"
     except ValueError:
         return "shell command could not be parsed safely"
@@ -292,17 +335,32 @@ def decide_tool_call(studio: Any, session: dict[str, Any], tool_name: str, argum
         if not project_path:
             return PermissionDecision(False, category, "TOOL_SCOPE_UNAVAILABLE", "Managed session has no project_path for workspace scope enforcement.", policy)
         root = Path(project_path).expanduser().resolve(strict=False)
-        violation = _argument_scope_violation(args, root)
+        allow_git_worktree_siblings = bool(
+            getattr(studio, "managed_session_allow_git_worktree_siblings", False)
+        )
+        violation = _argument_scope_violation(
+            args,
+            root,
+            allow_git_worktree_siblings=allow_git_worktree_siblings,
+        )
         if not violation and _base_tool_name(tool_name) in _SHELL_TOOLS:
             cwd = args.get("cwd")
             if isinstance(cwd, str) and cwd.strip():
                 cwd_path = Path(cwd).expanduser()
                 if not cwd_path.is_absolute():
                     cwd_path = root / cwd_path
-                if not _within(root, cwd_path):
+                if not _within_scope(
+                    root,
+                    cwd_path,
+                    allow_git_worktree_siblings=allow_git_worktree_siblings,
+                ):
                     violation = f"shell cwd escapes workspace: {cwd}"
             if not violation:
-                violation = _shell_scope_violation(str(args.get("command") or ""), root)
+                violation = _shell_scope_violation(
+                    str(args.get("command") or ""),
+                    root,
+                    allow_git_worktree_siblings=allow_git_worktree_siblings,
+                )
         if violation:
             return PermissionDecision(False, category, "TOOL_SCOPE_VIOLATION", violation, policy)
     return PermissionDecision(True, category, None, f"{category.upper()} permission granted.", policy)

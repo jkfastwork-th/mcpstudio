@@ -108,6 +108,7 @@ class StudioConfig:
     managed_session_default_destructive_allowed: bool = False
     managed_session_tool_permissions_fail_closed: bool = True
     managed_session_tool_scope_enforced: bool = True
+    managed_session_allow_git_worktree_siblings: bool = False
 
     # HIRDA Graft read-only context plane. Graft is a discovery/context
     # accelerator only: enabling it never grants source-write, destructive,

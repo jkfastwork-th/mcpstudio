@@ -1,3 +1,4 @@
+import subprocess
 from types import SimpleNamespace
 
 from mcp_studio.tool_permissions import classify_shell_command, classify_tool, decide_tool_call, effective_policy
@@ -11,6 +12,7 @@ def studio(**overrides):
         "managed_session_default_destructive_allowed": False,
         "managed_session_tool_scope_enforced": True,
         "managed_session_tool_permissions_fail_closed": True,
+        "managed_session_allow_git_worktree_siblings": False,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -18,6 +20,25 @@ def studio(**overrides):
 
 def session(tmp_path, **metadata):
     return {"id": "ms-a", "project_path": str(tmp_path), "metadata": metadata}
+
+
+def git_repo_with_worktree(tmp_path):
+    repo = tmp_path / "repo"
+    sibling = tmp_path / "repo-ux"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "HIRDA Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "hirda@example.invalid"], cwd=repo, check=True)
+    (repo / "README.md").write_text("test\n")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "ux-ui", str(sibling)],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    return repo, sibling
 
 
 def test_classifies_serena_read_write_and_destructive_tools():
@@ -68,6 +89,53 @@ def test_workspace_scope_blocks_relative_escape(tmp_path):
 
 def test_shell_scope_blocks_absolute_operand_outside_workspace(tmp_path):
     decision = decide_tool_call(studio(), session(tmp_path), "execute_shell_command", {"command": "cat /etc/passwd"})
+    assert decision.allowed is False
+    assert decision.code == "TOOL_SCOPE_VIOLATION"
+
+
+def test_registered_git_worktree_sibling_is_allowed_when_opted_in(tmp_path):
+    repo, sibling = git_repo_with_worktree(tmp_path)
+    enabled = studio(managed_session_allow_git_worktree_siblings=True)
+
+    cwd_decision = decide_tool_call(
+        enabled,
+        session(repo),
+        "execute_shell_command",
+        {"command": "git status", "cwd": str(sibling)},
+    )
+    path_decision = decide_tool_call(
+        enabled,
+        session(repo),
+        "read_file",
+        {"relative_path": str(sibling / "README.md")},
+    )
+
+    assert cwd_decision.allowed is True
+    assert path_decision.allowed is True
+
+
+def test_registered_git_worktree_sibling_stays_blocked_without_opt_in(tmp_path):
+    repo, sibling = git_repo_with_worktree(tmp_path)
+    decision = decide_tool_call(
+        studio(),
+        session(repo),
+        "execute_shell_command",
+        {"command": "git status", "cwd": str(sibling)},
+    )
+    assert decision.allowed is False
+    assert decision.code == "TOOL_SCOPE_VIOLATION"
+
+
+def test_unregistered_sibling_stays_blocked_with_worktree_opt_in(tmp_path):
+    repo, _ = git_repo_with_worktree(tmp_path)
+    fake = tmp_path / "repo-copy"
+    fake.mkdir()
+    decision = decide_tool_call(
+        studio(managed_session_allow_git_worktree_siblings=True),
+        session(repo),
+        "execute_shell_command",
+        {"command": "git status", "cwd": str(fake)},
+    )
     assert decision.allowed is False
     assert decision.code == "TOOL_SCOPE_VIOLATION"
 

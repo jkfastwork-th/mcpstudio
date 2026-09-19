@@ -38,6 +38,8 @@ studio:
   #managed_session_default_destructive_allowed: false
   #managed_session_tool_permissions_fail_closed: true
   #managed_session_tool_scope_enforced: true
+  # Allow paths inside registered sibling Git worktrees that share the same Git common dir.
+  #managed_session_allow_git_worktree_siblings: false
 
   # HIRDA Graft read-only context plane.
   # Enabling this does not grant Graft source write/destructive authority.

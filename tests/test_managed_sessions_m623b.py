@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +13,25 @@ from mcp_studio.db import Database
 from mcp_studio.gateway import GatewaySessionManager
 from mcp_studio.managed_sessions import ManagedSessionManager, ManagedSessionConflict, WorkspaceNotAllowed
 from mcp_studio.settings import ServerConfig, Settings, StudioConfig
+
+
+def git_repo_with_worktree(tmp_path: Path) -> tuple[Path, Path]:
+    repo = tmp_path / "repo"
+    sibling = tmp_path / "repo-ux"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "HIRDA Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "hirda@example.invalid"], cwd=repo, check=True)
+    (repo / "README.md").write_text("test\n")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "ux-ui", str(sibling)],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    return repo, sibling
 
 
 def settings_for(tmp_path: Path, *, enabled: bool = True) -> Settings:
@@ -78,6 +98,23 @@ async def test_workspace_registry_is_confined_to_approved_roots(tmp_path: Path):
     with pytest.raises(Exception, match="outside approved roots"):
         await manager.register_workspace(key="outside", project_path=str(outside))
 
+
+@pytest.mark.asyncio
+async def test_workspace_registry_allows_registered_git_worktree_sibling_when_opted_in(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    repo, sibling = git_repo_with_worktree(tmp_path)
+    settings.studio.managed_session_workspace_roots = [str(repo)]
+    settings.studio.managed_session_allow_git_worktree_siblings = True
+    db = Database(settings.studio.database); await db.init()
+    manager = ManagedSessionManager(settings, db)
+
+    item = await manager.register_workspace(key="repo-ux", project_path=str(sibling))
+    assert item["project_path"] == str(sibling.resolve())
+
+    fake = tmp_path / "repo-copy"
+    fake.mkdir()
+    with pytest.raises(WorkspaceNotAllowed, match="outside approved roots"):
+        await manager.register_workspace(key="repo-copy", project_path=str(fake))
 
 
 @pytest.mark.asyncio
