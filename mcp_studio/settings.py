@@ -119,6 +119,32 @@ class StudioConfig:
     graft_request_timeout_seconds: float = 30.0
     graft_default_rollout_percent: float = 100.0
 
+    # HIRDA Reflex local System-One decision core. Deterministic permission
+    # and workspace-scope checks remain the hard authority. Reflex is local,
+    # fast, and may only narrow already-allowed calls.
+    reflex_enabled: bool = True
+    reflex_mode: str = "enforce"
+    reflex_evaluate_read_tools: bool = False
+    reflex_min_confidence: float = 0.88
+    reflex_review_risk_threshold: float = 0.72
+    reflex_deny_risk_threshold: float = 0.92
+    reflex_dataset_enabled: bool = True
+    reflex_dataset_path: str = "./data/reflex-decisions.jsonl"
+
+    # Jev is an optional teacher/shadow evaluator for HIRDA Reflex.
+    # It has no runtime authority to grant, review, deny, or block tool calls.
+    jev_enabled: bool = False
+    jev_mode: str = "shadow"
+    jev_api_url: str = "https://api.typesafe.ai/v1/systemone"
+    jev_api_key_env: str = "TYPESAFE_API_KEY"
+    jev_model: str = "jev-latest"
+    jev_timeout_seconds: float = 2.0
+    jev_min_confidence: float = 0.90
+    jev_suspicious_threshold: float = 0.90
+    jev_fail_closed: bool = False
+    jev_evaluate_read_tools: bool = False
+    jev_max_state_chars: int = 12000
+
     # M6.2.4 lifecycle polish. Zero keeps idle auto-stop disabled by default;
     # operators can opt in once their workload pattern is understood.
     managed_session_idle_stop_seconds: int = 0
