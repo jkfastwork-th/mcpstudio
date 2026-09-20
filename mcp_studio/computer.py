@@ -178,7 +178,14 @@ class ComputerUseManager:
                 # Wayland client inside a nested Weston window instead; this
                 # keeps Chrome compositing on GL while Chromium's supported
                 # Linux WebGPU-on-Vulkan interop path uses the host GPU.
-                return common + ["--ozone-platform=wayland"]
+                # Dawn's default tiered adapter limits can under-report
+                # dynamic storage/textures on Intel WebGPU and make complex
+                # Oriverse GBuffer pipelines invalid. Keep the real adapter
+                # limits for the nested-Wayland hardware path.
+                return common + [
+                    "--disable-dawn-features=tiered_adapter_limits",
+                    "--ozone-platform=wayland",
+                ]
             return common
         return common + [
             "--enable-features=Vulkan",

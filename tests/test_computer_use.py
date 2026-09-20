@@ -308,6 +308,7 @@ def test_gpu_mode_auto_prefers_hardware_when_render_device_exists() -> None:
 
     assert "--enable-unsafe-webgpu" in args
     assert "--ozone-platform=wayland" in args
+    assert "--disable-dawn-features=tiered_adapter_limits" in args
     assert not any(arg.startswith("--enable-features=Vulkan") for arg in args)
     assert "--use-angle=vulkan" not in args
     assert "--disable-vulkan-surface" not in args

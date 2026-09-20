@@ -1289,7 +1289,9 @@ class GatewaySessionManager:
                         },
                         is_error=True,
                     )
+                policy_started = time.perf_counter()
                 decision = decide_tool_call(self.settings.studio, managed_session, tool_name, tool_args)
+                policy_ms = round((time.perf_counter() - policy_started) * 1000.0, 3)
                 if not decision.allowed:
                     return local_tool_response(
                         {
@@ -1303,12 +1305,14 @@ class GatewaySessionManager:
                         is_error=True,
                     )
 
+                reflex_started = time.perf_counter()
                 reflex_decision, reflex_features = evaluate_reflex_tool_call(
                     self.settings.studio,
                     tool_name,
                     tool_args,
                     decision.category,
                 )
+                reflex_ms = round((time.perf_counter() - reflex_started) * 1000.0, 3)
                 reflex_id = decision_fingerprint(
                     managed_session,
                     reflex_features,
@@ -1317,6 +1321,7 @@ class GatewaySessionManager:
 
                 # Jev is teacher/shadow evidence only. It never grants or blocks
                 # authority in the HIRDA runtime path.
+                teacher_started = time.perf_counter()
                 jev_decision = await evaluate_jev_tool_call(
                     self.settings.studio,
                     managed_session,
@@ -1324,6 +1329,7 @@ class GatewaySessionManager:
                     tool_args,
                     decision.category,
                 )
+                teacher_ms = round((time.perf_counter() - teacher_started) * 1000.0, 3)
                 teacher_agreement = (
                     jev_decision.action == reflex_decision.action
                     if jev_decision.evaluated
@@ -1347,6 +1353,11 @@ class GatewaySessionManager:
                             "model": jev_decision.model,
                             "error": jev_decision.error,
                             "agreement": teacher_agreement,
+                        },
+                        "timings": {
+                            "policy_ms": policy_ms,
+                            "reflex_ms": reflex_ms,
+                            "teacher_ms": teacher_ms,
                         },
                     },
                 )
