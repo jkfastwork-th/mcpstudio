@@ -62,6 +62,12 @@ def test_shell_classifier_keeps_read_write_execute_separate():
     assert classify_shell_command("grep -E 'foo|bar' README.md") == "read"
     assert classify_shell_command("find . -type f | sort | sed -n '1,20p'") == "read"
     assert classify_shell_command("mcporter list") == "execute"
+    assert classify_shell_command("systemctl status mcp-studio.service") == "read"
+    assert classify_shell_command("systemctl is-active mcp-studio.service") == "read"
+    assert classify_shell_command("systemctl restart mcp-studio.service") == "execute"
+    assert classify_shell_command("systemctl stop mcp-studio.service") == "destructive"
+    assert classify_shell_command("journalctl -u mcp-studio.service -n 20 --no-pager") == "read"
+    assert classify_shell_command("ss -ltnp") == "read"
 
 
 def test_default_policy_blocks_destructive(tmp_path):

@@ -57,7 +57,7 @@ _WRITE_SHELL = re.compile(
 _READ_COMMANDS = {
     "pwd", "ls", "cat", "grep", "rg", "find", "head", "tail", "wc", "stat",
     "printf", "echo", "which", "type", "realpath", "readlink", "env", "printenv",
-    "sort", "sed",
+    "sort", "sed", "journalctl", "ss",
 }
 _EXECUTE_COMMANDS = {
     "pytest", "make", "cmake", "ctest", "ninja", "node", "npm", "pnpm", "yarn",
@@ -118,6 +118,17 @@ def _segment_class(segment: str) -> ToolClass:
         return "read"
     if command == "git":
         return _git_command_class(tokens)
+    if command == "systemctl":
+        if len(tokens) < 2:
+            return "read"
+        sub = tokens[1]
+        if sub in {"status", "is-active", "is-enabled", "show", "list-units", "list-unit-files"}:
+            return "read"
+        if sub in {"restart", "start", "reload", "try-restart"}:
+            return "execute"
+        if sub in {"stop", "disable", "mask"}:
+            return "destructive"
+        return "unknown"
     if command in _READ_COMMANDS:
         return "read"
     if command in _EXECUTE_COMMANDS:
