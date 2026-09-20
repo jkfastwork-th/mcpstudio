@@ -39,6 +39,30 @@ studio:
   #managed_session_tool_permissions_fail_closed: true
   #managed_session_tool_scope_enforced: true
 
+  # HIRDA Reflex local System-One decision core.
+  #reflex_enabled: true
+  #reflex_mode: enforce
+  #reflex_evaluate_read_tools: false
+  #reflex_min_confidence: 0.88
+  #reflex_review_risk_threshold: 0.72
+  #reflex_deny_risk_threshold: 0.92
+  #reflex_dataset_enabled: true
+  #reflex_dataset_path: ./data/reflex-decisions.jsonl
+
+  # Jev is optional teacher/shadow evaluation, never runtime authority.
+  # Deterministic permissions + HIRDA Reflex remain the execution authority.
+  #jev_enabled: false
+  #jev_mode: shadow
+  #jev_api_url: https://api.typesafe.ai/v1/systemone
+  #jev_api_key_env: TYPESAFE_API_KEY
+  #jev_model: jev-latest
+  #jev_timeout_seconds: 2.0
+  #jev_min_confidence: 0.90
+  #jev_suspicious_threshold: 0.90
+  #jev_fail_closed: false
+  #jev_evaluate_read_tools: false
+  #jev_max_state_chars: 12000
+
   # M6.2.5 Computer Use / Web VNC MVP.
   #computer_use_enabled: false
   #computer_vnc_host: 127.0.0.1

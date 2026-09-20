@@ -2,6 +2,7 @@ let currentView = (location.hash || '#home').slice(1);
 let sessionTunnelFilter = '';
 let showSessionHistory = false;
 let showManagedHistory = false;
+let reflexWindow = '24h';
 let latestData = null;
 
 
@@ -81,6 +82,37 @@ const I18N_TH={
   'Dashboard':'แดชบอร์ด',
   'Capsule Lanes':'เลนแคปซูล',
   'Agents':'เอเจนต์',
+  'Reflex':'รีเฟล็กซ์',
+  'Observe HIRDA Reflex decisions, JEV teacher agreement, latency, risk, and dataset growth.':'ดูการตัดสินใจของ HIRDA Reflex ความสอดคล้องกับ JEV teacher เวลาแฝง ความเสี่ยง และการเติบโตของชุดข้อมูล',
+  'Inspect HIRDA Reflex decisions, JEV teacher agreement, latency, risk, and dataset growth.':'ตรวจสอบการตัดสินใจของ HIRDA Reflex ความสอดคล้องกับ JEV teacher เวลาแฝง ความเสี่ยง และชุดข้อมูล',
+  'DECISION ENGINE':'ระบบตัดสินใจ',
+  'Window':'ช่วงเวลา',
+  '1 hour':'1 ชั่วโมง',
+  '24 hours':'24 ชั่วโมง',
+  '7 days':'7 วัน',
+  '30 days':'30 วัน',
+  'Refresh metrics':'รีเฟรชเมตริก',
+  'Loading Reflex metrics…':'กำลังโหลดเมตริก Reflex…',
+  'LOCAL AUTHORITY':'ตัวตัดสินภายในเครื่อง',
+  'HIRDA Reflex':'HIRDA Reflex',
+  'JEV teacher':'JEV teacher',
+  'Dataset':'ชุดข้อมูล',
+  'Decisions':'การตัดสินใจ',
+  'Allow rate':'อัตรา Allow',
+  'Review rate':'อัตรา Review',
+  'Deny rate':'อัตรา Deny',
+  'JEV agreement':'ความสอดคล้องกับ JEV',
+  'Reflex median':'Reflex median',
+  'JEV median':'JEV median',
+  'Transport success':'ความสำเร็จของ transport',
+  'Action mix':'สัดส่วนการตัดสินใจ',
+  'Risk distribution':'การกระจายความเสี่ยง',
+  'Fast vs deep':'Fast เทียบ Deep',
+  'JEV comparison':'การเทียบกับ JEV',
+  'Decision activity':'กิจกรรมการตัดสินใจ',
+  'Top risk signals':'สัญญาณความเสี่ยงหลัก',
+  'Recent decisions':'การตัดสินใจล่าสุด',
+  'Authority boundary':'ขอบเขตอำนาจ',
   'Computer':'คอมพิวเตอร์',
   'Settings':'การตั้งค่า',
   'Appearance':'รูปลักษณ์',
@@ -314,7 +346,7 @@ function applyLanguage(lang,{persist=true}={}){
   captureAndTranslateText(document);
   refreshLocalizedCommands(document);
   setView(currentView,false);
-  if(latestData){renderOverview(latestData);renderManagedSessions(latestData);renderSessions(latestData);renderWorkspaces(latestData);renderWorkers(latestData);renderTunnels(latestData);renderReliability(latestData);renderActivity(latestData);renderDebug(latestData);captureAndTranslateText(document);}
+  if(latestData){renderOverview(latestData);renderReflexMetrics(latestData);renderManagedSessions(latestData);renderSessions(latestData);renderWorkspaces(latestData);renderWorkers(latestData);renderTunnels(latestData);renderReliability(latestData);renderActivity(latestData);renderDebug(latestData);captureAndTranslateText(document);}
   if(persist)localStorage.setItem('mcp-studio-language',currentLanguage);
 }
 function loadLanguage(){
@@ -550,6 +582,7 @@ const viewMeta = {
   home:['Dashboard','Dashboard','Live capsule routing, active agent lanes, handoffs, and system health.'],
   sessions:['Capsule Lanes','Capsule Lanes','Inspect capsule state, routing, handoffs, and session history.'],
   agents:['Agents','Agents','Monitor runtime availability, authentication health, rate limits, and active capsule load.'],
+  reflex:['Reflex','Reflex','Observe HIRDA Reflex decisions, JEV teacher agreement, latency, risk, and dataset growth.'],
   workspaces:['Workspaces','Workspaces','Manage approved projects, managed sessions, and workspace safety.'],
   guide:['Guide','Guide','Daily use first, then setup and troubleshooting.'],
   computer:['Computer','Computer','Open a shared browser desktop for OAuth, sign-in, consent, and other human-in-the-loop actions.'],
@@ -569,6 +602,7 @@ function setView(view, updateHash=true){
   document.getElementById('viewSubtitle').textContent=tr(sub);
   if(updateHash && location.hash !== `#${view}`) history.replaceState(null,'',`#${view}`);
   if(view==='computer') setTimeout(refreshComputerView,0);
+  if(view==='reflex') setTimeout(()=>uiAction(refreshReflexMetrics),0);
   window.scrollTo({top:0,behavior:'smooth'});
 }
 
@@ -765,6 +799,156 @@ function renderAgentLanes(data){
   }).join('');
 }
 
+
+function reflexPretty(value){
+  return String(value??'')
+    .replaceAll('_',' ')
+    .replace(/\b\w/g,ch=>ch.toUpperCase());
+}
+function reflexPct(value){
+  return value==null?'—':`${Number(value).toFixed(1)}%`;
+}
+function reflexMs(value){
+  return value==null?'—':`${Number(value).toFixed(value<10?2:1)} ms`;
+}
+function reflexBars(values, order){
+  const pairs=(order||Object.keys(values||{})).map(key=>[key,Number((values||{})[key]||0)]);
+  const max=Math.max(1,...pairs.map(([,value])=>value));
+  return pairs.map(([key,value])=>`<div class="reflex-bar-row"><span>${esc(reflexPretty(key))}</span><div class="reflex-bar-track"><i style="width:${Math.max(value?3:0,(value/max)*100)}%"></i></div><strong>${esc(value)}</strong></div>`).join('');
+}
+function reflexActionPill(action){
+  const normalized=String(action||'unknown').toLowerCase();
+  return `<span class="reflex-action-pill ${esc(normalized)}">${esc(normalized.toUpperCase())}</span>`;
+}
+function renderReflexMetrics(data){
+  const root=document.getElementById('reflexMetricsPanel');
+  if(!root)return;
+  const metrics=data?.reflexMetricsData;
+  if(!metrics){
+    root.innerHTML='<div class="panel-card"><div class="empty">Reflex metrics are unavailable from this HIRDA process.</div></div>';
+    return;
+  }
+  const summary=metrics.summary||{};
+  const teacher=metrics.teacher||{};
+  const latency=metrics.latency||{};
+  const outcomes=metrics.outcomes||{};
+  const dist=metrics.distributions||{};
+  const config=metrics.config||{};
+  const recent=metrics.recent||[];
+  const signals=dist.signals||[];
+  const timeline=metrics.timeline||[];
+  const dataset=metrics.dataset||{};
+  const maxTimeline=Math.max(1,...timeline.map(item=>Number(item.decisions||0)));
+  const teacherStatus=config.teacher_enabled
+    ? (teacher.availability_rate==null?'Waiting for samples':`${reflexPct(teacher.availability_rate)} available`)
+    : 'Disabled';
+  const agreement=config.teacher_enabled?reflexPct(teacher.agreement_rate):'—';
+  const outcomeRate=reflexPct(outcomes.http_success_rate);
+  const mode=String(config.reflex_mode||'unknown').toUpperCase();
+
+  root.innerHTML=`
+    <div class="reflex-status-strip panel-card">
+      <div class="reflex-engine-identity">
+        <span class="reflex-engine-mark">◇</span>
+        <div><span class="eyebrow">LOCAL AUTHORITY</span><strong>HIRDA Reflex</strong><small>${esc(mode)} · static permission remains the hard boundary</small></div>
+      </div>
+      <div class="reflex-status-facts">
+        <span><small>Reflex</small><strong>${config.reflex_enabled?'Enabled':'Disabled'}</strong></span>
+        <span><small>JEV teacher</small><strong>${esc(teacherStatus)}</strong></span>
+        <span><small>Dataset</small><strong>${esc(dataset.records||0)} records</strong></span>
+      </div>
+    </div>
+
+    <div class="reflex-summary-grid">
+      <article class="reflex-metric-card"><span>Decisions</span><strong>${esc(summary.decisions||0)}</strong><small>${esc(metrics.window||reflexWindow)} window</small></article>
+      <article class="reflex-metric-card allow"><span>Allow rate</span><strong>${esc(reflexPct(summary.allow_rate))}</strong><small>${esc(summary.allow||0)} allow</small></article>
+      <article class="reflex-metric-card review"><span>Review rate</span><strong>${esc(reflexPct(summary.review_rate))}</strong><small>${esc(summary.review||0)} review</small></article>
+      <article class="reflex-metric-card deny"><span>Deny rate</span><strong>${esc(reflexPct(summary.deny_rate))}</strong><small>${esc(summary.deny||0)} deny</small></article>
+      <article class="reflex-metric-card teacher"><span>JEV agreement</span><strong>${esc(agreement)}</strong><small>${esc(teacher.evaluated||0)} evaluated</small></article>
+      <article class="reflex-metric-card"><span>Reflex median</span><strong>${esc(reflexMs(latency.reflex?.median_ms))}</strong><small>P95 ${esc(reflexMs(latency.reflex?.p95_ms))}</small></article>
+      <article class="reflex-metric-card"><span>JEV median</span><strong>${esc(reflexMs(latency.teacher?.median_ms))}</strong><small>P95 ${esc(reflexMs(latency.teacher?.p95_ms))}</small></article>
+      <article class="reflex-metric-card"><span>Transport success</span><strong>${esc(outcomeRate)}</strong><small>HTTP only · not semantic correctness</small></article>
+    </div>
+
+    <div class="reflex-analysis-grid">
+      <article class="panel-card reflex-chart-card">
+        <div class="panel-head"><div><span class="eyebrow">DECISIONS</span><h3>Action mix</h3></div><small>allow / review / deny</small></div>
+        <div class="reflex-bars">${reflexBars(dist.actions||{},['allow','review','deny'])}</div>
+      </article>
+      <article class="panel-card reflex-chart-card">
+        <div class="panel-head"><div><span class="eyebrow">RISK</span><h3>Risk distribution</h3></div><small>threshold-aware</small></div>
+        <div class="reflex-bars">${reflexBars(dist.risk||{},['low','elevated','review','deny'])}</div>
+      </article>
+      <article class="panel-card reflex-chart-card">
+        <div class="panel-head"><div><span class="eyebrow">COMPUTE</span><h3>Fast vs deep</h3></div><small>local compute lane</small></div>
+        <div class="reflex-bars">${reflexBars(dist.compute_lanes||{},['fast','deep'])}</div>
+      </article>
+      <article class="panel-card reflex-chart-card teacher-card">
+        <div class="panel-head"><div><span class="eyebrow">TEACHER</span><h3>JEV comparison</h3></div><small>shadow evidence only</small></div>
+        <div class="reflex-teacher-grid">
+          <div><span>Available</span><strong>${esc(reflexPct(teacher.availability_rate))}</strong></div>
+          <div><span>Agreement</span><strong>${esc(agreement)}</strong></div>
+          <div><span>Agree</span><strong>${esc(teacher.agreement||0)}</strong></div>
+          <div><span>Disagree</span><strong>${esc(teacher.disagreement||0)}</strong></div>
+        </div>
+        ${(teacher.errors||[]).length?`<div class="reflex-errors">${teacher.errors.slice(0,4).map(item=>`<span><code>${esc(item.error)}</code><b>${esc(item.count)}</b></span>`).join('')}</div>`:''}
+      </article>
+    </div>
+
+    <div class="reflex-detail-grid">
+      <article class="panel-card reflex-timeline-card">
+        <div class="panel-head"><div><span class="eyebrow">VOLUME</span><h3>Decision activity</h3></div><small>${esc(metrics.window||reflexWindow)}</small></div>
+        <div class="reflex-timeline">
+          ${timeline.length?timeline.map(item=>`<div class="reflex-timeline-column" title="${esc(item.bucket)} · ${esc(item.decisions)} decisions"><i style="height:${Math.max(item.decisions?5:0,(Number(item.decisions||0)/maxTimeline)*100)}%"></i><small>${esc(item.decisions||0)}</small></div>`).join(''):'<div class="empty">No decision samples in this window.</div>'}
+        </div>
+      </article>
+      <article class="panel-card reflex-signals-card">
+        <div class="panel-head"><div><span class="eyebrow">TRIGGERS</span><h3>Top risk signals</h3></div><small>feature flags only</small></div>
+        <div class="reflex-signal-list">
+          ${signals.length?signals.map(item=>`<div><span>${esc(reflexPretty(item.signal))}</span><strong>${esc(item.count)}</strong></div>`).join(''):'<div class="empty">No elevated risk signals recorded.</div>'}
+        </div>
+      </article>
+    </div>
+
+    <article class="panel-card reflex-recent-card">
+      <div class="panel-head"><div><span class="eyebrow">TRACE</span><h3>Recent decisions</h3></div><small>arguments and credentials are never shown</small></div>
+      <div class="reflex-table-wrap">
+        <table class="reflex-table">
+          <thead><tr><th>Time</th><th>Workspace</th><th>Tool</th><th>Class</th><th>Reflex</th><th>Risk</th><th>Lane</th><th>JEV</th><th>Latency</th></tr></thead>
+          <tbody>
+            ${recent.length?recent.map(row=>{
+              const teacherRow=row.teacher||{};
+              const teacherLabel=!teacherRow.enabled?'disabled':!teacherRow.evaluated?(teacherRow.error||'unavailable'):(teacherRow.agreement===true?`✓ ${teacherRow.action}`:`≠ ${teacherRow.action}`);
+              const stamp=row.recorded_at?new Date(row.recorded_at):null;
+              const when=stamp&&!Number.isNaN(stamp.getTime())?stamp.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}):'—';
+              return `<tr>
+                <td>${esc(when)}</td><td>${esc(row.workspace_key||'—')}</td><td><code>${esc(row.tool||'—')}</code></td><td>${esc(row.permission_class||'—')}</td>
+                <td>${reflexActionPill(row.action)}</td><td>${esc(Number(row.risk||0).toFixed(2))}</td><td>${esc(row.compute_lane||'—')}</td>
+                <td class="${teacherRow.agreement===false?'reflex-disagree':''}">${esc(teacherLabel)}</td><td>${esc(reflexMs(row.timings?.reflex_ms))}</td>
+              </tr>`;
+            }).join(''):'<tr><td colspan="9"><div class="empty">No Reflex decisions recorded yet.</div></td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    </article>
+
+    <div class="reflex-boundary-note">
+      <strong>Authority boundary</strong>
+      <span>Static permissions and workspace scope stay authoritative. Reflex may only narrow an already-allowed call. JEV is teacher/shadow evidence and never grants or blocks runtime authority.</span>
+    </div>
+  `;
+}
+
+async function refreshReflexMetrics(){
+  const select=document.getElementById('reflexWindowSelect');
+  reflexWindow=select?.value||reflexWindow;
+  const metrics=await getJson(`/api/reflex/metrics?window=${encodeURIComponent(reflexWindow)}&recent=20`);
+  if(!latestData)latestData={};
+  latestData.reflexMetricsData=metrics;
+  renderReflexMetrics(latestData);
+  captureAndTranslateText(document.getElementById('reflexMetricsPanel')||document);
+}
+
 function renderOverview(data){
   const {status,managedSessions,alertsData,capsulesData,agentRuntimesData}=data;
   const items=managedSessions?.sessions||[];
@@ -858,7 +1042,7 @@ function renderOverview(data){
       ${lastHandoff?.a2a?.task_id?`<div><span>A2A task</span><strong>${esc(lastHandoff.a2a.task_id)} · ${esc(lastHandoff.a2a.task?.status?.state||'submitted')}</strong></div>`:''}
       <div><span>Next fallback</span><strong>${esc(nextFallback)}</strong></div>
     </div>
-    <button class="button capsule-detail-button" data-go-view="sessions" type="button">View capsule details →</button>`;
+    <button class="button capsule-detail-button" data-go-view="sessions" data-capsule-id="${esc(capsuleId)}"${!hasLedger&&activeSession?.id?` data-managed-session-id="${esc(activeSession.id)}"`:'' } type="button">View capsule details →</button>`;
 
   if(hasLedger){
     const ev=[...(liveCapsule.events||[])].reverse().slice(0,6);
@@ -877,6 +1061,17 @@ function renderOverview(data){
   }
 
   renderAgentLanes(data);
+}
+
+function focusCapsuleLedgerItem(capsuleId){
+  if(!capsuleId)return false;
+  const item=[...document.querySelectorAll('.capsule-ledger-item[data-capsule-id]')]
+    .find(el=>el.dataset.capsuleId===String(capsuleId));
+  if(!item)return false;
+  document.querySelectorAll('.capsule-ledger-item[open]').forEach(el=>{if(el!==item)el.open=false;});
+  item.open=true;
+  item.scrollIntoView({behavior:'smooth',block:'center'});
+  return true;
 }
 
 function renderCapsuleLedger(data){
@@ -911,7 +1106,7 @@ function renderCapsuleLedger(data){
       if(e.kind==='capsule.completed') text='Capsule completed';
       return `<div class="capsule-timeline-row"><span class="timeline-dot ${esc(e.kind.replace('capsule.',''))}"></span><div><strong>${esc(text)}</strong><small>${esc(when(e.created_at))} · ${esc(e.kind)}</small></div></div>`;
     }).join(''):'<div class="empty compact">No events recorded.</div>';
-    return `<details class="capsule-ledger-item ${esc(current)}" ${index===0?'open':''}>
+    return `<details class="capsule-ledger-item ${esc(current)}" data-capsule-id="${esc(capsule.capsule_id)}" ${index===0?'open':''}>
       <summary>
         <span class="capsule-ledger-id">${esc(capsule.capsule_id)}</span>
         <div class="capsule-ledger-title"><strong>${esc(capsule.title||capsule.capsule_id)}</strong><small>${esc(capsule.workspace||'No workspace')} · ${esc(route)}</small></div>
@@ -1060,13 +1255,13 @@ function renderDebug(data){
 
 async function load(){
   try{
-    const [status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,openaiCompat,operationsData,observabilityData,alertsData,auditData,events,capsulesData,agentRuntimesData]=await Promise.all([
-      getJson('/api/status'),getJson('/api/workers'),getJson('/api/work?limit=100'),getJson('/api/sessions'),getJson('/api/gateway/sessions'),getJson('/api/managed/sessions'),getJson('/api/managed/workspaces'),getJson('/api/openai/compatibility'),getJson('/api/operations'),getJson('/api/observability'),getJson('/api/alerts?status=open&limit=20'),getJson('/api/audit?limit=30'),getJson('/api/events?limit=40'),getJson('/api/capsules?limit=100'),getJson('/api/agents/runtimes')
+    const [status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,openaiCompat,operationsData,observabilityData,alertsData,auditData,events,capsulesData,agentRuntimesData,reflexMetricsData]=await Promise.all([
+      getJson('/api/status'),getJson('/api/workers'),getJson('/api/work?limit=100'),getJson('/api/sessions'),getJson('/api/gateway/sessions'),getJson('/api/managed/sessions'),getJson('/api/managed/workspaces'),getJson('/api/openai/compatibility'),getJson('/api/operations'),getJson('/api/observability'),getJson('/api/alerts?status=open&limit=20'),getJson('/api/audit?limit=30'),getJson('/api/events?limit=40'),getJson('/api/capsules?limit=100'),getJson('/api/agents/runtimes'),getJson(`/api/reflex/metrics?window=${encodeURIComponent(reflexWindow)}&recent=20`).catch(()=>null)
     ]);
-    latestData={status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,openaiCompat,operationsData,observabilityData,alertsData,auditData,events,capsulesData,agentRuntimesData};
+    latestData={status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,openaiCompat,operationsData,observabilityData,alertsData,auditData,events,capsulesData,agentRuntimesData,reflexMetricsData};
     const studio=document.getElementById('studioStatus'); studio.className=`pill ${status.studio.status}`; studio.textContent=String(status.studio.status||'unknown').toUpperCase();
     document.getElementById('lastUpdated').textContent=`Updated ${new Date().toLocaleTimeString()} · ${status.studio.version}`;
-    renderOverview(latestData); renderCapsuleLedger(latestData); renderManagedSessions(latestData); renderSessions(latestData); renderWorkspaces(latestData); renderWorkers(latestData); renderTunnels(latestData); renderReliability(latestData); renderActivity(latestData); renderDebug(latestData); captureAndTranslateText(document);
+    renderOverview(latestData); renderReflexMetrics(latestData); renderCapsuleLedger(latestData); renderManagedSessions(latestData); renderSessions(latestData); renderWorkspaces(latestData); renderWorkers(latestData); renderTunnels(latestData); renderReliability(latestData); renderActivity(latestData); renderDebug(latestData); captureAndTranslateText(document);
   }catch(err){
     const studio=document.getElementById('studioStatus'); studio.className='pill down'; studio.textContent='UI ERROR';
     document.getElementById('lastUpdated').textContent=err.message;
@@ -1175,7 +1370,9 @@ async function runGlobalSearch(raw){
     [/(dashboard|home|overview)/,'home'],
     [/(capsule|session|handoff)/,'sessions'],
     [/(agent|claude|codex|hermes)/,'agents'],
+    [/(reflex|jev|decision engine|risk|teacher|agreement)/,'reflex'],
     [/(workspace|project)/,'workspaces'],
+    [/(guide|help|tutorial|how to|quick start)/,'guide'],
     [/(computer|browser|vnc|tool)/,'computer'],
     [/(system|health|slo|tunnel|alert|diagnostic|telemetry)/,'system'],
     [/(setting|theme|appearance|language|font|color scheme)/,'settings']
@@ -1184,7 +1381,7 @@ async function runGlobalSearch(raw){
   if(hit){setView(hit[1]);return;}
   await openAppDialog({
     title:'Search',
-    message:`No section matched “${raw}”. Try capsule, agent, workspace, computer, or settings.`,
+    message:`No section matched “${raw}”. Try capsule, agent, Reflex, workspace, guide, computer, or settings.`,
     icon:'⌕',
     tone:'info',
     confirmText:'Close',
@@ -1196,10 +1393,10 @@ document.querySelectorAll('.primary-nav a[data-view], .mobile-nav a[data-view]')
 document.addEventListener('click',e=>uiAction(async()=>{
   const copy=e.target.closest('[data-copy-command],[data-copy-source]'); if(copy){await copyChatGPTCommand(copy);return;}
   const settingsAction=e.target.closest('[data-settings-action]'); if(settingsAction){await handleSettingsAction(settingsAction.dataset.settingsAction);return;}
-  const scheme=e.target.closest('[data-color-scheme]'); if(scheme){applyColorScheme(scheme.dataset.colorScheme);return;}
+  const scheme=e.target.closest('button[data-color-scheme]'); if(scheme){applyColorScheme(scheme.dataset.colorScheme);return;}
   const agentCheck=e.target.closest('[data-agent-check]'); if(agentCheck){await checkAgentRuntime(agentCheck.dataset.agentCheck);return;}
   const agentDetails=e.target.closest('[data-agent-details]'); if(agentDetails){await showAgentRuntimeDetails(agentDetails.dataset.agentDetails);return;}
-  const go=e.target.closest('[data-go-view]'); if(go){setView(go.dataset.goView);return;}
+  const go=e.target.closest('[data-go-view]'); if(go){setView(go.dataset.goView);if(go.dataset.capsuleId){if(latestData)renderCapsuleLedger(latestData);const focused=focusCapsuleLedgerItem(go.dataset.capsuleId);if(!focused&&go.dataset.managedSessionId){renderManagedHistory(await getJson(`/api/managed/sessions/${encodeURIComponent(go.dataset.managedSessionId)}/history`));}}return;}
   const tunnel=e.target.closest('[data-tunnel-session]'); if(tunnel){sessionTunnelFilter=tunnel.dataset.tunnelSession;showSessionHistory=false;setView('sessions');if(latestData)renderSessions(latestData);return;}
   const restart=e.target.closest('[data-managed-restart]'); if(restart){await sendJson(`/api/managed/sessions/${encodeURIComponent(restart.dataset.managedRestart)}/restart`);await load();return;}
   const resume=e.target.closest('[data-managed-resume]'); if(resume){await sendJson(`/api/managed/sessions/${encodeURIComponent(resume.dataset.managedResume)}/resume`);await load();return;}
@@ -1258,6 +1455,8 @@ document.getElementById('registerWorkspaceBtn').addEventListener('click',()=>uiA
 document.getElementById('managedHistoryToggle').addEventListener('click',()=>{showManagedHistory=!showManagedHistory;if(latestData)renderManagedSessions(latestData);});
 document.getElementById('sessionTunnelFilter').addEventListener('change',e=>{sessionTunnelFilter=e.target.value||'';if(latestData)renderSessions(latestData);});
 document.getElementById('sessionHistoryToggle').addEventListener('click',()=>{showSessionHistory=!showSessionHistory;if(latestData)renderSessions(latestData);});
+document.getElementById('reflexWindowSelect')?.addEventListener('change',e=>uiAction(async()=>{reflexWindow=e.target.value||'24h';await refreshReflexMetrics();}));
+document.getElementById('reflexRefreshBtn')?.addEventListener('click',()=>uiAction(async()=>{const b=document.getElementById('reflexRefreshBtn');b.disabled=true;b.textContent=tr('Refreshing…');try{await refreshReflexMetrics();}finally{b.disabled=false;b.textContent=tr('Refresh metrics');}}));
 document.getElementById('refreshBtn').addEventListener('click',()=>uiAction(async()=>{const b=document.getElementById('refreshBtn');b.disabled=true;b.textContent=tr('Refreshing…');try{await load();}finally{b.disabled=false;b.textContent=tr('Refresh');}}));
 document.getElementById('pollBtn').addEventListener('click',()=>uiAction(async()=>{const b=document.getElementById('pollBtn');b.disabled=true;b.textContent=tr('Polling…');try{await getJson('/api/health/poll',{method:'POST'});await load();}finally{b.disabled=false;b.textContent=tr('Poll health');}}));
 document.getElementById('herdrBtn').addEventListener('click',()=>uiAction(async()=>{const b=document.getElementById('herdrBtn');b.disabled=true;b.textContent=tr('Refreshing…');try{await getJson('/api/herdr/refresh',{method:'POST'});await load();}finally{b.disabled=false;b.textContent=tr('Refresh Herdr');}}));
