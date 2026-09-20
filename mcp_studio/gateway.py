@@ -20,6 +20,12 @@ from .settings import Settings
 from .oauth import OAuthManager
 from .managed_sessions import ManagedSessionManager, ManagedSessionError, ManagedSessionConflict, WorkspaceNotAllowed
 from .tool_permissions import decide_tool_call
+from .jev_decision import evaluate_tool_call as evaluate_jev_tool_call
+from .reflex import (
+    append_dataset_record,
+    decision_fingerprint,
+    evaluate_tool_call as evaluate_reflex_tool_call,
+)
 
 
 CONTROL_TOOL_NAMES = (
@@ -1028,6 +1034,7 @@ class GatewaySessionManager:
         params = jsonrpc.get("params") if jsonrpc and isinstance(jsonrpc.get("params"), dict) else {}
         tool_name = str(params.get("name") or "") if rpc_method == "tools/call" else ""
         tool_args = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+        reflex_id: str | None = None
 
         def _decorate_local_response(response: Response) -> Response:
             response.headers["Mcp-Session-Id"] = gateway_session_id
@@ -1056,6 +1063,37 @@ class GatewaySessionManager:
                     status_code=200,
                     media_type="application/json",
                 )
+            )
+
+        async def record_reflex_outcome(status_code: int, transport: str) -> None:
+            if not reflex_id:
+                return
+            record = {
+                "kind": "outcome",
+                "reflex_id": reflex_id,
+                "request_id": jsonrpc.get("id") if jsonrpc else None,
+                "workspace_key": (
+                    managed_session.get("workspace_key")
+                    if isinstance(managed_session, dict)
+                    else None
+                ),
+                "tool": tool_name,
+                "outcome_level": "transport_only",
+                "transport": transport,
+                "upstream_status": int(status_code),
+                "http_success": int(status_code) < 400,
+            }
+            append_dataset_record(self.settings.studio, record)
+            await self.db.add_event(
+                "gateway.reflex.tool_outcome",
+                f"HIRDA Reflex upstream transport outcome HTTP {int(status_code)}.",
+                server_id=server.id,
+                data={
+                    "reflex_id": reflex_id,
+                    "gateway_session_id": gateway_session_id,
+                    "studio_session_id": session["studio_session_id"],
+                    **record,
+                },
             )
 
         if request.method == "POST" and rpc_method == "tools/call" and tool_name.startswith("mcpstudio_"):
@@ -1138,6 +1176,98 @@ class GatewaySessionManager:
                             "permission_class": decision.category,
                             "workspace_key": managed_session.get("workspace_key"),
                             "policy": decision.policy,
+                        },
+                        is_error=True,
+                    )
+
+                reflex_decision, reflex_features = evaluate_reflex_tool_call(
+                    self.settings.studio,
+                    tool_name,
+                    tool_args,
+                    decision.category,
+                )
+                reflex_id = decision_fingerprint(
+                    managed_session,
+                    reflex_features,
+                    jsonrpc.get("id") if jsonrpc else None,
+                )
+
+                # Jev is teacher/shadow evidence only. It never grants or blocks
+                # authority in the HIRDA runtime path.
+                jev_decision = await evaluate_jev_tool_call(
+                    self.settings.studio,
+                    managed_session,
+                    tool_name,
+                    tool_args,
+                    decision.category,
+                )
+                teacher_agreement = (
+                    jev_decision.action == reflex_decision.action
+                    if jev_decision.evaluated
+                    else None
+                )
+                append_dataset_record(
+                    self.settings.studio,
+                    {
+                        "kind": "decision",
+                        "reflex_id": reflex_id,
+                        "request_id": jsonrpc.get("id") if jsonrpc else None,
+                        "workspace_key": managed_session.get("workspace_key"),
+                        "features": reflex_features.as_dict(),
+                        "reflex": reflex_decision.as_dict(),
+                        "teacher": {
+                            "provider": "typesafe_jev",
+                            "enabled": jev_decision.enabled,
+                            "evaluated": jev_decision.evaluated,
+                            "action": jev_decision.action if jev_decision.evaluated else None,
+                            "confidence": jev_decision.confidence if jev_decision.evaluated else None,
+                            "model": jev_decision.model,
+                            "error": jev_decision.error,
+                            "agreement": teacher_agreement,
+                        },
+                    },
+                )
+                if reflex_decision.enabled:
+                    await self.db.add_event(
+                        "gateway.reflex.tool_decision",
+                        reflex_decision.message,
+                        server_id=server.id,
+                        data={
+                            "reflex_id": reflex_id,
+                            "gateway_session_id": gateway_session_id,
+                            "studio_session_id": session["studio_session_id"],
+                            "managed_session_id": session.get("managed_session_id"),
+                            "workspace_key": managed_session.get("workspace_key"),
+                            "tool": tool_name,
+                            "permission_class": decision.category,
+                            "reflex": reflex_decision.as_dict(),
+                            "teacher": {
+                                "provider": "typesafe_jev",
+                                "evaluated": jev_decision.evaluated,
+                                "action": jev_decision.action if jev_decision.evaluated else None,
+                                "confidence": jev_decision.confidence if jev_decision.evaluated else None,
+                                "model": jev_decision.model,
+                                "agreement": teacher_agreement,
+                                "error": jev_decision.error,
+                            },
+                        },
+                    )
+                if reflex_decision.blocked:
+                    return local_tool_response(
+                        {
+                            "error": reflex_decision.code,
+                            "message": reflex_decision.message,
+                            "tool": tool_name,
+                            "permission_class": decision.category,
+                            "workspace_key": managed_session.get("workspace_key"),
+                            "reflex": {
+                                "version": reflex_decision.version,
+                                "action": reflex_decision.action,
+                                "risk": reflex_decision.risk,
+                                "confidence": reflex_decision.confidence,
+                                "compute_lane": reflex_decision.compute_lane,
+                                "signals": list(reflex_decision.signals),
+                            },
                         },
                         is_error=True,
                     )
@@ -1265,7 +1395,10 @@ class GatewaySessionManager:
             status_code = response.status_code
             await response.aclose()
             await client.aclose()
+            await record_reflex_outcome(status_code, "buffered")
             return Response(content=content, status_code=status_code, headers=response_headers)
+
+        await record_reflex_outcome(response.status_code, "streaming")
 
         async def body_iter() -> AsyncIterator[bytes]:
             try:
