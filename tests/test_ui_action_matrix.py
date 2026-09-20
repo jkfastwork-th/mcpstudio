@@ -23,6 +23,7 @@ STATIC_DIRECT_HANDLERS = {
     "fontResetBtn": "fontResetBtn').addEventListener('click'",
     "fontIncreaseBtn": "fontIncreaseBtn').addEventListener('click'",
     "refreshBtn": "refreshBtn').addEventListener('click'",
+    "reflexRefreshBtn": "reflexRefreshBtn')?.addEventListener('click'",
     "managedHistoryToggle": "managedHistoryToggle').addEventListener('click'",
     "newManagedSessionBtn": "newManagedSessionBtn').addEventListener('click'",
     "cancelManagedSessionBtn": "cancelManagedSessionBtn').addEventListener('click'",
