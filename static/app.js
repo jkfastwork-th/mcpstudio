@@ -1797,15 +1797,3 @@ document.addEventListener('click',function(event){
   const target=document.getElementById(proxy.dataset.proxyClick||'');
   if(target)target.click();
 });
-const referenceLanguageSelect=document.getElementById('referenceLanguageSelect');
-const hiddenLanguageSelect=document.getElementById('languageSelect');
-if(referenceLanguageSelect&&hiddenLanguageSelect){
-  referenceLanguageSelect.value=hiddenLanguageSelect.value||'en';
-  referenceLanguageSelect.addEventListener('change',function(){
-    hiddenLanguageSelect.value=referenceLanguageSelect.value;
-    hiddenLanguageSelect.dispatchEvent(new Event('change',{bubbles:true}));
-  });
-  hiddenLanguageSelect.addEventListener('change',function(){
-    referenceLanguageSelect.value=hiddenLanguageSelect.value;
-  });
-}

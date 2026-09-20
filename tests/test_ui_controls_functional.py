@@ -14,7 +14,9 @@ def test_settings_contains_only_preferences_not_operations():
     )[0]
     assert "reference-settings-content" in settings
     assert "reference-theme-toggle" in settings
-    assert "referenceLanguageSelect" in settings
+    assert "referenceLanguageSelect" not in settings
+    assert 'id="languageSelect"' in HTML
+    assert 'topbar-language-control' in HTML
     assert "reference-color-schemes" in settings
     assert "reference-settings-tabs" not in settings
     for operational_id in ("tunnelsPanel", "sloPanel", "advancedDiagnostics", "workersPanel", "operationsPanel"):

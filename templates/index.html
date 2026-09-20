@@ -66,10 +66,10 @@
 </div>
 </div>
 <div class="header-actions focus-actions">
-<div class="reference-topbar-tools"><label class="reference-search" aria-label="Search"><span aria-hidden="true">⌕</span><input id="globalSearch" type="search" placeholder="Search capsules, tasks, or workspaces…"/></label><button class="reference-icon-button" id="notificationBtn" type="button" aria-label="Notifications" data-help="Show current open alerts."><span aria-hidden="true">♧</span><i></i></button><span class="reference-avatar" aria-label="Signed in as JK">JK</span></div>
+<div class="reference-topbar-tools"><label class="reference-search" aria-label="Search"><span aria-hidden="true">⌕</span><input id="globalSearch" type="search" placeholder="Search capsules, tasks, or workspaces…"/></label><div class="language-control topbar-language-control" data-help="Change interface language. Your choice is saved in this browser."><label class="language-label" for="languageSelect">Language</label><select aria-label="Interface language" class="language-select" id="languageSelect"><option value="en">English</option><option value="th">ไทย</option></select></div><button class="reference-icon-button" id="notificationBtn" type="button" aria-label="Notifications" data-help="Show current open alerts."><span aria-hidden="true">♧</span><i></i></button><span class="reference-avatar" aria-label="Signed in as JK">JK</span></div>
 <span class="muted" id="lastUpdated">Waiting…</span>
 <div class="topbar-preference-controls" hidden>
-<div class="language-control" data-help="Change interface language. Your choice is saved in this browser."><label class="language-label" for="languageSelect">Language</label><select aria-label="Interface language" class="language-select" id="languageSelect"><option value="en">English</option><option value="th">ไทย</option></select></div><div aria-label="Color theme" class="theme-control" data-help="Switch between Light and Dark. Your choice is saved in this browser." role="group">
+<div aria-label="Color theme" class="theme-control" data-help="Switch between Light and Dark. Your choice is saved in this browser." role="group">
 <button aria-label="Use light theme" class="theme-button" data-help="Use the HIRDA light theme." id="themeLightBtn" type="button"><span aria-hidden="true">☀</span><span>Light</span></button>
 <button aria-label="Use dark theme" class="theme-button" data-help="Use the HIRDA dark theme." id="themeDarkBtn" type="button"><span aria-hidden="true">☾</span><span>Dark</span></button>
 </div>
@@ -288,18 +288,14 @@
 </section>
 <section class="view-page" data-page="settings">
 <div class="page-section-head focus-page-head">
-<div><span class="eyebrow">SETTINGS</span><h2>Settings</h2><p>Configure appearance, language, text size, and color preferences.</p></div>
+<div><span class="eyebrow">SETTINGS</span><h2>Settings</h2><p>Configure appearance, text size, and color preferences.</p></div>
 </div>
 <div class="reference-settings-layout settings-only-layout panel-card">
   <section class="reference-settings-content">
-    <div class="reference-settings-head"><div><h3>Appearance</h3><p>Theme, language, text size, and color scheme.</p></div></div>
+    <div class="reference-settings-head"><div><h3>Appearance</h3><p>Theme, text size, and color scheme.</p></div></div>
     <div class="reference-setting-group">
       <span class="reference-setting-label">Theme</span>
       <div class="reference-segmented reference-theme-toggle"><button class="reference-theme-light" data-proxy-click="themeLightBtn" type="button"><i class="setting-radio"></i>Light</button><button class="reference-theme-dark" data-proxy-click="themeDarkBtn" type="button"><i class="setting-radio"></i>Dark</button></div>
-    </div>
-    <div class="reference-setting-group">
-      <span class="reference-setting-label">Language</span>
-      <select class="reference-settings-select" id="referenceLanguageSelect" aria-label="Settings language"><option value="en">English</option><option value="th">ไทย</option></select>
     </div>
     <div class="reference-setting-group">
       <span class="reference-setting-label">Text size</span>
