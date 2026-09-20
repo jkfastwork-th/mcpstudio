@@ -47,6 +47,7 @@
 <a class="active" data-help="Live capsule routing, active agent lanes, handoffs, and system health." data-view="home" href="#home"><span>▣</span>Dashboard</a>
 <a data-help="Inspect capsule state, routing, handoffs, and session history." data-view="sessions" href="#sessions"><span>◉</span>Capsule Lanes</a>
 <a data-help="Monitor Claude, Codex, and Hermes runtime availability." data-view="agents" href="#agents"><span>◈</span>Agents</a>
+<a data-help="Inspect HIRDA Reflex decisions, JEV teacher agreement, latency, risk, and dataset growth." data-view="reflex" href="#reflex"><span>◇</span>Reflex</a>
 <a data-help="Approved project folders, managed sessions and workspace safety." data-view="workspaces" href="#workspaces"><span>▢</span>Workspaces</a>
 <a data-help="Quick start, daily workflow, setup, and troubleshooting guidance." data-view="guide" href="#guide"><span>?</span>Guide</a>
 <a data-help="Shared browser desktop for OAuth, login and consent screens." data-view="computer" href="#computer"><span>▤</span>Computer</a>
@@ -186,6 +187,20 @@
 </div>
 <div class="agent-runtime-grid" id="agentRuntimeGrid"></div>
 </section>
+
+<section class="view-page" data-page="reflex">
+<div class="page-section-head focus-page-head reflex-page-head">
+  <div><span class="eyebrow">DECISION ENGINE</span><h2>Reflex</h2><p>Observe HIRDA Reflex decisions, JEV teacher agreement, latency, risk, and dataset growth.</p></div>
+  <div class="toolbar reflex-toolbar">
+    <label class="reflex-window-control"><span>Window</span><select id="reflexWindowSelect"><option value="1h">1 hour</option><option value="24h" selected>24 hours</option><option value="7d">7 days</option><option value="30d">30 days</option></select></label>
+    <button class="button secondary small" id="reflexRefreshBtn" type="button">Refresh metrics</button>
+  </div>
+</div>
+<div id="reflexMetricsPanel" class="reflex-metrics-root">
+  <div class="panel-card"><div class="empty">Loading Reflex metrics…</div></div>
+</div>
+</section>
+
 <section class="view-page" data-page="guide">
 <div class="page-section-head focus-page-head">
 <div><span class="eyebrow">HOW TO USE</span><h2>Guide</h2><p>Quick start for daily work, plus setup and troubleshooting when you need it.</p></div>
@@ -403,6 +418,7 @@
 <a class="active" data-view="home" href="#home"><span>▣</span><small>Dashboard</small></a>
 <a data-view="sessions" href="#sessions"><span>◉</span><small>Capsule Lanes</small></a>
 <a data-view="agents" href="#agents"><span>◈</span><small>Agents</small></a>
+<a data-view="reflex" href="#reflex"><span>◇</span><small>Reflex</small></a>
 <a data-view="workspaces" href="#workspaces"><span>▢</span><small>Workspaces</small></a>
 <a data-view="guide" href="#guide"><span>?</span><small>Guide</small></a>
 <a data-view="computer" href="#computer"><span>▤</span><small>Computer</small></a>

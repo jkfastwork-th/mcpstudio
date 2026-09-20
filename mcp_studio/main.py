@@ -38,6 +38,7 @@ from .oauth import OAuthManager, OAuthError
 from .operations import OperationsManager
 from .observability import ObservabilityManager
 from .computer import ComputerUseManager
+from .reflex_metrics import ReflexMetrics
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -58,6 +59,7 @@ gateway_sessions = GatewaySessionManager(settings, db, oauth, managed_sessions)
 operations = OperationsManager(settings, db)
 observability = ObservabilityManager(settings, db)
 computer = ComputerUseManager(settings.studio, db)
+reflex_metrics = ReflexMetrics(settings.studio)
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
 
 
@@ -394,6 +396,11 @@ async def api_status():
         "servers": snapshots,
         "tunnels": await db.list_tunnels(),
     }
+
+
+@app.get("/api/reflex/metrics")
+async def reflex_metrics_status(window: str = "24h", recent: int = 20):
+    return reflex_metrics.snapshot(window=window, recent=recent)
 
 
 @app.post("/api/health/poll")
