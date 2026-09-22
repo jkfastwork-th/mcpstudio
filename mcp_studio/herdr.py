@@ -90,11 +90,16 @@ class HerdrManager:
     def _server(self):
         return next(s for s in self.settings.servers if s.id == self.settings.studio.worker_server_id)
 
-    def client(self) -> MCPClient:
+    def client(self, *, timeout: float | None = None) -> MCPClient:
         server = self._server()
+        resolved_timeout = (
+            float(timeout)
+            if timeout is not None
+            else float(self.settings.studio.request_timeout_seconds)
+        )
         return MCPClient(
             server.url,
-            timeout=self.settings.studio.request_timeout_seconds,
+            timeout=resolved_timeout,
             protocol_version=server.protocol_version,
         )
 

@@ -97,6 +97,16 @@ studio:
   #jev_evaluate_read_tools: false
   #jev_max_state_chars: 12000
 
+  # JAA-2 generic ActionProvider registry. Entry-point loading executes trusted
+  # installed provider package code, so discovery is opt-in.
+  #action_provider_entrypoints_enabled: false
+  #action_provider_entrypoint_group: hirda.action_providers
+
+  # HCR cognitive fabric. Plan/shadow mode and execution are separate gates.
+  #cognitive_router_enabled: false
+  #cognitive_router_execute_enabled: false
+  #cognitive_router_default_timeout_seconds: 30.0
+
   # M6.2.5 Computer Use / Web VNC MVP.
   #computer_use_enabled: false
   #computer_vnc_host: 127.0.0.1

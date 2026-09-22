@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hirda.local/schemas/hirda-action-provider-registry-v1.schema.json",
+  "title": "HIRDA Action Provider Registry v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "providers",
+    "provider_count",
+    "entrypoint_group",
+    "discovery_errors",
+    "allow_executors",
+    "executor_attached"
+  ],
+  "properties": {
+    "schema": {
+      "const": "hirda-action-provider-registry-v1"
+    },
+    "providers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/provider"
+      }
+    },
+    "provider_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "entrypoint_group": {
+      "type": "string",
+      "minLength": 1
+    },
+    "discovery_errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["entry_point", "error"],
+        "properties": {
+          "entry_point": {"type": "string"},
+          "error": {"type": "string"}
+        }
+      }
+    },
+    "allow_executors": {
+      "const": false
+    },
+    "executor_attached": {
+      "const": false
+    }
+  },
+  "$defs": {
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_id",
+        "domain",
+        "title",
+        "description",
+        "source",
+        "executor_attached",
+        "action_count",
+        "status",
+        "error"
+      ],
+      "properties": {
+        "provider_id": {"type": "string", "minLength": 1},
+        "domain": {"type": "string", "minLength": 1},
+        "title": {"type": "string", "minLength": 1},
+        "description": {"type": "string"},
+        "source": {"type": "string", "minLength": 1},
+        "executor_attached": {"const": false},
+        "action_count": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "status": {
+          "enum": ["ready", "invalid"]
+        },
+        "error": {
+          "type": ["string", "null"]
+        }
+      }
+    }
+  }
+}

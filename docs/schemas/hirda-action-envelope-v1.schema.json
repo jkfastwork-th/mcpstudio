@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hirda.local/schemas/hirda-action-envelope-v1.schema.json",
+  "title": "HIRDA Action Envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "request_id",
+    "provider",
+    "domain",
+    "goal",
+    "state",
+    "actions"
+  ],
+  "properties": {
+    "schema": {
+      "const": "hirda-action-envelope-v1"
+    },
+    "request_id": {
+      "$ref": "#/$defs/id"
+    },
+    "provider": {
+      "$ref": "#/$defs/id"
+    },
+    "domain": {
+      "$ref": "#/$defs/id"
+    },
+    "goal": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "state": {
+      "type": "object"
+    },
+    "metadata": {
+      "type": "object"
+    },
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/action"
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$"
+    },
+    "risk": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "consequential": {
+          "type": "boolean",
+          "default": false
+        },
+        "reversible": {
+          "type": "boolean",
+          "default": true
+        },
+        "external_side_effect": {
+          "type": "boolean",
+          "default": false
+        },
+        "destructive": {
+          "type": "boolean",
+          "default": false
+        },
+        "financial": {
+          "type": "boolean",
+          "default": false
+        },
+        "requires_human_approval": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action_id",
+        "operation",
+        "title",
+        "permission_class"
+      ],
+      "properties": {
+        "action_id": {
+          "$ref": "#/$defs/id"
+        },
+        "operation": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "permission_class": {
+          "enum": [
+            "read",
+            "write",
+            "execute",
+            "destructive",
+            "unknown"
+          ]
+        },
+        "arguments": {
+          "type": "object"
+        },
+        "constraints": {
+          "type": "object"
+        },
+        "risk": {
+          "$ref": "#/$defs/risk"
+        }
+      }
+    }
+  }
+}

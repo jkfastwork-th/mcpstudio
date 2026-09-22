@@ -318,6 +318,20 @@ class AgentRuntimeInventory:
                     "detail": f"Hermes reports {provider} logged in.",
                 }
             if "logged out" in lower:
+                raw_output = str(probe.get("stdout") or "").strip()
+                custom_prefix = lower.startswith(("custom:", "local:"))
+                custom_provider = custom_prefix or str(provider).casefold().startswith(("custom:", "local:"))
+                if custom_provider:
+                    custom_id = str(provider or raw_output.split(":")[0] if raw_output else "unknown")
+                    return {
+                        "status": "configured",
+                        "authenticated": None,
+                        "source": "hermes_custom_provider",
+                        "detail": (
+                            f"Hermes custom provider {custom_id} has no Hermes-managed login; "
+                            "runtime availability must be verified by the configured backend."
+                        ),
+                    }
                 return {
                     "status": "error",
                     "authenticated": False,

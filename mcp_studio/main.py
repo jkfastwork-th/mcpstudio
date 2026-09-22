@@ -41,6 +41,9 @@ from .observability import ObservabilityManager
 from .computer import ComputerUseManager
 from .graft import GraftManager, GraftError
 from .reflex_metrics import ReflexMetrics
+from .action_adapter import evaluate_action_envelope
+from .action_registry import ActionProviderRegistryError, build_action_provider_registry
+from .cognitive_router import CognitiveRouter, CognitiveRouterError
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -63,6 +66,8 @@ operations = OperationsManager(settings, db)
 observability = ObservabilityManager(settings, db)
 computer = ComputerUseManager(settings.studio, db)
 reflex_metrics = ReflexMetrics(settings.studio)
+action_provider_registry = build_action_provider_registry(settings.studio)
+cognitive_router = CognitiveRouter(settings.studio, herdr, agent_runtimes)
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
 
 
@@ -404,6 +409,81 @@ async def api_status():
 @app.get("/api/reflex/metrics")
 async def reflex_metrics_status(window: str = "24h", recent: int = 20):
     return reflex_metrics.snapshot(window=window, recent=recent)
+
+
+@app.get("/api/action-adapter/registry")
+async def action_adapter_registry_status():
+    return await action_provider_registry.snapshot()
+
+
+@app.get("/api/action-adapter/providers")
+async def action_adapter_providers():
+    return await action_provider_registry.snapshot()
+
+
+@app.get("/api/action-adapter/providers/{provider_id}")
+async def action_adapter_provider(provider_id: str):
+    try:
+        return await action_provider_registry.provider_detail(provider_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unknown action provider") from exc
+    except ActionProviderRegistryError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/action-adapter/providers/{provider_id}/evaluate")
+async def action_adapter_evaluate(provider_id: str):
+    try:
+        registration = action_provider_registry.get(provider_id)
+        envelope = await action_provider_registry.build_envelope(provider_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unknown action provider") from exc
+    except ActionProviderRegistryError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    judgment = await evaluate_action_envelope(settings.studio, envelope)
+    return {
+        "schema": "hirda-action-playground-result-v1",
+        "provider": registration.summary(action_count=len(envelope.actions)),
+        "envelope": envelope.as_dict(),
+        "judgment": judgment.as_dict(),
+        "executor_attached": False,
+        "execution_performed": False,
+    }
+
+
+@app.get("/api/cognition/status")
+async def cognitive_router_status():
+    snapshot = agent_runtimes.snapshot(force=False)
+    return {
+        "schema": "hirda-cognitive-status-v1",
+        "enabled": bool(settings.studio.cognitive_router_enabled),
+        "execute_enabled": bool(settings.studio.cognitive_router_execute_enabled),
+        "runtimes": snapshot,
+        "identity_authority": "external",
+        "semantic_authority": "nova",
+    }
+
+
+@app.post("/api/cognition/plan")
+async def cognitive_router_plan(payload: dict[str, Any]):
+    if not settings.studio.cognitive_router_enabled:
+        raise HTTPException(status_code=503, detail="HIRDA cognitive router is disabled")
+    try:
+        return await cognitive_router.plan(payload)
+    except CognitiveRouterError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/cognition/execute")
+async def cognitive_router_execute(payload: dict[str, Any]):
+    if not settings.studio.cognitive_router_enabled:
+        raise HTTPException(status_code=503, detail="HIRDA cognitive router is disabled")
+    if not settings.studio.cognitive_router_execute_enabled:
+        raise HTTPException(status_code=503, detail="HIRDA cognitive execution is disabled")
+    try:
+        return (await cognitive_router.execute(payload)).as_dict()
+    except CognitiveRouterError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/health/poll")

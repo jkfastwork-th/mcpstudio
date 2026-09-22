@@ -145,6 +145,19 @@ class StudioConfig:
     jev_evaluate_read_tools: bool = False
     jev_max_state_chars: int = 12000
 
+    # JAA-2 generic ActionProvider registry. Built-in test providers are always
+    # local; external Python entry-point discovery is opt-in because loading an
+    # entry point executes installed package code.
+    action_provider_entrypoints_enabled: bool = False
+    action_provider_entrypoint_group: str = "hirda.action_providers"
+
+    # HCR cognitive fabric. Routing can be exposed in shadow/plan mode without
+    # permitting HIRDA to dispatch prompts. Execution is a separate opt-in gate
+    # so Nova can canary route decisions before any runtime authority changes.
+    cognitive_router_enabled: bool = False
+    cognitive_router_execute_enabled: bool = False
+    cognitive_router_default_timeout_seconds: float = 30.0
+
     # M6.2.4 lifecycle polish. Zero keeps idle auto-stop disabled by default;
     # operators can opt in once their workload pattern is understood.
     managed_session_idle_stop_seconds: int = 0

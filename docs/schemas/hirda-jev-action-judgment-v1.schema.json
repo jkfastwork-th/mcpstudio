@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hirda.local/schemas/hirda-jev-action-judgment-v1.schema.json",
+  "title": "HIRDA JEV Action Judgment v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "enabled",
+    "evaluated",
+    "mode",
+    "request_id",
+    "provider",
+    "domain",
+    "selected_action_id",
+    "confidence",
+    "probabilities",
+    "model",
+    "error",
+    "advisory_only",
+    "runtime_authorization_required",
+    "may_execute",
+    "external_action_authority"
+  ],
+  "properties": {
+    "schema": {
+      "const": "hirda-jev-action-judgment-v1"
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "evaluated": {
+      "type": "boolean"
+    },
+    "mode": {
+      "enum": ["shadow", "teacher", "enforce"]
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "provider": {
+      "type": "string"
+    },
+    "domain": {
+      "type": "string"
+    },
+    "selected_action_id": {
+      "type": ["string", "null"]
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "probabilities": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      }
+    },
+    "needs_human_review": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "needs_more_information": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "consequence_risk": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "uncertainty": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "model": {
+      "type": ["string", "null"]
+    },
+    "error": {
+      "type": ["string", "null"]
+    },
+    "advisory_only": {
+      "const": true
+    },
+    "runtime_authorization_required": {
+      "const": true
+    },
+    "may_execute": {
+      "const": false
+    },
+    "external_action_authority": {
+      "const": false
+    }
+  }
+}
