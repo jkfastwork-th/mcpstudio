@@ -417,8 +417,8 @@ async def evaluate_cognitive_request(studio: Any, request: CognitiveRequest) -> 
 class CognitiveRouter:
     """HIRDA-owned cognitive routing across live agent runtimes.
 
-    Nova remains the semantic authority. HIRDA selects a compute lane/runtime and
-    can fail over between compatible runtimes. JEV is teacher evidence only.
+    Semantic authority remains external to HIRDA. HIRDA selects a compute
+    lane/runtime and can fail over between compatible runtimes. JEV is teacher evidence only.
     """
 
     def __init__(self, studio: Any, herdr: HerdrManager, runtimes: Any) -> None:

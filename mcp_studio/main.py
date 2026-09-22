@@ -460,7 +460,7 @@ async def cognitive_router_status():
         "execute_enabled": bool(settings.studio.cognitive_router_execute_enabled),
         "runtimes": snapshot,
         "identity_authority": "external",
-        "semantic_authority": "nova",
+        "semantic_authority": "external",
     }
 
 

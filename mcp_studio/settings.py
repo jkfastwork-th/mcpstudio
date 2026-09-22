@@ -153,7 +153,7 @@ class StudioConfig:
 
     # HCR cognitive fabric. Routing can be exposed in shadow/plan mode without
     # permitting HIRDA to dispatch prompts. Execution is a separate opt-in gate
-    # so Nova can canary route decisions before any runtime authority changes.
+    # so consumers can canary route decisions before any runtime authority changes.
     cognitive_router_enabled: bool = False
     cognitive_router_execute_enabled: bool = False
     cognitive_router_default_timeout_seconds: float = 30.0

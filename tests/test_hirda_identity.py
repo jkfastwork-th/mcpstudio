@@ -25,3 +25,13 @@ def test_hirda_m1_preserves_legacy_infrastructure_namespace():
     service = (ROOT / "systemd" / "mcp-studio.service").read_text()
     assert "mcp-studio" in service
     assert (ROOT / "HIRDA_M1_IDENTITY_PRODUCT_BOUNDARY.md").is_file()
+
+
+def test_hirda_core_does_not_hardcode_nova_semantics():
+    for relative in (
+        "mcp_studio/cognitive_router.py",
+        "mcp_studio/main.py",
+        "mcp_studio/settings.py",
+    ):
+        source = (ROOT / relative).read_text()
+        assert "nova" not in source.casefold(), relative

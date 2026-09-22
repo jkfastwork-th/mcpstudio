@@ -20,7 +20,7 @@ def _assert_status(client: httpx.Client) -> None:
     snapshot = status.json()
     assert snapshot["enabled"] is True
     assert snapshot["execute_enabled"] is True
-    assert snapshot["semantic_authority"] == "nova"
+    assert snapshot["semantic_authority"] == "external"
 
 
 def _run_case(

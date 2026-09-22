@@ -718,7 +718,7 @@ async def test_deep_lane_fails_over_from_claude_to_hermes():
 
 
 @pytest.mark.asyncio
-async def test_plan_keeps_jev_advisory_and_nova_semantic_authority():
+async def test_plan_keeps_jev_advisory_and_external_semantic_authority():
     router = CognitiveRouter(studio(), FakeHerdr(), FakeRuntimes())
     plan = await router.plan(
         {
