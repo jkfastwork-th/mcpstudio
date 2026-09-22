@@ -2866,6 +2866,67 @@ class Database:
 
         return await self._run(op)
 
+    async def record_session_handoff_event(
+        self,
+        *,
+        managed_session_id: str,
+        source_gateway_session_id: str,
+        source_studio_session_id: str | None,
+        source_client_id: str | None,
+        target_gateway_session_id: str,
+        target_studio_session_id: str | None,
+        target_client_id: str | None,
+        summary: str,
+        reason: str | None = None,
+        state: str = "observed",
+    ) -> dict[str, Any]:
+        """Persist a non-token handoff/continuation event for telemetry.
+
+        This records cross-conversation continuity that happened through normal
+        session selection. It deliberately does not participate in the pending
+        token claim state machine and therefore never transfers ownership or
+        invalidates an explicit handoff token.
+        """
+        if source_gateway_session_id == target_gateway_session_id:
+            raise ValueError("session handoff source and target gateway must differ")
+        handoff_id = f"msh-{uuid.uuid4().hex[:16]}"
+        token_hash = f"event:{uuid.uuid4().hex}"
+        now = _now()
+        clean_summary = str(summary or "").strip()[:12000]
+        clean_reason = str(reason or "").strip()[:500] or None
+        clean_state = str(state or "observed").strip() or "observed"
+
+        def op() -> None:
+            with self._connect() as db:
+                db.execute(
+                    """INSERT INTO session_handoffs
+                       (id, token_hash, managed_session_id, source_gateway_session_id,
+                        source_studio_session_id, source_client_id,
+                        target_gateway_session_id, target_studio_session_id, target_client_id,
+                        state, summary, reason, created_at, expires_at, claimed_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        handoff_id,
+                        token_hash,
+                        managed_session_id,
+                        source_gateway_session_id,
+                        source_studio_session_id,
+                        source_client_id,
+                        target_gateway_session_id,
+                        target_studio_session_id,
+                        target_client_id,
+                        clean_state,
+                        clean_summary,
+                        clean_reason,
+                        now,
+                        now,
+                        now,
+                    ),
+                )
+
+        await self._run(op)
+        return await self.get_session_handoff(handoff_id)
+
     async def list_session_handoffs(self, managed_session_id: str, limit: int = 100) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 500))
 

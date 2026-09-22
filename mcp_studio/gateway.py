@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import secrets
 import time
 from collections.abc import AsyncIterator
@@ -353,10 +354,15 @@ class GatewaySessionManager:
             },
             {
                 "name": "mcpstudio_use_session",
-                "description": "Attach this MCP transport to an existing managed session. Future Serena calls use that session's pinned project.",
+                "description": "Attach this MCP transport to an existing managed session. Accepts an id/name or plain-language request such as 'continue HIRDA', 'go back to Nova', or Thai equivalents.",
                 "inputSchema": {
-                    "type": "object", "properties": {"session": {"type": "string"}},
-                    "required": ["session"], "additionalProperties": False,
+                    "type": "object",
+                    "properties": {
+                        "session": {"type": "string"},
+                        "request": {"type": "string"},
+                        "record_handoff": {"type": "boolean", "default": True},
+                    },
+                    "additionalProperties": False,
                 },
             },
             {
@@ -586,6 +592,164 @@ class GatewaySessionManager:
             if len(matches) > 1:
                 raise ManagedSessionConflict(f"managed session name is ambiguous: {value}")
             raise ManagedSessionError(f"unknown managed session: {value}")
+
+    async def resolve_session_natural(self, gateway_session_id: str, text: str) -> dict[str, Any]:
+        """Resolve plain-language session references into a managed session.
+
+        Exact id/name/workspace matches win first. Otherwise score workspace/name/path
+        token overlap plus continuity cues such as "continue", "same", or Thai equivalents.
+        The resolver only auto-selects when the winner is unambiguous; callers receive
+        candidates instead of silently binding the wrong project.
+        """
+        if not self.managed_sessions:
+            raise ManagedSessionError("managed sessions are unavailable")
+        query = str(text or "").strip()
+        if not query:
+            raise ManagedSessionError("session request is required")
+
+        sessions = await self.managed_sessions.list_sessions()
+        lowered = query.casefold()
+        norm = re.sub(r"[^a-z0-9ก-๙_/.-]+", " ", lowered).strip()
+        tokens = {t for t in norm.split() if len(t) >= 2}
+
+        # First preserve deterministic exact selectors.
+        for item in sessions:
+            exact_values = {
+                str(item.get("id") or "").casefold(),
+                str(item.get("name") or "").casefold(),
+                str(item.get("workspace_key") or "").casefold(),
+                str(item.get("project_path") or "").casefold(),
+            }
+            if lowered in exact_values:
+                return {"session": item, "confidence": 1.0, "reason": "exact", "candidates": [item]}
+
+        continuity_words = (
+            "continue", "resume", "same", "previous", "last", "before", "เดิม", "ต่อ", "ต่อจาก",
+            "เมื่อกี้", "ก่อน", "แชตก่อน", "งานเดิม", "ไปต่อ", "กลับไป",
+        )
+        wants_continuity = any(word in lowered for word in continuity_words)
+        current_gateway = await self.db.get_gateway_session(gateway_session_id)
+        current_managed = str(current_gateway.get("managed_session_id") or "").strip()
+
+        scored: list[tuple[float, dict[str, Any], list[str]]] = []
+        for item in sessions:
+            haystacks = [
+                str(item.get("name") or ""),
+                str(item.get("workspace_key") or ""),
+                str(item.get("project_path") or ""),
+            ]
+            item_tokens: set[str] = set()
+            for value in haystacks:
+                item_tokens.update(
+                    t for t in re.sub(r"[^a-z0-9ก-๙_/.-]+", " ", value.casefold()).split() if len(t) >= 2
+                )
+            overlap = sorted(tokens & item_tokens)
+            score = float(len(overlap) * 10)
+            reasons: list[str] = []
+            if overlap:
+                reasons.append("token:" + ",".join(overlap[:6]))
+            if any(lowered and lowered in value.casefold() for value in haystacks):
+                score += 35.0
+                reasons.append("substring")
+            if wants_continuity:
+                # Prefer recent work, but not enough to beat an explicit topic/name match.
+                use_count = float(item.get("use_count") or 0)
+                score += min(use_count / 1000.0, 1.0)
+                if item.get("id") == current_managed:
+                    score += 8.0
+                    reasons.append("current")
+                last_used = str(item.get("last_used_at") or "")
+                if last_used:
+                    score += 2.0
+                    reasons.append("recent")
+            scored.append((score, item, reasons))
+
+        scored.sort(key=lambda row: (row[0], str(row[1].get("last_used_at") or "")), reverse=True)
+        viable = [row for row in scored if row[0] > 0]
+        if not viable and wants_continuity:
+            viable = scored[:3]
+        if not viable:
+            raise ManagedSessionError(f"could not resolve session from natural language: {query}")
+
+        top_score, top, top_reasons = viable[0]
+        second_score = viable[1][0] if len(viable) > 1 else -1.0
+        unambiguous = top_score >= 10.0 and (top_score - second_score >= 5.0 or len(viable) == 1)
+        if wants_continuity and not unambiguous and top_score >= 2.0 and top_score > second_score:
+            unambiguous = True
+        if not unambiguous:
+            return {
+                "session": None,
+                "confidence": 0.0,
+                "reason": "ambiguous",
+                "candidates": [row[1] for row in viable[:5]],
+            }
+        confidence = min(0.99, 0.55 + min(top_score, 44.0) / 100.0)
+        return {
+            "session": top,
+            "confidence": confidence,
+            "reason": ";".join(top_reasons) or "continuity",
+            "candidates": [row[1] for row in viable[:5]],
+        }
+
+    async def _record_observed_cross_chat_handoff(
+        self,
+        gateway_session_id: str,
+        managed_session: dict[str, Any],
+        *,
+        summary: str,
+        reason: str,
+        actor: str = "chatgpt/mcp",
+    ) -> dict[str, Any] | None:
+        """Record cross-conversation continuation without forcing ownership transfer."""
+        target = await self.db.get_gateway_session(gateway_session_id)
+        target_client = str(target.get("client_id") or "")
+        gateways = await self.db.list_gateway_sessions_for_managed_session(managed_session["id"])
+        source = next(
+            (
+                item for item in gateways
+                if item.get("id") != gateway_session_id
+                and item.get("status") == "connected"
+                and str(item.get("client_id") or "") != target_client
+            ),
+            None,
+        )
+        if source is None:
+            source = next(
+                (
+                    item for item in gateways
+                    if item.get("id") != gateway_session_id
+                    and str(item.get("client_id") or "") != target_client
+                ),
+                None,
+            )
+        if source is None:
+            return None
+        event = await self.db.record_session_handoff_event(
+            managed_session_id=managed_session["id"],
+            source_gateway_session_id=str(source["id"]),
+            source_studio_session_id=str(source.get("studio_session_id") or "") or None,
+            source_client_id=str(source.get("client_id") or "") or None,
+            target_gateway_session_id=gateway_session_id,
+            target_studio_session_id=str(target.get("studio_session_id") or "") or None,
+            target_client_id=target_client or None,
+            summary=summary,
+            reason=reason,
+            state="observed",
+        )
+        await self.db.add_audit(
+            "managed.session.handoff.observed",
+            actor=actor,
+            target_type="managed_session",
+            target_id=managed_session["id"],
+            data={
+                "handoff_id": event["id"],
+                "source_gateway_session_id": source["id"],
+                "target_gateway_session_id": gateway_session_id,
+                "workspace_key": managed_session.get("workspace_key"),
+                "reason": reason,
+            },
+        )
+        return event
 
     async def _open_upstream_session(self, session: dict[str, Any], server_url: str) -> str | None:
         init_payload = session.get("init_payload") or {}
@@ -1098,8 +1262,44 @@ class GatewaySessionManager:
             )
             return await self.bind_managed_session(gateway_session_id, target["id"], actor="chatgpt/mcp")
         if name == "mcpstudio_use_session":
-            target = await self._resolve_managed_session(str(args.get("session") or ""))
-            return await self.bind_managed_session(gateway_session_id, target["id"], actor="chatgpt/mcp")
+            selector = str(args.get("session") or "").strip()
+            natural_request = str(args.get("request") or "").strip()
+            if selector:
+                try:
+                    target = await self._resolve_managed_session(selector)
+                    resolution = {"session": target, "confidence": 1.0, "reason": "explicit", "candidates": [target]}
+                except ManagedSessionError:
+                    resolution = await self.resolve_session_natural(gateway_session_id, selector)
+            elif natural_request:
+                resolution = await self.resolve_session_natural(gateway_session_id, natural_request)
+            else:
+                raise ManagedSessionError("session or request is required")
+            target = resolution.get("session")
+            if not target:
+                return {
+                    "attached": False,
+                    "resolved": False,
+                    "reason": resolution.get("reason"),
+                    "candidates": resolution.get("candidates") or [],
+                }
+            attached = await self.bind_managed_session(gateway_session_id, target["id"], actor="chatgpt/mcp")
+            observed = None
+            if args.get("record_handoff", True):
+                observed = await self._record_observed_cross_chat_handoff(
+                    gateway_session_id,
+                    attached["managed_session"],
+                    summary=natural_request or selector or f"Continue {target.get('name') or target.get('workspace_key')}",
+                    reason="natural-language-session-continuation" if natural_request or selector != str(target.get("id")) else "session-continuation",
+                    actor="chatgpt/mcp",
+                )
+            return {
+                **attached,
+                "resolution": {
+                    "confidence": resolution.get("confidence"),
+                    "reason": resolution.get("reason"),
+                },
+                "handoff": self._public_session_handoff(observed) if observed else None,
+            }
         if name == "mcpstudio_handoff_session":
             return await self.prepare_session_handoff(
                 gateway_session_id,

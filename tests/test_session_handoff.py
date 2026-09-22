@@ -291,3 +291,50 @@ async def test_expired_handoff_never_transfers_ownership(tmp_path: Path, monkeyp
     assert source_logical["managed_session_id"] == managed["id"]
     assert target_after["managed_session_id"] is None
     assert target_logical["managed_session_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_natural_language_resolver_prefers_named_workspace(tmp_path: Path):
+    _, db, manager, managed, source_gateway, _, _, _ = await setup_pair(tmp_path)
+
+    async def list_sessions():
+        item = await db.get_managed_session(managed["id"])
+        item["use_count"] = 3
+        item["last_used_at"] = "2026-09-22T17:00:00+00:00"
+        return [item]
+
+    manager.managed_sessions.list_sessions = list_sessions
+    resolved = await manager.resolve_session_natural(source_gateway["id"], "กลับไปทำ alpha ต่อ")
+
+    assert resolved["session"]["id"] == managed["id"]
+    assert resolved["confidence"] > 0.5
+    assert "token:alpha" in resolved["reason"]
+
+
+@pytest.mark.asyncio
+async def test_observed_cross_chat_continuation_is_recorded_in_handoff_history(tmp_path: Path):
+    _, db, manager, managed, source_gateway, target_gateway, _, _ = await setup_pair(tmp_path)
+    await db.bind_gateway_managed_session(
+        target_gateway["id"],
+        managed_session_id=managed["id"],
+        upstream_url="http://127.0.0.1:43110/mcp",
+        upstream_session_id="target-managed-up",
+    )
+
+    event = await manager._record_observed_cross_chat_handoff(
+        target_gateway["id"],
+        managed,
+        summary="ไปต่อจากแชตก่อน",
+        reason="natural-language-session-continuation",
+    )
+
+    assert event is not None
+    assert event["state"] == "observed"
+    assert event["source_gateway_session_id"] == source_gateway["id"]
+    assert event["target_gateway_session_id"] == target_gateway["id"]
+
+    history = await db.managed_session_history(managed["id"])
+    assert len(history["handoffs"]) == 1
+    assert history["handoffs"][0]["state"] == "observed"
+    assert history["handoffs"][0]["summary"] == "ไปต่อจากแชตก่อน"
+    assert "token_hash" not in history["handoffs"][0]
