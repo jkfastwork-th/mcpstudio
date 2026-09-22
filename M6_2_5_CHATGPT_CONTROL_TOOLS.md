@@ -30,6 +30,40 @@ This does not weaken Project Pin, managed-session isolation, or the production c
 4. Studio binds the gateway transport to the dedicated Serena instance for that workspace/session.
 5. Subsequent Serena calls execute only through the pinned managed session.
 
+## Session handoff / context rollover
+
+HIRDA also exposes two rollover controls for moving an active managed project session
+between ChatGPT/MCP conversations without starting a second Serena process:
+
+- `mcpstudio_handoff_session` — called from the source conversation. It creates a
+  single-use claim token and stores a bounded handoff summary. The source remains
+  attached and authoritative until the token is claimed.
+- `mcpstudio_accept_handoff` — called from the new conversation. It claims the
+  token, binds the new gateway transport to the existing managed session, and only
+  then closes/unpins the source transport.
+
+The handoff token is returned once; only its SHA-256 digest is persisted. Creating a
+new pending handoff supersedes any older pending token for that managed session.
+Expired, superseded, or already-claimed tokens cannot transfer ownership.
+
+A caller may include `context_usage_percent` when preparing a handoff. HIRDA reports
+rollover advice at 80% and marks it critical at 90%. ChatGPT does not currently expose
+its raw context-meter percentage to the MCP server automatically, so this value must
+come from the caller/product surface when available.
+
+Example flow:
+
+1. In the old conversation, call `mcpstudio_handoff_session` with a concise summary
+   of current state, decisions, blockers, and next action.
+2. Open the new ChatGPT conversation and reconnect/initialize HIRDA.
+3. Call `mcpstudio_accept_handoff` with the one-time `claim_token`.
+4. Continue in the same managed workspace/session. The old gateway is closed only
+   after the target binding succeeds.
+
+This preserves the invariant that one managed session represents one project,
+computer runtime, and permission boundary; rollover moves the conversation binding
+instead of duplicating the project runtime.
+
 ## After deployment
 
 Restart `mcp-studio.service`. Then start a new ChatGPT MCP session or reconnect/refresh the connector so ChatGPT performs fresh tool discovery. Existing chats may retain a previously cached tool catalog.

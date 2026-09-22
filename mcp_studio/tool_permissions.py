@@ -33,6 +33,7 @@ _DESTRUCTIVE_TOOLS = {"safe_delete_symbol", "delete_memory"}
 _EXECUTE_TOOLS = {
     "activate_project", "herdr_prompt_agent",
     "mcpstudio_use_workspace", "mcpstudio_create_session", "mcpstudio_use_session",
+    "mcpstudio_handoff_session", "mcpstudio_accept_handoff",
     "mcpstudio_close_session", "mcpstudio_detach_session",
     "fern_inbox_claim", "fern_reply_submit", "fern_interjection_decide",
 }

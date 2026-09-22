@@ -132,6 +132,33 @@ class Database:
                         metadata_json TEXT NOT NULL DEFAULT '{}',
                         FOREIGN KEY(workspace_key) REFERENCES managed_workspaces(key)
                     );
+                    CREATE TABLE IF NOT EXISTS session_handoffs (
+                        id TEXT PRIMARY KEY,
+                        token_hash TEXT NOT NULL UNIQUE,
+                        managed_session_id TEXT NOT NULL,
+                        source_gateway_session_id TEXT NOT NULL,
+                        source_studio_session_id TEXT,
+                        source_client_id TEXT,
+                        target_gateway_session_id TEXT,
+                        target_studio_session_id TEXT,
+                        target_client_id TEXT,
+                        state TEXT NOT NULL DEFAULT 'pending',
+                        summary TEXT NOT NULL DEFAULT '',
+                        reason TEXT,
+                        context_usage_percent REAL,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        claimed_at TEXT,
+                        error TEXT,
+                        FOREIGN KEY(managed_session_id) REFERENCES managed_sessions(id)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_session_handoffs_managed
+                        ON session_handoffs(managed_session_id, created_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_session_handoffs_state_expiry
+                        ON session_handoffs(state, expires_at);
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_session_handoffs_one_active
+                        ON session_handoffs(managed_session_id)
+                        WHERE state IN ('pending','claiming');
                     CREATE TABLE IF NOT EXISTS workers (
                         id TEXT PRIMARY KEY,
                         ordinal INTEGER NOT NULL UNIQUE,
@@ -434,6 +461,41 @@ class Database:
                     "INSERT OR IGNORE INTO schema_migrations(version, name, applied_at) VALUES(7, 'm6.2.4-session-ux-lifecycle', ?)",
                     (now,),
                 )
+                db.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS session_handoffs (
+                        id TEXT PRIMARY KEY,
+                        token_hash TEXT NOT NULL UNIQUE,
+                        managed_session_id TEXT NOT NULL,
+                        source_gateway_session_id TEXT NOT NULL,
+                        source_studio_session_id TEXT,
+                        source_client_id TEXT,
+                        target_gateway_session_id TEXT,
+                        target_studio_session_id TEXT,
+                        target_client_id TEXT,
+                        state TEXT NOT NULL DEFAULT 'pending',
+                        summary TEXT NOT NULL DEFAULT '',
+                        reason TEXT,
+                        context_usage_percent REAL,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        claimed_at TEXT,
+                        error TEXT,
+                        FOREIGN KEY(managed_session_id) REFERENCES managed_sessions(id)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_session_handoffs_managed
+                        ON session_handoffs(managed_session_id, created_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_session_handoffs_state_expiry
+                        ON session_handoffs(state, expires_at);
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_session_handoffs_one_active
+                        ON session_handoffs(managed_session_id)
+                        WHERE state IN ('pending','claiming');
+                    """
+                )
+                db.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version, name, applied_at) VALUES(8, 'hirda-session-handoff-rollover', ?)",
+                    (now,),
+                )
 
         await self._run(op)
 
@@ -577,7 +639,7 @@ class Database:
                 integrity = db.execute("PRAGMA quick_check").fetchone()[0]
                 return {
                     "current_version": int(rows[-1]["version"]) if rows else 0,
-                    "expected_version": 7,
+                    "expected_version": 8,
                     "integrity": integrity,
                     "migrations": [dict(r) for r in rows],
                 }
@@ -2622,6 +2684,233 @@ class Database:
         await self._run(op)
         return await self.get_managed_session(session_id)
 
+    @staticmethod
+    def _session_handoff_item(row: sqlite3.Row) -> dict[str, Any]:
+        return dict(row)
+
+    async def create_session_handoff(
+        self,
+        *,
+        token_hash: str,
+        managed_session_id: str,
+        source_gateway_session_id: str,
+        source_studio_session_id: str | None,
+        source_client_id: str | None,
+        summary: str,
+        reason: str | None = None,
+        context_usage_percent: float | None = None,
+        ttl_seconds: int = 1800,
+    ) -> dict[str, Any]:
+        handoff_id = f"msh-{uuid.uuid4().hex[:16]}"
+        now_dt = datetime.now(timezone.utc)
+        ttl = max(60, min(int(ttl_seconds), 86400))
+        created_at = now_dt.isoformat()
+        expires_at = (now_dt + timedelta(seconds=ttl)).isoformat()
+
+        def op() -> None:
+            with self._connect() as db:
+                # Only one handoff may own the right to transfer a managed
+                # session at a time. Expired/pending tokens are retired before
+                # issuing a replacement so an old chat cannot reclaim later.
+                db.execute(
+                    """UPDATE session_handoffs
+                       SET state='expired', error='session handoff expired'
+                       WHERE managed_session_id=? AND state='pending' AND expires_at<=?""",
+                    (managed_session_id, created_at),
+                )
+                claiming = db.execute(
+                    """SELECT id FROM session_handoffs
+                       WHERE managed_session_id=? AND state='claiming'
+                       LIMIT 1""",
+                    (managed_session_id,),
+                ).fetchone()
+                if claiming is not None:
+                    raise ValueError("session handoff claim is already in progress")
+                db.execute(
+                    """UPDATE session_handoffs
+                       SET state='superseded', error='superseded by newer session handoff'
+                       WHERE managed_session_id=? AND state='pending'""",
+                    (managed_session_id,),
+                )
+                db.execute(
+                    """INSERT INTO session_handoffs
+                       (id, token_hash, managed_session_id, source_gateway_session_id,
+                        source_studio_session_id, source_client_id, state, summary, reason,
+                        context_usage_percent, created_at, expires_at)
+                       VALUES(?,?,?,?,?,?, 'pending', ?,?,?,?,?)""",
+                    (
+                        handoff_id,
+                        token_hash,
+                        managed_session_id,
+                        source_gateway_session_id,
+                        source_studio_session_id,
+                        source_client_id,
+                        summary,
+                        reason,
+                        context_usage_percent,
+                        created_at,
+                        expires_at,
+                    ),
+                )
+
+        await self._run(op)
+        return await self.get_session_handoff(handoff_id)
+
+    async def get_session_handoff(self, handoff_id: str) -> dict[str, Any]:
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                row = db.execute("SELECT * FROM session_handoffs WHERE id=?", (handoff_id,)).fetchone()
+                if row is None:
+                    raise KeyError(handoff_id)
+                return self._session_handoff_item(row)
+
+        return await self._run(op)
+
+    async def get_session_handoff_by_token_hash(self, token_hash: str) -> dict[str, Any]:
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                row = db.execute("SELECT * FROM session_handoffs WHERE token_hash=?", (token_hash,)).fetchone()
+                if row is None:
+                    raise KeyError(token_hash)
+                return self._session_handoff_item(row)
+
+        return await self._run(op)
+
+    async def reserve_session_handoff(
+        self,
+        token_hash: str,
+        *,
+        target_gateway_session_id: str,
+        target_studio_session_id: str | None,
+        target_client_id: str | None,
+    ) -> dict[str, Any]:
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT * FROM session_handoffs WHERE token_hash=?",
+                    (token_hash,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(token_hash)
+                item = self._session_handoff_item(row)
+                if item["source_gateway_session_id"] == target_gateway_session_id:
+                    raise ValueError("session handoff must be claimed from a different gateway session")
+                try:
+                    expires = datetime.fromisoformat(str(item["expires_at"]))
+                except ValueError:
+                    expires = now_dt
+                if expires <= now_dt:
+                    db.execute(
+                        """UPDATE session_handoffs
+                           SET state='expired', error='session handoff expired'
+                           WHERE id=? AND state IN ('pending','claiming')""",
+                        (item["id"],),
+                    )
+                    raise ValueError("session handoff expired")
+                if item["state"] != "pending":
+                    raise ValueError(f"session handoff is {item['state']}")
+                cur = db.execute(
+                    """UPDATE session_handoffs
+                       SET state='claiming', target_gateway_session_id=?,
+                           target_studio_session_id=?, target_client_id=?, error=NULL
+                       WHERE id=? AND state='pending'""",
+                    (
+                        target_gateway_session_id,
+                        target_studio_session_id,
+                        target_client_id,
+                        item["id"],
+                    ),
+                )
+                if cur.rowcount != 1:
+                    raise ValueError("session handoff is no longer available")
+                claimed = db.execute("SELECT * FROM session_handoffs WHERE id=?", (item["id"],)).fetchone()
+                return self._session_handoff_item(claimed)
+
+        return await self._run(op)
+
+    async def release_session_handoff(self, handoff_id: str, *, error: str | None = None) -> dict[str, Any]:
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                cur = db.execute(
+                    """UPDATE session_handoffs
+                       SET state='pending', target_gateway_session_id=NULL,
+                           target_studio_session_id=NULL, target_client_id=NULL, error=?
+                       WHERE id=? AND state='claiming'""",
+                    ((str(error)[:500] if error else None), handoff_id),
+                )
+                if cur.rowcount != 1:
+                    raise ValueError("session handoff is not being claimed")
+                row = db.execute("SELECT * FROM session_handoffs WHERE id=?", (handoff_id,)).fetchone()
+                return self._session_handoff_item(row)
+
+        return await self._run(op)
+
+    async def complete_session_handoff(self, handoff_id: str) -> dict[str, Any]:
+        now = _now()
+
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                cur = db.execute(
+                    """UPDATE session_handoffs
+                       SET state='claimed', claimed_at=?, error=NULL
+                       WHERE id=? AND state='claiming'""",
+                    (now, handoff_id),
+                )
+                if cur.rowcount != 1:
+                    raise ValueError("session handoff is not being claimed")
+                row = db.execute("SELECT * FROM session_handoffs WHERE id=?", (handoff_id,)).fetchone()
+                return self._session_handoff_item(row)
+
+        return await self._run(op)
+
+    async def list_session_handoffs(self, managed_session_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+
+        def op() -> list[dict[str, Any]]:
+            with self._connect() as db:
+                rows = db.execute(
+                    """SELECT * FROM session_handoffs
+                       WHERE managed_session_id=?
+                       ORDER BY created_at DESC LIMIT ?""",
+                    (managed_session_id, limit),
+                ).fetchall()
+                items: list[dict[str, Any]] = []
+                for row in rows:
+                    item = self._session_handoff_item(row)
+                    item.pop("token_hash", None)
+                    items.append(item)
+                return items
+
+        return await self._run(op)
+
+    async def clear_logical_session_managed_pin(
+        self,
+        studio_session_id: str,
+        *,
+        expected_managed_session_id: str | None = None,
+    ) -> bool:
+        now = _now()
+
+        def op() -> bool:
+            with self._connect() as db:
+                if expected_managed_session_id is None:
+                    cur = db.execute(
+                        "UPDATE sessions SET managed_session_id=NULL, last_seen_at=? WHERE id=?",
+                        (now, studio_session_id),
+                    )
+                else:
+                    cur = db.execute(
+                        """UPDATE sessions SET managed_session_id=NULL, last_seen_at=?
+                           WHERE id=? AND managed_session_id=?""",
+                        (now, studio_session_id, expected_managed_session_id),
+                    )
+                return cur.rowcount == 1
+
+        return await self._run(op)
+
     async def managed_session_overview(self, limit: int = 500) -> list[dict[str, Any]]:
         sessions = await self.list_managed_sessions(limit=limit)
         gateways = await self.list_gateway_sessions(1000)
@@ -2668,7 +2957,8 @@ class Database:
                 return items
         audits = await self._run(op)
         gateways = await self.list_gateway_sessions_for_managed_session(session_id)
-        return {"session": session, "audit": audits, "transports": gateways[:limit]}
+        handoffs = await self.list_session_handoffs(session_id, limit=limit)
+        return {"session": session, "audit": audits, "transports": gateways[:limit], "handoffs": handoffs}
 
     async def managed_cutover_summary(self) -> dict[str, Any]:
         def op() -> dict[str, Any]:

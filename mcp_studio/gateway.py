@@ -33,6 +33,8 @@ CONTROL_TOOL_NAMES = (
     "mcpstudio_use_workspace",
     "mcpstudio_create_session",
     "mcpstudio_use_session",
+    "mcpstudio_handoff_session",
+    "mcpstudio_accept_handoff",
 )
 
 
@@ -355,6 +357,33 @@ class GatewaySessionManager:
                 "inputSchema": {
                     "type": "object", "properties": {"session": {"type": "string"}},
                     "required": ["session"], "additionalProperties": False,
+                },
+            },
+            {
+                "name": "mcpstudio_handoff_session",
+                "description": "Prepare a single-use rollover token for handing the currently attached managed session to a new ChatGPT/MCP conversation. Ownership does not transfer until the new conversation claims the token.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {"type": "string", "minLength": 1, "maxLength": 12000},
+                        "reason": {"type": "string", "maxLength": 500},
+                        "ttl_seconds": {"type": "integer", "minimum": 60, "maximum": 86400, "default": 1800},
+                        "context_usage_percent": {"type": "number", "minimum": 0, "maximum": 100},
+                    },
+                    "required": ["summary"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "mcpstudio_accept_handoff",
+                "description": "Claim a single-use session handoff token from another conversation, bind this transport to that managed session, then detach the source transport only after the claim succeeds.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "token": {"type": "string", "minLength": 16, "maxLength": 512},
+                    },
+                    "required": ["token"],
+                    "additionalProperties": False,
                 },
             },
             {
@@ -757,6 +786,237 @@ class GatewaySessionManager:
         session = await self.managed_sessions.get_session(str(managed_id))
         return str(session["workspace_key"])
 
+
+    @staticmethod
+    def _public_session_handoff(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: item.get(key)
+            for key in (
+                "id",
+                "managed_session_id",
+                "source_gateway_session_id",
+                "target_gateway_session_id",
+                "state",
+                "summary",
+                "reason",
+                "context_usage_percent",
+                "created_at",
+                "expires_at",
+                "claimed_at",
+                "error",
+            )
+        }
+
+    @staticmethod
+    def _rollover_advice(context_usage_percent: float | None) -> dict[str, Any]:
+        if context_usage_percent is None:
+            return {
+                "context_usage_percent": None,
+                "recommended": None,
+                "urgency": "unknown",
+                "recommended_threshold_percent": 80.0,
+                "critical_threshold_percent": 90.0,
+            }
+        pct = max(0.0, min(float(context_usage_percent), 100.0))
+        urgency = "critical" if pct >= 90.0 else "recommended" if pct >= 80.0 else "optional"
+        return {
+            "context_usage_percent": pct,
+            "recommended": pct >= 80.0,
+            "urgency": urgency,
+            "recommended_threshold_percent": 80.0,
+            "critical_threshold_percent": 90.0,
+        }
+
+    async def prepare_session_handoff(
+        self,
+        gateway_session_id: str,
+        *,
+        summary: str,
+        reason: str | None = None,
+        ttl_seconds: int = 1800,
+        context_usage_percent: float | None = None,
+        actor: str = "chatgpt/mcp",
+    ) -> dict[str, Any]:
+        gateway = await self.db.get_gateway_session(gateway_session_id)
+        managed_id = str(gateway.get("managed_session_id") or "").strip()
+        if not managed_id:
+            raise ManagedSessionError("SESSION_HANDOFF_REQUIRES_BOUND_SESSION")
+        clean_summary = str(summary or "").strip()
+        if not clean_summary:
+            raise ManagedSessionError("session handoff summary is required")
+        if len(clean_summary) > 12000:
+            raise ManagedSessionError("session handoff summary exceeds 12000 characters")
+        clean_reason = str(reason or "").strip()[:500] or None
+        pct: float | None = None
+        if context_usage_percent is not None:
+            pct = float(context_usage_percent)
+            if pct < 0.0 or pct > 100.0:
+                raise ManagedSessionError("context_usage_percent must be between 0 and 100")
+        ttl = max(60, min(int(ttl_seconds), 86400))
+
+        # The raw token is returned exactly once and never persisted. Only its
+        # SHA-256 digest is stored so DB/audit access cannot claim a handoff.
+        claim_token = "msh_" + secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(claim_token.encode("utf-8")).hexdigest()
+        try:
+            handoff = await self.db.create_session_handoff(
+                token_hash=token_hash,
+                managed_session_id=managed_id,
+                source_gateway_session_id=gateway_session_id,
+                source_studio_session_id=str(gateway.get("studio_session_id") or "") or None,
+                source_client_id=str(gateway.get("client_id") or "") or None,
+                summary=clean_summary,
+                reason=clean_reason,
+                context_usage_percent=pct,
+                ttl_seconds=ttl,
+            )
+        except ValueError as exc:
+            raise ManagedSessionError(str(exc)) from exc
+        managed = await self.managed_sessions.get_session(managed_id)
+        await self.db.add_audit(
+            "managed.session.handoff.prepare",
+            actor=actor,
+            target_type="managed_session",
+            target_id=managed_id,
+            data={
+                "handoff_id": handoff["id"],
+                "source_gateway_session_id": gateway_session_id,
+                "workspace_key": managed.get("workspace_key"),
+                "expires_at": handoff.get("expires_at"),
+                "context_usage_percent": pct,
+                "reason": clean_reason,
+            },
+        )
+        return {
+            "handoff": self._public_session_handoff(handoff),
+            "claim_token": claim_token,
+            "managed_session": managed,
+            "ownership_transferred": False,
+            "source_remains_attached_until_claim": True,
+            "rollover": self._rollover_advice(pct),
+            "next_step": "Open the new ChatGPT/MCP conversation and call mcpstudio_accept_handoff with claim_token.",
+        }
+
+    async def accept_session_handoff(
+        self,
+        gateway_session_id: str,
+        *,
+        token: str,
+        actor: str = "chatgpt/mcp",
+    ) -> dict[str, Any]:
+        clean_token = str(token or "").strip()
+        if len(clean_token) < 16:
+            raise ManagedSessionError("invalid session handoff token")
+        token_hash = hashlib.sha256(clean_token.encode("utf-8")).hexdigest()
+        target_gateway = await self.db.get_gateway_session(gateway_session_id)
+        try:
+            reserved = await self.db.reserve_session_handoff(
+                token_hash,
+                target_gateway_session_id=gateway_session_id,
+                target_studio_session_id=str(target_gateway.get("studio_session_id") or "") or None,
+                target_client_id=str(target_gateway.get("client_id") or "") or None,
+            )
+        except KeyError as exc:
+            raise ManagedSessionError("unknown session handoff token") from exc
+        except ValueError as exc:
+            raise ManagedSessionError(str(exc)) from exc
+
+        handoff_id = str(reserved["id"])
+        managed_id = str(reserved["managed_session_id"])
+        previous_target_managed = str(target_gateway.get("managed_session_id") or "").strip() or None
+        if previous_target_managed == managed_id:
+            await self.db.release_session_handoff(
+                handoff_id,
+                error="target gateway is already attached to handoff session",
+            )
+            raise ManagedSessionError("target gateway is already attached to the handoff session")
+
+        target_bound = False
+        try:
+            attached = await self.bind_managed_session(
+                gateway_session_id,
+                managed_id,
+                actor=f"{actor}/handoff-claim",
+            )
+            target_bound = True
+
+            source_gateway_id = str(reserved["source_gateway_session_id"])
+            try:
+                source_gateway = await self.db.get_gateway_session(source_gateway_id)
+            except KeyError:
+                source_gateway = None
+
+            source_closed = False
+            if source_gateway is not None:
+                source_studio_id = str(source_gateway.get("studio_session_id") or "")
+                if source_studio_id:
+                    await self.db.clear_logical_session_managed_pin(
+                        source_studio_id,
+                        expected_managed_session_id=managed_id,
+                    )
+                    try:
+                        await self.db.disconnect_session(source_studio_id)
+                    except KeyError:
+                        pass
+                old_url = source_gateway.get("upstream_url")
+                old_upstream_id = source_gateway.get("upstream_session_id")
+                await self.db.close_gateway_session(
+                    source_gateway_id,
+                    error="session handoff claimed by another conversation",
+                )
+                source_closed = True
+                if old_url or old_upstream_id:
+                    await self._close_upstream_session(old_url, old_upstream_id)
+
+            claimed = await self.db.complete_session_handoff(handoff_id)
+            await self.db.add_audit(
+                "managed.session.handoff.claim",
+                actor=actor,
+                target_type="managed_session",
+                target_id=managed_id,
+                data={
+                    "handoff_id": handoff_id,
+                    "source_gateway_session_id": source_gateway_id,
+                    "target_gateway_session_id": gateway_session_id,
+                    "source_gateway_closed": source_closed,
+                },
+            )
+            return {
+                "handoff": self._public_session_handoff(claimed),
+                "gateway_session": attached["gateway_session"],
+                "managed_session": attached["managed_session"],
+                "context": {
+                    "summary": claimed.get("summary") or "",
+                    "reason": claimed.get("reason"),
+                },
+                "ownership_transferred": True,
+                "source_gateway_closed": source_closed,
+                "claim_consumed": True,
+            }
+        except Exception as exc:
+            if target_bound:
+                try:
+                    if previous_target_managed:
+                        await self.bind_managed_session(
+                            gateway_session_id,
+                            previous_target_managed,
+                            actor=f"{actor}/handoff-rollback",
+                        )
+                    else:
+                        await self.detach_managed_session(
+                            gateway_session_id,
+                            actor=f"{actor}/handoff-rollback",
+                        )
+                except Exception:
+                    pass
+            try:
+                await self.db.release_session_handoff(handoff_id, error=str(exc))
+            except Exception:
+                pass
+            if isinstance(exc, ManagedSessionError):
+                raise
+            raise ManagedSessionError(f"session handoff claim failed: {exc}") from exc
+
     async def _handle_management_tool(self, gateway_session_id: str, name: str, args: dict[str, Any]) -> Any:
         if not self.managed_sessions:
             raise ManagedSessionError("managed sessions are unavailable")
@@ -840,6 +1100,25 @@ class GatewaySessionManager:
         if name == "mcpstudio_use_session":
             target = await self._resolve_managed_session(str(args.get("session") or ""))
             return await self.bind_managed_session(gateway_session_id, target["id"], actor="chatgpt/mcp")
+        if name == "mcpstudio_handoff_session":
+            return await self.prepare_session_handoff(
+                gateway_session_id,
+                summary=str(args.get("summary") or ""),
+                reason=(str(args.get("reason")) if args.get("reason") is not None else None),
+                ttl_seconds=int(args.get("ttl_seconds") or 1800),
+                context_usage_percent=(
+                    float(args["context_usage_percent"])
+                    if args.get("context_usage_percent") is not None
+                    else None
+                ),
+                actor="chatgpt/mcp",
+            )
+        if name == "mcpstudio_accept_handoff":
+            return await self.accept_session_handoff(
+                gateway_session_id,
+                token=str(args.get("token") or ""),
+                actor="chatgpt/mcp",
+            )
         if name == "mcpstudio_current_session":
             gateway = await self.db.get_gateway_session(gateway_session_id)
             managed_id = gateway.get("managed_session_id")
