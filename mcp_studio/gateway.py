@@ -354,7 +354,7 @@ class GatewaySessionManager:
             },
             {
                 "name": "mcpstudio_use_session",
-                "description": "Attach this MCP transport to an existing managed session. Accepts an id/name or plain-language request such as 'continue HIRDA', 'go back to Nova', or Thai equivalents.",
+                "description": "Attach this MCP transport to an existing managed session. Accepts an id/name or plain-language request such as 'continue HIRDA', 'go back to Nova', or Thai equivalents. Conversation-local binding and explicit names take precedence; ambiguous cross-session requests fail closed and return candidates.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -594,12 +594,18 @@ class GatewaySessionManager:
             raise ManagedSessionError(f"unknown managed session: {value}")
 
     async def resolve_session_natural(self, gateway_session_id: str, text: str) -> dict[str, Any]:
-        """Resolve plain-language session references into a managed session.
+        """Resolve plain-language session references into a managed session safely.
 
-        Exact id/name/workspace matches win first. Otherwise score workspace/name/path
-        token overlap plus continuity cues such as "continue", "same", or Thai equivalents.
-        The resolver only auto-selects when the winner is unambiguous; callers receive
-        candidates instead of silently binding the wrong project.
+        Resolution is evidence-first:
+        1. exact managed-session id;
+        2. unique exact name/workspace/path;
+        3. explicit lexical match in the request;
+        4. the session already bound to this conversation, but only for continuity language.
+
+        Recency/use-count are presentation hints only. They never authorize an automatic
+        cross-session switch. If a fresh conversation asks for "the previous session" while
+        multiple candidates exist and no lineage/name is available, fail closed and return
+        candidates instead of guessing.
         """
         if not self.managed_sessions:
             raise ManagedSessionError("managed sessions are unavailable")
@@ -608,38 +614,93 @@ class GatewaySessionManager:
             raise ManagedSessionError("session request is required")
 
         sessions = await self.managed_sessions.list_sessions()
+        if not sessions:
+            raise ManagedSessionError("no managed sessions are available")
+
         lowered = query.casefold()
         norm = re.sub(r"[^a-z0-9ก-๙_/.-]+", " ", lowered).strip()
         tokens = {t for t in norm.split() if len(t) >= 2}
-
-        # First preserve deterministic exact selectors.
-        for item in sessions:
-            exact_values = {
-                str(item.get("id") or "").casefold(),
-                str(item.get("name") or "").casefold(),
-                str(item.get("workspace_key") or "").casefold(),
-                str(item.get("project_path") or "").casefold(),
-            }
-            if lowered in exact_values:
-                return {"session": item, "confidence": 1.0, "reason": "exact", "candidates": [item]}
 
         continuity_words = (
             "continue", "resume", "same", "previous", "last", "before", "เดิม", "ต่อ", "ต่อจาก",
             "เมื่อกี้", "ก่อน", "แชตก่อน", "งานเดิม", "ไปต่อ", "กลับไป",
         )
         wants_continuity = any(word in lowered for word in continuity_words)
+
         current_gateway = await self.db.get_gateway_session(gateway_session_id)
         current_managed = str(current_gateway.get("managed_session_id") or "").strip()
 
+        def recent_key(item: dict[str, Any]) -> tuple[str, int]:
+            return (
+                str(item.get("last_used_at") or ""),
+                int(item.get("use_count") or 0),
+            )
+
+        def ambiguous(reason: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
+            ordered = sorted(candidates, key=recent_key, reverse=True)
+            return {
+                "session": None,
+                "confidence": 0.0,
+                "reason": reason,
+                "candidates": ordered[:5],
+            }
+
+        # Managed-session id is globally unique and is the strongest selector.
+        id_matches = [item for item in sessions if lowered == str(item.get("id") or "").casefold()]
+        if id_matches:
+            return {
+                "session": id_matches[0],
+                "confidence": 1.0,
+                "reason": "exact-id",
+                "candidates": id_matches,
+            }
+
+        # Exact human-readable selectors are safe only when they identify one session.
+        # Workspace/path can legitimately have several durable sessions, so never pick
+        # the first row returned by the database.
+        exact_groups = (
+            ("name", "exact-name"),
+            ("workspace_key", "exact-workspace"),
+            ("project_path", "exact-project-path"),
+        )
+        for field, reason in exact_groups:
+            matches = [
+                item for item in sessions
+                if lowered == str(item.get(field) or "").casefold()
+            ]
+            if len(matches) == 1:
+                return {
+                    "session": matches[0],
+                    "confidence": 0.99,
+                    "reason": reason,
+                    "candidates": matches,
+                }
+            if len(matches) > 1:
+                if wants_continuity and current_managed:
+                    current_match = next(
+                        (item for item in matches if str(item.get("id") or "") == current_managed),
+                        None,
+                    )
+                    if current_match is not None:
+                        return {
+                            "session": current_match,
+                            "confidence": 0.99,
+                            "reason": f"{reason};current-conversation-binding",
+                            "candidates": matches,
+                        }
+                return ambiguous(f"ambiguous-{reason.removeprefix('exact-')}", matches)
+
+        # Natural-language topic/name evidence. Only lexical evidence contributes to
+        # selection score. Recency is deliberately excluded from the score.
         scored: list[tuple[float, dict[str, Any], list[str]]] = []
         for item in sessions:
-            haystacks = [
+            values = [
                 str(item.get("name") or ""),
                 str(item.get("workspace_key") or ""),
                 str(item.get("project_path") or ""),
             ]
             item_tokens: set[str] = set()
-            for value in haystacks:
+            for value in values:
                 item_tokens.update(
                     t for t in re.sub(r"[^a-z0-9ก-๙_/.-]+", " ", value.casefold()).split() if len(t) >= 2
                 )
@@ -648,48 +709,79 @@ class GatewaySessionManager:
             reasons: list[str] = []
             if overlap:
                 reasons.append("token:" + ",".join(overlap[:6]))
-            if any(lowered and lowered in value.casefold() for value in haystacks):
+            if any(lowered and lowered in value.casefold() for value in values):
                 score += 35.0
                 reasons.append("substring")
-            if wants_continuity:
-                # Prefer recent work, but not enough to beat an explicit topic/name match.
-                use_count = float(item.get("use_count") or 0)
-                score += min(use_count / 1000.0, 1.0)
-                if item.get("id") == current_managed:
-                    score += 8.0
-                    reasons.append("current")
-                last_used = str(item.get("last_used_at") or "")
-                if last_used:
-                    score += 2.0
-                    reasons.append("recent")
             scored.append((score, item, reasons))
 
-        scored.sort(key=lambda row: (row[0], str(row[1].get("last_used_at") or "")), reverse=True)
+        scored.sort(
+            key=lambda row: (row[0], recent_key(row[1])),
+            reverse=True,
+        )
         viable = [row for row in scored if row[0] > 0]
-        if not viable and wants_continuity:
-            viable = scored[:3]
-        if not viable:
-            raise ManagedSessionError(f"could not resolve session from natural language: {query}")
 
-        top_score, top, top_reasons = viable[0]
-        second_score = viable[1][0] if len(viable) > 1 else -1.0
-        unambiguous = top_score >= 10.0 and (top_score - second_score >= 5.0 or len(viable) == 1)
-        if wants_continuity and not unambiguous and top_score >= 2.0 and top_score > second_score:
-            unambiguous = True
-        if not unambiguous:
+        if viable:
+            top_score = viable[0][0]
+            top_rows = [row for row in viable if row[0] == top_score]
+
+            # If explicit lexical evidence ties across several sessions, the current
+            # conversation binding is a valid lineage tiebreaker for continuity requests.
+            if len(top_rows) > 1:
+                if wants_continuity and current_managed:
+                    current_row = next(
+                        (row for row in top_rows if str(row[1].get("id") or "") == current_managed),
+                        None,
+                    )
+                    if current_row is not None:
+                        return {
+                            "session": current_row[1],
+                            "confidence": 0.90,
+                            "reason": ";".join(current_row[2] + ["current-conversation-binding"]),
+                            "candidates": [row[1] for row in viable[:5]],
+                        }
+                return ambiguous("ambiguous-lexical-match", [row[1] for row in top_rows])
+
+            top_score, top, top_reasons = top_rows[0]
+            second_score = viable[1][0] if len(viable) > 1 else -1.0
+            if len(viable) > 1 and top_score - second_score < 5.0:
+                return ambiguous("ambiguous-lexical-match", [row[1] for row in viable])
+
+            confidence = min(0.95, 0.65 + min(top_score, 30.0) / 100.0)
             return {
-                "session": None,
-                "confidence": 0.0,
-                "reason": "ambiguous",
+                "session": top,
+                "confidence": confidence,
+                "reason": ";".join(top_reasons) or "lexical-match",
                 "candidates": [row[1] for row in viable[:5]],
             }
-        confidence = min(0.99, 0.55 + min(top_score, 44.0) / 100.0)
-        return {
-            "session": top,
-            "confidence": confidence,
-            "reason": ";".join(top_reasons) or "continuity",
-            "candidates": [row[1] for row in viable[:5]],
-        }
+
+        if wants_continuity:
+            # A binding already attached to this gateway is hard conversation-local
+            # evidence. This must beat every global recency/use-count signal.
+            if current_managed:
+                current = next(
+                    (item for item in sessions if str(item.get("id") or "") == current_managed),
+                    None,
+                )
+                if current is not None:
+                    return {
+                        "session": current,
+                        "confidence": 0.99,
+                        "reason": "current-conversation-binding",
+                        "candidates": [current],
+                    }
+
+            # A fresh/unbound conversation may safely continue the sole available
+            # session. With 2+ sessions, there is no lineage evidence: fail closed.
+            if len(sessions) == 1:
+                return {
+                    "session": sessions[0],
+                    "confidence": 0.85,
+                    "reason": "sole-session-continuity",
+                    "candidates": sessions,
+                }
+            return ambiguous("ambiguous-continuity-no-lineage", sessions)
+
+        raise ManagedSessionError(f"could not resolve session from natural language: {query}")
 
     async def _record_observed_cross_chat_handoff(
         self,

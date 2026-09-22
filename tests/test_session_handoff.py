@@ -338,3 +338,150 @@ async def test_observed_cross_chat_continuation_is_recorded_in_handoff_history(t
     assert history["handoffs"][0]["state"] == "observed"
     assert history["handoffs"][0]["summary"] == "ไปต่อจากแชตก่อน"
     assert "token_hash" not in history["handoffs"][0]
+
+
+@pytest.mark.asyncio
+async def test_continuity_prefers_current_conversation_binding_over_global_recency(tmp_path: Path):
+    _, db, manager, managed, source_gateway, _, _, _ = await setup_pair(tmp_path)
+
+    other_project = tmp_path / "projects" / "beta"
+    other_project.mkdir()
+    await db.upsert_managed_workspace(
+        key="beta",
+        name="Beta",
+        project_path=str(other_project.resolve()),
+    )
+    other = await db.create_managed_session(
+        name="Beta",
+        workspace_key="beta",
+        project_path=str(other_project.resolve()),
+        server_id="serena-8001",
+        port=43111,
+    )
+    other = await db.update_managed_session_runtime(
+        other["id"],
+        status="ready",
+        pid=456,
+        endpoint="http://127.0.0.1:43111/mcp",
+    )
+
+    async def list_sessions():
+        current = await db.get_managed_session(managed["id"])
+        current["use_count"] = 1
+        current["last_used_at"] = "2026-09-22T16:00:00+00:00"
+        recent = await db.get_managed_session(other["id"])
+        recent["use_count"] = 9999
+        recent["last_used_at"] = "2026-09-22T18:00:00+00:00"
+        return [recent, current]
+
+    manager.managed_sessions.list_sessions = list_sessions
+    resolved = await manager.resolve_session_natural(source_gateway["id"], "ต่อ session เดิม")
+
+    assert resolved["session"]["id"] == managed["id"]
+    assert resolved["reason"] == "current-conversation-binding"
+
+
+@pytest.mark.asyncio
+async def test_fresh_chat_continuity_with_multiple_sessions_fails_closed(tmp_path: Path):
+    _, db, manager, managed, _, target_gateway, _, _ = await setup_pair(tmp_path)
+
+    other_project = tmp_path / "projects" / "beta"
+    other_project.mkdir()
+    await db.upsert_managed_workspace(
+        key="beta",
+        name="Beta",
+        project_path=str(other_project.resolve()),
+    )
+    other = await db.create_managed_session(
+        name="Beta",
+        workspace_key="beta",
+        project_path=str(other_project.resolve()),
+        server_id="serena-8001",
+        port=43111,
+    )
+    other = await db.update_managed_session_runtime(
+        other["id"],
+        status="ready",
+        pid=456,
+        endpoint="http://127.0.0.1:43111/mcp",
+    )
+
+    async def list_sessions():
+        first = await db.get_managed_session(managed["id"])
+        first["use_count"] = 1
+        first["last_used_at"] = "2026-09-22T16:00:00+00:00"
+        second = await db.get_managed_session(other["id"])
+        second["use_count"] = 9999
+        second["last_used_at"] = "2026-09-22T18:00:00+00:00"
+        return [second, first]
+
+    manager.managed_sessions.list_sessions = list_sessions
+    resolved = await manager.resolve_session_natural(target_gateway["id"], "ต่อ session เดิม")
+
+    assert resolved["session"] is None
+    assert resolved["reason"] == "ambiguous-continuity-no-lineage"
+    assert {item["id"] for item in resolved["candidates"]} == {managed["id"], other["id"]}
+
+
+@pytest.mark.asyncio
+async def test_exact_workspace_with_multiple_sessions_is_not_silently_selected(tmp_path: Path):
+    _, db, manager, managed, _, target_gateway, _, _ = await setup_pair(tmp_path)
+
+    sibling = await db.create_managed_session(
+        name="Alpha Secondary",
+        workspace_key="alpha",
+        project_path=managed["project_path"],
+        server_id="serena-8001",
+        port=43112,
+    )
+    sibling = await db.update_managed_session_runtime(
+        sibling["id"],
+        status="ready",
+        pid=789,
+        endpoint="http://127.0.0.1:43112/mcp",
+    )
+
+    async def list_sessions():
+        primary = await db.get_managed_session(managed["id"])
+        primary["name"] = "Primary"
+        secondary = await db.get_managed_session(sibling["id"])
+        secondary["name"] = "Secondary"
+        return [primary, secondary]
+
+    manager.managed_sessions.list_sessions = list_sessions
+    resolved = await manager.resolve_session_natural(target_gateway["id"], "alpha")
+
+    assert resolved["session"] is None
+    assert resolved["reason"] == "ambiguous-workspace"
+    assert {item["id"] for item in resolved["candidates"]} == {managed["id"], sibling["id"]}
+
+
+@pytest.mark.asyncio
+async def test_exact_workspace_with_current_binding_uses_that_bound_session(tmp_path: Path):
+    _, db, manager, managed, source_gateway, _, _, _ = await setup_pair(tmp_path)
+
+    sibling = await db.create_managed_session(
+        name="Alpha Secondary",
+        workspace_key="alpha",
+        project_path=managed["project_path"],
+        server_id="serena-8001",
+        port=43112,
+    )
+    sibling = await db.update_managed_session_runtime(
+        sibling["id"],
+        status="ready",
+        pid=789,
+        endpoint="http://127.0.0.1:43112/mcp",
+    )
+
+    async def list_sessions():
+        return [
+            await db.get_managed_session(sibling["id"]),
+            await db.get_managed_session(managed["id"]),
+        ]
+
+    manager.managed_sessions.list_sessions = list_sessions
+    resolved = await manager.resolve_session_natural(source_gateway["id"], "กลับไป alpha ต่อ")
+
+    assert resolved["session"]["id"] == managed["id"]
+    assert "current-conversation-binding" in resolved["reason"]
