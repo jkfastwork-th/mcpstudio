@@ -61,8 +61,8 @@ _READ_COMMANDS = {
     "sort", "sed", "journalctl", "ss",
 }
 _EXECUTE_COMMANDS = {
-    "pytest", "make", "cmake", "ctest", "ninja", "node", "npm", "pnpm", "yarn",
-    "cargo", "go", "ruff", "mypy", "eslint", "tsc", "mcporter",
+    "pytest", "uv", "make", "cmake", "ctest", "ninja", "node", "npm", "pnpm", "yarn",
+    "cargo", "go", "ruff", "mypy", "eslint", "tsc", "mcporter", "herdr", "curl",
 }
 _PATH_ARGUMENT_KEYS = {
     "relative_path", "path", "file_path", "directory", "cwd", "workdir",
@@ -111,6 +111,8 @@ def _segment_class(segment: str) -> ToolClass:
     if not tokens:
         return "read"
     while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+        tokens.pop(0)
+    if tokens and Path(tokens[0]).name == "sudo":
         tokens.pop(0)
     if not tokens:
         return "read"

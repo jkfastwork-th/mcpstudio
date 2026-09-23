@@ -55,6 +55,7 @@ def test_classifies_serena_read_write_and_destructive_tools():
 def test_shell_classifier_keeps_read_write_execute_separate():
     assert classify_shell_command("git status && git diff --stat") == "read"
     assert classify_shell_command("pytest -q tests") == "execute"
+    assert classify_shell_command("uv run pytest -q tests") == "execute"
     assert classify_shell_command("python3 -m unittest -v tests.test_tool_permissions") == "execute"
     assert classify_shell_command("git add x.py && git commit -m test") == "write"
     assert classify_shell_command("git reset --hard HEAD") == "destructive"
@@ -62,7 +63,14 @@ def test_shell_classifier_keeps_read_write_execute_separate():
     assert classify_shell_command("grep -E 'foo|bar' README.md") == "read"
     assert classify_shell_command("find . -type f | sort | sed -n '1,20p'") == "read"
     assert classify_shell_command("mcporter list") == "execute"
+    assert classify_shell_command("herdr agent list") == "execute"
+    assert classify_shell_command("curl -fsS http://127.0.0.1:8100/api/cognition/status") == "execute"
     assert classify_shell_command("systemctl status mcp-studio.service") == "read"
+    assert classify_shell_command("sudo systemctl restart mcp-studio.service") == "execute"
+    assert classify_shell_command("sudo systemctl stop mcp-studio.service") == "destructive"
+    # Shell control-flow stays fail-closed: a loop can hide arbitrary commands and must not
+    # inherit a safe class merely because its visible body appears read-only.
+    assert classify_shell_command("for f in a b; do cat $f; done") == "unknown"
     assert classify_shell_command("systemctl is-active mcp-studio.service") == "read"
     assert classify_shell_command("systemctl restart mcp-studio.service") == "execute"
     assert classify_shell_command("systemctl stop mcp-studio.service") == "destructive"
