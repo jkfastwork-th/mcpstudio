@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -141,7 +142,14 @@ class ReflexMetrics:
         teacher_error_counts: Counter[str] = Counter()
         reflex_latency: list[float] = []
         teacher_latency: list[float] = []
+        teacher_success_latency: list[float] = []
+        teacher_failure_latency: list[float] = []
         policy_latency: list[float] = []
+        disagreement_pairs: Counter[str] = Counter()
+        disagreement_permissions: Counter[str] = Counter()
+        disagreement_tools: Counter[str] = Counter()
+        disagreement_signals: Counter[str] = Counter()
+        disagreement_risks: list[float] = []
         teacher_enabled = 0
         teacher_evaluated = 0
         teacher_agreed = 0
@@ -208,6 +216,15 @@ class ReflexMetrics:
                     teacher_agreed += 1
                 elif teacher.get("agreement") is False:
                     teacher_disagreed += 1
+                    disagreement_pairs[f"{action} -> {teacher_action}"] += 1
+                    disagreement_permissions[permission] += 1
+                    tool = str(features.get("tool") or "unknown")
+                    disagreement_tools[tool] += 1
+                    for signal in signals:
+                        clean = str(signal or "").strip()
+                        if clean:
+                            disagreement_signals[clean] += 1
+                    disagreement_risks.append(risk)
             error = str(teacher.get("error") or "").strip()
             if error:
                 teacher_error_counts[error] += 1
@@ -222,6 +239,7 @@ class ReflexMetrics:
                 reflex_latency.append(reflex_value)
             if teacher.get("enabled") and teacher_value is not None:
                 teacher_latency.append(teacher_value)
+                (teacher_success_latency if teacher.get("evaluated") else teacher_failure_latency).append(teacher_value)
 
             stamp = _parse_time(row.get("recorded_at"))
             if stamp:
@@ -292,6 +310,7 @@ class ReflexMetrics:
                 "teacher_enabled": bool(getattr(self.studio, "jev_enabled", False)),
                 "teacher_mode": str(getattr(self.studio, "jev_mode", "shadow") or "shadow"),
                 "teacher_model": str(getattr(self.studio, "jev_model", "jev-latest") or "jev-latest"),
+                "teacher_api_key_configured": bool(os.getenv(str(getattr(self.studio, "jev_api_key_env", "TYPESAFE_API_KEY") or "TYPESAFE_API_KEY"))),
             },
             "summary": {
                 "decisions": decision_count,
@@ -304,6 +323,7 @@ class ReflexMetrics:
                 "deny_rate": _percent(action_counts["deny"], decision_count),
                 "average_risk": round(risk_total / decision_count, 3) if decision_count else None,
                 "average_confidence": round(confidence_total / decision_count, 3) if decision_count else None,
+                "average_rule_confidence": round(confidence_total / decision_count, 3) if decision_count else None,
             },
             "teacher": {
                 "enabled_decisions": teacher_enabled,
@@ -313,6 +333,17 @@ class ReflexMetrics:
                 "disagreement": teacher_disagreed,
                 "agreement_rate": _percent(teacher_agreed, teacher_evaluated),
                 "actions": dict(teacher_action_counts),
+                "allow_rate": _percent(teacher_action_counts["allow"], teacher_evaluated),
+                "review_rate": _percent(teacher_action_counts["review"], teacher_evaluated),
+                "deny_rate": _percent(teacher_action_counts["deny"], teacher_evaluated),
+                "disagreement_diagnostics": {
+                    "count": teacher_disagreed,
+                    "reflex_to_teacher_actions": dict(disagreement_pairs.most_common(12)),
+                    "permission_classes": dict(disagreement_permissions.most_common(12)),
+                    "tools": dict(disagreement_tools.most_common(12)),
+                    "signals": dict(disagreement_signals.most_common(12)),
+                    "risk": {"samples": len(disagreement_risks), "min": min(disagreement_risks) if disagreement_risks else None, "median": round(float(median(disagreement_risks)), 3) if disagreement_risks else None, "max": max(disagreement_risks) if disagreement_risks else None},
+                },
                 "errors": [
                     {"error": name, "count": count}
                     for name, count in teacher_error_counts.most_common(12)
@@ -322,6 +353,8 @@ class ReflexMetrics:
                 "policy": _latency_summary(policy_latency),
                 "reflex": _latency_summary(reflex_latency),
                 "teacher": _latency_summary(teacher_latency),
+                "teacher_success": _latency_summary(teacher_success_latency),
+                "teacher_failure": _latency_summary(teacher_failure_latency),
             },
             "outcomes": {
                 "transport_records": len(outcomes),

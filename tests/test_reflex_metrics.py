@@ -164,3 +164,25 @@ def test_metrics_empty_dataset_is_stable(tmp_path):
     assert payload["teacher"]["agreement_rate"] is None
     assert payload["latency"]["reflex"]["median_ms"] is None
     assert payload["recent"] == []
+
+
+def test_reflex_metrics_teacher_observability(tmp_path, monkeypatch):
+    rows = [
+        {"schema":"hirda-reflex-dataset-v1","kind":"decision","recorded_at":"2026-09-21T10:00:00Z","features":{"permission_class":"execute","tool":"herdr_prompt_agent"},"reflex":{"action":"allow","risk":0.34,"confidence":0.9,"signals":["large_argument_surface"]},"teacher":{"enabled":True,"evaluated":True,"agreement":False,"action":"review","error":None},"timings":{"teacher_ms":20,"reflex_ms":1}},
+        {"schema":"hirda-reflex-dataset-v1","kind":"decision","recorded_at":"2026-09-21T10:01:00Z","features":{"permission_class":"read","tool":"read_file"},"reflex":{"action":"allow","risk":0.2,"confidence":0.8,"signals":[]},"teacher":{"enabled":True,"evaluated":True,"agreement":True,"action":"allow","error":None},"timings":{"teacher_ms":30,"reflex_ms":2}},
+        {"schema":"hirda-reflex-dataset-v1","kind":"decision","recorded_at":"2026-09-21T10:02:00Z","features":{"permission_class":"write","tool":"replace_content"},"reflex":{"action":"review","risk":0.8,"confidence":0.7,"signals":["credential_text"]},"teacher":{"enabled":True,"evaluated":False,"agreement":None,"action":None,"error":"missing_api_key"},"timings":{"teacher_ms":40,"reflex_ms":3}},
+    ]
+    path=tmp_path/'decisions.jsonl'; path.write_text('\n'.join(json.dumps(row) for row in rows))
+    studio=SimpleNamespace(reflex_dataset_path=str(path), jev_api_key_env='TEST_JEV_KEY', jev_enabled=True, jev_mode='shadow', jev_model='test')
+    monkeypatch.delenv('TEST_JEV_KEY', raising=False)
+    result=ReflexMetrics(studio).snapshot(now=datetime(2026,9,21,11,tzinfo=timezone.utc))
+    assert result['config']['teacher_api_key_configured'] is False
+    assert result['summary']['average_confidence']==result['summary']['average_rule_confidence']
+    assert result['teacher']['actions']=={'review':1,'allow':1}
+    assert result['teacher']['allow_rate']==50.0
+    assert result['teacher']['review_rate']==50.0
+    assert result['teacher']['disagreement_diagnostics']['count']==1
+    assert result['teacher']['disagreement_diagnostics']['reflex_to_teacher_actions']=={'allow -> review':1}
+    assert result['teacher']['disagreement_diagnostics']['risk']=={'samples':1,'min':0.34,'median':0.34,'max':0.34}
+    assert result['latency']['teacher_success']['samples']==2
+    assert result['latency']['teacher_failure']['samples']==1

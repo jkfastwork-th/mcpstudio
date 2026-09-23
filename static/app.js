@@ -3,6 +3,9 @@ let sessionTunnelFilter = '';
 let showSessionHistory = false;
 let showManagedHistory = false;
 let reflexWindow = '24h';
+let actionProviders = [];
+let currentActionProvider = null;
+let latestActionJudgment = null;
 let latestData = null;
 
 
@@ -583,6 +586,7 @@ const viewMeta = {
   sessions:['Capsule Lanes','Capsule Lanes','Inspect capsule state, routing, handoffs, and session history.'],
   agents:['Agents','Agents','Monitor runtime availability, authentication health, rate limits, and active capsule load.'],
   reflex:['Reflex','Reflex','Observe HIRDA Reflex decisions, JEV teacher agreement, latency, risk, and dataset growth.'],
+  actions:['Actions','JEV Action Adapter','Test one shared action schema across Browser, World, and Finance without executing candidates.'],
   workspaces:['Workspaces','Workspaces','Manage approved projects, managed sessions, and workspace safety.'],
   guide:['Guide','Guide','Daily use first, then setup and troubleshooting.'],
   computer:['Computer','Computer','Open a shared browser desktop for OAuth, sign-in, consent, and other human-in-the-loop actions.'],
@@ -603,6 +607,7 @@ function setView(view, updateHash=true){
   if(updateHash && location.hash !== `#${view}`) history.replaceState(null,'',`#${view}`);
   if(view==='computer') setTimeout(refreshComputerView,0);
   if(view==='reflex') setTimeout(()=>uiAction(refreshReflexMetrics),0);
+  if(view==='actions') setTimeout(()=>uiAction(refreshActionPlayground),0);
   window.scrollTo({top:0,behavior:'smooth'});
 }
 
@@ -840,8 +845,14 @@ function renderReflexMetrics(data){
   const dataset=metrics.dataset||{};
   const maxTimeline=Math.max(1,...timeline.map(item=>Number(item.decisions||0)));
   const teacherStatus=config.teacher_enabled
-    ? (teacher.availability_rate==null?'Waiting for samples':`${reflexPct(teacher.availability_rate)} available`)
+    ? (config.teacher_api_key_configured===false?'Key missing · '+(teacher.availability_rate==null?'availability unknown':`${reflexPct(teacher.availability_rate)} available`):(teacher.availability_rate==null?'Configured · waiting for samples':`Configured · ${reflexPct(teacher.availability_rate)} available`))
     : 'Disabled';
+  const teacherActions=teacher.actions||{};
+  const disagreements=teacher.disagreement_diagnostics||{};
+  const disagreementPairs=disagreements.reflex_to_teacher_actions||{};
+  const disagreementTools=disagreements.tools||{};
+  const disagreementPermissions=disagreements.permission_classes||{};
+  const topEvidence=(values)=>Object.entries(values).slice(0,3).map(([key,value])=>`${reflexPretty(key)} ${value}`).join(' · ')||'None recorded';
   const agreement=config.teacher_enabled?reflexPct(teacher.agreement_rate):'—';
   const outcomeRate=reflexPct(outcomes.http_success_rate);
   const mode=String(config.reflex_mode||'unknown').toUpperCase();
@@ -861,12 +872,13 @@ function renderReflexMetrics(data){
 
     <div class="reflex-summary-grid">
       <article class="reflex-metric-card"><span>Decisions</span><strong>${esc(summary.decisions||0)}</strong><small>${esc(metrics.window||reflexWindow)} window</small></article>
-      <article class="reflex-metric-card allow"><span>Allow rate</span><strong>${esc(reflexPct(summary.allow_rate))}</strong><small>${esc(summary.allow||0)} allow</small></article>
-      <article class="reflex-metric-card review"><span>Review rate</span><strong>${esc(reflexPct(summary.review_rate))}</strong><small>${esc(summary.review||0)} review</small></article>
-      <article class="reflex-metric-card deny"><span>Deny rate</span><strong>${esc(reflexPct(summary.deny_rate))}</strong><small>${esc(summary.deny||0)} deny</small></article>
+      <article class="reflex-metric-card allow"><span>Reflex allow</span><strong>${esc(reflexPct(summary.allow_rate))}</strong><small>${esc(summary.allow||0)} allow</small></article>
+      <article class="reflex-metric-card review"><span>Reflex review</span><strong>${esc(reflexPct(summary.review_rate))}</strong><small>${esc(summary.review||0)} review</small></article>
+      <article class="reflex-metric-card deny"><span>Reflex deny</span><strong>${esc(reflexPct(summary.deny_rate))}</strong><small>${esc(summary.deny||0)} deny</small></article>
       <article class="reflex-metric-card teacher"><span>JEV agreement</span><strong>${esc(agreement)}</strong><small>${esc(teacher.evaluated||0)} evaluated</small></article>
+      <article class="reflex-metric-card"><span>Rule confidence</span><strong>${esc(reflexPct(summary.average_rule_confidence==null?null:Number(summary.average_rule_confidence)*100))}</strong><small>rule coverage, not correctness probability</small></article>
       <article class="reflex-metric-card"><span>Reflex median</span><strong>${esc(reflexMs(latency.reflex?.median_ms))}</strong><small>P95 ${esc(reflexMs(latency.reflex?.p95_ms))}</small></article>
-      <article class="reflex-metric-card"><span>JEV median</span><strong>${esc(reflexMs(latency.teacher?.median_ms))}</strong><small>P95 ${esc(reflexMs(latency.teacher?.p95_ms))}</small></article>
+      <article class="reflex-metric-card"><span>JEV median</span><strong>${esc(reflexMs((latency.teacher_success||latency.teacher)?.median_ms))}</strong><small>P95 ${esc(reflexMs((latency.teacher_success||latency.teacher)?.p95_ms))}</small></article>
       <article class="reflex-metric-card"><span>Transport success</span><strong>${esc(outcomeRate)}</strong><small>HTTP only · not semantic correctness</small></article>
     </div>
 
@@ -887,9 +899,13 @@ function renderReflexMetrics(data){
         <div class="panel-head"><div><span class="eyebrow">TEACHER</span><h3>JEV comparison</h3></div><small>shadow evidence only</small></div>
         <div class="reflex-teacher-grid">
           <div><span>Available</span><strong>${esc(reflexPct(teacher.availability_rate))}</strong></div>
+          <div><span>JEV Allow</span><strong>${esc(teacherActions.allow||0)} · ${esc(reflexPct(teacher.allow_rate))}</strong></div>
+          <div><span>JEV Review</span><strong>${esc(teacherActions.review||0)} · ${esc(reflexPct(teacher.review_rate))}</strong></div>
+          <div><span>JEV Deny</span><strong>${esc(teacherActions.deny||0)} · ${esc(reflexPct(teacher.deny_rate))}</strong></div>
           <div><span>Agreement</span><strong>${esc(agreement)}</strong></div>
-          <div><span>Agree</span><strong>${esc(teacher.agreement||0)}</strong></div>
           <div><span>Disagree</span><strong>${esc(teacher.disagreement||0)}</strong></div>
+          <div><span>Top disagreements</span><strong>${esc(topEvidence(disagreementPairs))}</strong></div>
+          <div><span>Evidence</span><strong>${esc(topEvidence(disagreementTools))}</strong><small>${esc(topEvidence(disagreementPermissions))}</small></div>
         </div>
         ${(teacher.errors||[]).length?`<div class="reflex-errors">${teacher.errors.slice(0,4).map(item=>`<span><code>${esc(item.error)}</code><b>${esc(item.count)}</b></span>`).join('')}</div>`:''}
       </article>
@@ -924,7 +940,7 @@ function renderReflexMetrics(data){
               return `<tr>
                 <td>${esc(when)}</td><td>${esc(row.workspace_key||'—')}</td><td><code>${esc(row.tool||'—')}</code></td><td>${esc(row.permission_class||'—')}</td>
                 <td>${reflexActionPill(row.action)}</td><td>${esc(Number(row.risk||0).toFixed(2))}</td><td>${esc(row.compute_lane||'—')}</td>
-                <td class="${teacherRow.agreement===false?'reflex-disagree':''}">${esc(teacherLabel)}</td><td>${esc(reflexMs(row.timings?.reflex_ms))}</td>
+                <td class="${teacherRow.agreement===false?'reflex-disagree':''}">${esc(teacherLabel)}</td><td>${esc(reflexMs(row.timings?.reflex_ms))} · ${esc(reflexMs(row.timings?.teacher_ms))}</td>
               </tr>`;
             }).join(''):'<tr><td colspan="9"><div class="empty">No Reflex decisions recorded yet.</div></td></tr>'}
           </tbody>
@@ -949,6 +965,126 @@ async function refreshReflexMetrics(){
   captureAndTranslateText(document.getElementById('reflexMetricsPanel')||document);
 }
 
+
+function actionRiskLabels(risk){
+  const labels=[];
+  if(risk?.consequential)labels.push('consequential');
+  if(risk?.reversible===false)labels.push('irreversible');
+  if(risk?.external_side_effect)labels.push('external side effect');
+  if(risk?.destructive)labels.push('destructive');
+  if(risk?.financial)labels.push('financial');
+  if(risk?.requires_human_approval)labels.push('human approval');
+  return labels;
+}
+
+function renderActionPlayground(){
+  const providerSummary=document.getElementById('actionProviderSummary');
+  const envelopePanel=document.getElementById('actionEnvelopePanel');
+  const judgmentPanel=document.getElementById('actionJudgmentPanel');
+  const provider=currentActionProvider;
+  if(providerSummary){
+    providerSummary.innerHTML=provider
+      ? `<div class="action-provider-identity"><div><span class="eyebrow">${esc(provider.domain||'unknown')} · ${esc(provider.source||'runtime')}</span><strong>${esc(provider.title||provider.provider_id||'Provider')}</strong><p>${esc(provider.description||'')}</p></div><span class="pill healthy">${esc(provider.action_count||provider.envelope?.actions?.length||0)} actions</span></div>`
+      : '<div class="empty">Choose a test provider.</div>';
+  }
+
+  if(envelopePanel){
+    const envelope=provider?.envelope;
+    if(!envelope){
+      envelopePanel.innerHTML='<div class="empty">Load a provider sample to inspect its state and candidate actions.</div>';
+    }else{
+      const actions=envelope.actions||[];
+      envelopePanel.innerHTML=`
+        <div class="action-envelope-head">
+          <div><span>Request</span><code>${esc(envelope.request_id||'—')}</code></div>
+          <div><span>Provider</span><strong>${esc(envelope.provider||'—')}</strong></div>
+          <div><span>Domain</span><strong>${esc(envelope.domain||'—')}</strong></div>
+          <div><span>Executor</span><strong>Not attached</strong></div>
+        </div>
+        <div class="action-goal"><span>Goal</span><p>${esc(envelope.goal||'—')}</p></div>
+        <div class="action-envelope-layout">
+          <div class="action-candidate-list">
+            ${actions.map((action,index)=>{
+              const labels=actionRiskLabels(action.risk||{});
+              return `<article class="action-candidate-card">
+                <div class="action-candidate-title"><span class="action-token">a${index}</span><div><strong>${esc(action.title||action.action_id)}</strong><code>${esc(action.action_id||'')}</code></div><span class="pill ${action.permission_class==='destructive'?'down':action.permission_class==='execute'?'degraded':'healthy'}">${esc(action.permission_class||'unknown')}</span></div>
+                <p>${esc(action.description||'')}</p>
+                <div class="action-risk-tags">${labels.length?labels.map(label=>`<span>${esc(label)}</span>`).join(''):'<span class="quiet">no elevated risk flags</span>'}</div>
+              </article>`;
+            }).join('')}
+          </div>
+          <div class="action-state-card"><span class="eyebrow">STRUCTURED STATE</span><pre>${esc(JSON.stringify(envelope.state||{},null,2))}</pre></div>
+        </div>
+      `;
+    }
+  }
+
+  if(judgmentPanel){
+    const judgment=latestActionJudgment;
+    if(!judgment){
+      judgmentPanel.innerHTML='<div class="empty">Run an evaluation to see JEV choice, confidence, and risk signals.</div>';
+    }else if(!judgment.evaluated){
+      judgmentPanel.innerHTML=`
+        <div class="action-judgment-state unavailable"><span>JEV unavailable</span><strong>${esc(judgment.error||'not evaluated')}</strong><small>No action was executed. Runtime authority remains outside this adapter.</small></div>
+      `;
+    }else{
+      const probabilities=Object.entries(judgment.probabilities||{}).sort((a,b)=>Number(b[1])-Number(a[1]));
+      const signals=[
+        ['Human review',judgment.needs_human_review],
+        ['More information',judgment.needs_more_information],
+        ['Consequence risk',judgment.consequence_risk],
+        ['Uncertainty',judgment.uncertainty],
+      ];
+      judgmentPanel.innerHTML=`
+        <div class="action-selected-card">
+          <span>Selected candidate</span>
+          <strong>${esc(judgment.selected_action_id||'—')}</strong>
+          <small>${esc(reflexPct(Number(judgment.confidence||0)*100))} confidence · ${esc(judgment.model||'JEV')}</small>
+        </div>
+        <div class="action-signal-grid">
+          ${signals.map(([label,value])=>`<div><span>${esc(label)}</span><strong>${value==null?'—':esc((Number(value)*100).toFixed(0)+'%')}</strong></div>`).join('')}
+        </div>
+        <div class="action-probability-list">
+          ${probabilities.length?probabilities.map(([actionId,value])=>`<div><span><code>${esc(actionId)}</code></span><div class="reflex-bar-track"><i style="width:${Math.max(2,Number(value||0)*100)}%"></i></div><strong>${esc((Number(value||0)*100).toFixed(0)+'%')}</strong></div>`).join(''):'<div class="empty">JEV did not return candidate probabilities.</div>'}
+        </div>
+        <div class="action-authority-lock">advisory_only=true · runtime_authorization_required=true · may_execute=false</div>
+      `;
+    }
+  }
+  captureAndTranslateText(document.querySelector('[data-page="actions"]')||document);
+}
+
+async function loadActionProvider(providerId){
+  const normalized=providerId||document.getElementById('actionProviderSelect')?.value||'browser';
+  currentActionProvider=await getJson(`/api/action-adapter/providers/${encodeURIComponent(normalized)}`);
+  latestActionJudgment=null;
+  renderActionPlayground();
+}
+
+async function refreshActionPlayground(){
+  const data=await getJson('/api/action-adapter/providers');
+  actionProviders=data.providers||[];
+  const select=document.getElementById('actionProviderSelect');
+  if(select){
+    const previous=select.value;
+    select.innerHTML=actionProviders.map(provider=>`<option value="${esc(provider.provider_id)}">${esc(provider.title)} · ${esc(provider.domain)}</option>`).join('');
+    if(previous && actionProviders.some(provider=>provider.provider_id===previous))select.value=previous;
+  }
+  await loadActionProvider(select?.value||actionProviders[0]?.provider_id||'browser');
+}
+
+async function evaluateActionProvider(){
+  const providerId=document.getElementById('actionProviderSelect')?.value||currentActionProvider?.provider_id;
+  if(!providerId)throw new Error('Choose an action test provider first.');
+  const result=await sendJson(`/api/action-adapter/providers/${encodeURIComponent(providerId)}/evaluate`);
+  currentActionProvider={
+    ...(result.provider||{}),
+    envelope:result.envelope||{},
+  };
+  latestActionJudgment=result.judgment||null;
+  renderActionPlayground();
+}
+
 function renderOverview(data){
   const {status,managedSessions,alertsData,capsulesData,agentRuntimesData}=data;
   const items=managedSessions?.sessions||[];
@@ -968,6 +1104,8 @@ function renderOverview(data){
   const currentAgent=String(hasLedger?(liveCapsule.current_agent||'claude'):'hermes').toLowerCase();
   const currentStage=hasLedger?(liveCapsule.current_stage||'ingress'):'agent_runtime';
   const lastHandoff=hasLedger?liveCapsule.last_handoff:null;
+  const pendingHandoff=hasLedger?liveCapsule.pending_handoff:null;
+  const routeHandoff=pendingHandoff||lastHandoff;
   const capsuleSummary=capsulesData?.summary||{};
   const runtimeSummary=agentRuntimesData?.summary||{};
 
@@ -984,13 +1122,13 @@ function renderOverview(data){
     codex:{name:'Codex',sub:runtimeById.codex?.model||'OpenAI Codex',y:142,color:'#10a37f'},
     hermes:{name:'Hermes',sub:runtimeById.hermes?.model||'Nous / custom',y:240,color:'#7c3aed'}
   };
-  const fromAgent=String(lastHandoff?.from_agent||'').toLowerCase();
-  const toAgent=String(lastHandoff?.to_agent||'').toLowerCase();
+  const fromAgent=String(routeHandoff?.from_agent||'').toLowerCase();
+  const toAgent=String(routeHandoff?.to_agent||'').toLowerCase();
   const lanes=Object.entries(laneDefs).map(([key,meta])=>{
     const participates=key===currentAgent||key===fromAgent||key===toAgent;
     const active=key===currentAgent && liveCapsule?.status!=='completed';
-    const statusText=active?'Running':key===fromAgent&&lastHandoff?'Handoff source':key===toAgent&&lastHandoff?'Received':'Ready';
-    const eventStage=key===fromAgent?(lastHandoff?.from_stage||''):key===toAgent?(lastHandoff?.to_stage||''):'';
+    const statusText=pendingHandoff&&key===toAgent?'Awaiting ACK':active&&pendingHandoff&&key===fromAgent?'Running · handoff in flight':active?'Running':key===fromAgent&&lastHandoff?'Handoff source':key===toAgent&&lastHandoff?'Received':'Ready';
+    const eventStage=key===fromAgent?(routeHandoff?.from_stage||''):key===toAgent?(routeHandoff?.to_stage||''):'';
     return renderCapsuleLane({
       agent:meta.name,
       sub:meta.sub,
@@ -1004,12 +1142,12 @@ function renderOverview(data){
   }).join('');
 
   let connector='';
-  if(lastHandoff && laneDefs[fromAgent] && laneDefs[toAgent]){
+  if(routeHandoff && laneDefs[fromAgent] && laneDefs[toAgent]){
     const from=laneDefs[fromAgent], to=laneDefs[toAgent];
-    const connectorId=lastHandoff.connector_id||capsuleId;
+    const connectorId=routeHandoff.connector_id||capsuleId;
     const fromTop=(from.y/284*100).toFixed(2);
     const toTop=(to.y/284*100).toFixed(2);
-    connector=`<svg class="capsule-connector-layer" viewBox="0 0 1000 284" preserveAspectRatio="none" aria-label="Capsule handoff from ${esc(from.name)} to ${esc(to.name)}">
+    connector=`<svg class="capsule-connector-layer" viewBox="0 0 1000 284" preserveAspectRatio="none" aria-label="${pendingHandoff?'Capsule handoff awaiting ACK':'Capsule handoff committed'} from ${esc(from.name)} to ${esc(to.name)}">
       <defs>
         <linearGradient id="handoffGradientLive" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${from.color}"/><stop offset="100%" stop-color="${to.color}"/></linearGradient>
         <marker id="handoffArrowLive" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="${to.color}"/></marker>
@@ -1027,7 +1165,7 @@ function renderOverview(data){
   const hero=document.getElementById('heroStatus');
   hero.className='capsule-state-card';
   const laneName=laneDefs[currentAgent]?.name||currentAgent;
-  const lastText=lastHandoff?`${laneDefs[fromAgent]?.name||fromAgent} → ${laneDefs[toAgent]?.name||toAgent}`:'No handoff yet';
+  const lastText=pendingHandoff?`${laneDefs[fromAgent]?.name||fromAgent} → ${laneDefs[toAgent]?.name||toAgent} · ${pendingHandoff.state||'pending'}`:lastHandoff?`${laneDefs[fromAgent]?.name||fromAgent} → ${laneDefs[toAgent]?.name||toAgent} · committed`:'No handoff yet';
   const nextFallback=currentAgent==='claude'?'Codex / Hermes':currentAgent==='codex'?'Hermes':'Codex';
   const stageLabel=String(currentStage||'').replaceAll('_',' ');
   hero.innerHTML=`<div class="capsule-card-heading compact"><div><span class="capsule-active-label">Active Capsule</span><h3>${esc(capsuleId)}</h3></div><span class="state-live-dot">${liveCapsule?.status==='completed'?'✓ Completed':'● Live'}</span></div>
@@ -1039,7 +1177,8 @@ function renderOverview(data){
       <div><span>Current stage</span><strong>${esc(stageLabel)}</strong></div>
       <div><span>Source</span><strong>${esc(sourcePane)}</strong></div>
       <div><span>Last handoff</span><strong>${esc(lastText)}</strong></div>
-      ${lastHandoff?.a2a?.task_id?`<div><span>A2A task</span><strong>${esc(lastHandoff.a2a.task_id)} · ${esc(lastHandoff.a2a.task?.status?.state||'submitted')}</strong></div>`:''}
+      ${routeHandoff?.a2a?.task_id?`<div><span>A2A task</span><strong>${esc(routeHandoff.a2a.task_id)} · ${esc(routeHandoff.a2a.task?.status?.state||routeHandoff.state||'pending')}</strong></div>`:pendingHandoff?.a2a_task_id?`<div><span>A2A task</span><strong>${esc(pendingHandoff.a2a_task_id)} · ${esc(pendingHandoff.state||'pending')}</strong></div>`:''}
+      ${pendingHandoff?`<div><span>Handoff state</span><strong>${esc(pendingHandoff.state||'pending')} · owner remains ${esc(laneName)}</strong></div>`:''}
       <div><span>Next fallback</span><strong>${esc(nextFallback)}</strong></div>
     </div>
     <button class="button capsule-detail-button" data-go-view="sessions" data-capsule-id="${esc(capsuleId)}"${!hasLedger&&activeSession?.id?` data-managed-session-id="${esc(activeSession.id)}"`:'' } type="button">View capsule details →</button>`;
@@ -1048,8 +1187,9 @@ function renderOverview(data){
     const ev=[...(liveCapsule.events||[])].reverse().slice(0,6);
     document.getElementById('activeSessionsPanel').innerHTML=ev.length?`<div class="capsule-event-list">${ev.map(e=>{
       const d=e.data||{};
-      const detail=e.kind==='capsule.handoff'?`${d.from_agent} → ${d.to_agent} · ${d.reason||'handoff'}`:e.kind==='capsule.stage'?`Stage → ${d.stage}`:e.kind==='capsule.completed'?'Capsule completed':'Capsule created';
-      const cls=e.kind==='capsule.handoff'?'event-handoff':'event-success';
+      const isHandoff=e.kind.startsWith('capsule.handoff');
+      const detail=isHandoff?`${d.from_agent||'?'} → ${d.to_agent||'?'} · ${e.kind.replace('capsule.handoff_','').replace('capsule.handoff','committed')}`:e.kind==='capsule.stage'?`Stage → ${d.stage}`:e.kind==='capsule.completed'?'Capsule completed':'Capsule created';
+      const cls=isHandoff?'event-handoff':'event-success';
       return `<div class="capsule-event-row"><span class="event-time">${esc(ago(e.created_at))}</span><b>${esc(capsuleId)}</b><span>${esc(detail)}</span><em class="${cls}">${esc(e.kind.replace('capsule.',''))}</em></div>`;
     }).join('')}</div>`:'<div class="empty good">No capsule events yet.</div>';
   }else{
@@ -1088,20 +1228,29 @@ function renderCapsuleLedger(data){
   }
   panel.innerHTML=capsules.map((capsule,index)=>{
     const handoffs=capsule.handoffs||[];
+    const pending=capsule.pending_handoff||null;
     const events=[...(capsule.events||[])].reverse();
     const current=String(capsule.current_agent||'unknown').toLowerCase();
     const last=capsule.last_handoff||null;
-    const route=last?`${last.from_agent} → ${last.to_agent}`:`${current} · no handoff yet`;
-    const handoffRows=handoffs.length?handoffs.slice().reverse().map(h=>`<div class="capsule-trace-row">
+    const route=pending?`${pending.from_agent} → ${pending.to_agent} · ${pending.state||'pending'}`:last?`${last.from_agent} → ${last.to_agent} · committed`:`${current} · no handoff yet`;
+    const pendingRow=pending?`<div class="capsule-trace-row"><span class="trace-connector">${esc(pending.connector_id||capsule.capsule_id)}</span><div><strong>${esc(pending.from_agent)} → ${esc(pending.to_agent)}</strong><small>IN FLIGHT · ${esc(pending.state||'pending')} · ownership remains ${esc(current)}</small></div><code>${esc(pending.handoff_id||'—')}</code></div>`:'';
+    const committedRows=handoffs.length?handoffs.slice().reverse().map(h=>`<div class="capsule-trace-row">
       <span class="trace-connector">${esc(h.connector_id||capsule.capsule_id)}</span>
       <div><strong>${esc(h.from_agent)} → ${esc(h.to_agent)}</strong><small>${esc(h.reason||'manual')} · ${esc(when(h.created_at))}${h.a2a?.task_id?` · A2A ${esc(h.a2a.task_id)}`:''}</small></div>
       <code>${esc(h.handoff_id||'—')}</code>
-    </div>`).join(''):'<div class="empty compact">No handoff recorded.</div>';
+    </div>`).join(''):'';
+    const handoffRows=pendingRow||committedRows?`${pendingRow}${committedRows}`:'<div class="empty compact">No handoff recorded.</div>';
     const timeline=events.length?events.map(e=>{
       const d=e.data||{};
       let text=e.message||e.kind;
       if(e.kind==='capsule.stage') text=`Stage → ${d.stage||'unknown'}`;
-      if(e.kind==='capsule.handoff') text=`${d.from_agent||'?'} → ${d.to_agent||'?'} · ${d.reason||'handoff'}`;
+      if(e.kind==='capsule.handoff') text=`Legacy committed ${d.from_agent||'?'} → ${d.to_agent||'?'} · ${d.reason||'handoff'}`;
+      if(e.kind==='capsule.handoff_requested') text=`Requested ${d.from_agent||'?'} → ${d.to_agent||'?'}`;
+      if(e.kind==='capsule.handoff_dispatched') text=`Dispatched to ${d.to_agent||'?'} · awaiting ACK`;
+      if(e.kind==='capsule.handoff_acknowledged') text=`ACK received from ${d.to_agent||'?'}`;
+      if(e.kind==='capsule.handoff_committed') text=`Committed ${d.from_agent||'?'} → ${d.to_agent||'?'}`;
+      if(e.kind==='capsule.handoff_failed') text=`Delivery failed ${d.from_agent||'?'} → ${d.to_agent||'?'} · ${d.error||d.reason||'failure'}`;
+      if(e.kind==='capsule.handoff_dispatch_uncertain') text=`Dispatch uncertain ${d.from_agent||'?'} → ${d.to_agent||'?'}`;
       if(e.kind==='capsule.handoff_blocked') text=`Blocked ${d.from_agent||'?'} → ${d.to_agent||'?'} · ${d.reason||'context fit'}`;
       if(e.kind==='capsule.completed') text='Capsule completed';
       return `<div class="capsule-timeline-row"><span class="timeline-dot ${esc(e.kind.replace('capsule.',''))}"></span><div><strong>${esc(text)}</strong><small>${esc(when(e.created_at))} · ${esc(e.kind)}</small></div></div>`;
@@ -1370,6 +1519,7 @@ async function runGlobalSearch(raw){
     [/(dashboard|home|overview)/,'home'],
     [/(capsule|session|handoff)/,'sessions'],
     [/(agent|claude|codex|hermes)/,'agents'],
+    [/(action adapter|action schema|action provider|action playground)/,'actions'],
     [/(reflex|jev|decision engine|risk|teacher|agreement)/,'reflex'],
     [/(workspace|project)/,'workspaces'],
     [/(guide|help|tutorial|how to|quick start)/,'guide'],
@@ -1457,6 +1607,9 @@ document.getElementById('sessionTunnelFilter').addEventListener('change',e=>{ses
 document.getElementById('sessionHistoryToggle').addEventListener('click',()=>{showSessionHistory=!showSessionHistory;if(latestData)renderSessions(latestData);});
 document.getElementById('reflexWindowSelect')?.addEventListener('change',e=>uiAction(async()=>{reflexWindow=e.target.value||'24h';await refreshReflexMetrics();}));
 document.getElementById('reflexRefreshBtn')?.addEventListener('click',()=>uiAction(async()=>{const b=document.getElementById('reflexRefreshBtn');b.disabled=true;b.textContent=tr('Refreshing…');try{await refreshReflexMetrics();}finally{b.disabled=false;b.textContent=tr('Refresh metrics');}}));
+document.getElementById('actionProviderSelect')?.addEventListener('change',e=>uiAction(()=>loadActionProvider(e.target.value)));
+document.getElementById('actionLoadBtn')?.addEventListener('click',()=>uiAction(async()=>{const b=document.getElementById('actionLoadBtn');b.disabled=true;try{await loadActionProvider();}finally{b.disabled=false;}}));
+document.getElementById('actionEvaluateBtn')?.addEventListener('click',()=>uiAction(async()=>{const b=document.getElementById('actionEvaluateBtn');b.disabled=true;b.textContent='Evaluating…';try{await evaluateActionProvider();}finally{b.disabled=false;b.textContent='Evaluate with JEV';}}));
 document.getElementById('refreshBtn').addEventListener('click',()=>uiAction(async()=>{const b=document.getElementById('refreshBtn');b.disabled=true;b.textContent=tr('Refreshing…');try{await load();}finally{b.disabled=false;b.textContent=tr('Refresh');}}));
 document.getElementById('pollBtn').addEventListener('click',()=>uiAction(async()=>{const b=document.getElementById('pollBtn');b.disabled=true;b.textContent=tr('Polling…');try{await getJson('/api/health/poll',{method:'POST'});await load();}finally{b.disabled=false;b.textContent=tr('Poll health');}}));
 document.getElementById('herdrBtn').addEventListener('click',()=>uiAction(async()=>{const b=document.getElementById('herdrBtn');b.disabled=true;b.textContent=tr('Refreshing…');try{await getJson('/api/herdr/refresh',{method:'POST'});await load();}finally{b.disabled=false;b.textContent=tr('Refresh Herdr');}}));

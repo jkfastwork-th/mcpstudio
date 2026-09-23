@@ -82,6 +82,41 @@ def test_credential_plus_network_write_is_denied():
     assert decision.code == "REFLEX_TOOL_DENIED"
 
 
+def test_loopback_network_write_is_not_escalated_as_remote_network_write():
+    decision, features = evaluate_tool_call(
+        _studio(),
+        "execute_shell_command",
+        {
+            "command": (
+                "curl -X POST -H 'Content-Type: application/json' "
+                "--data '{\"jsonrpc\":\"2.0\"}' "
+                "http://127.0.0.1:8100/ingress/openai/serena-8001"
+            )
+        },
+        "execute",
+    )
+    assert features.has_network_write_signal is False
+    assert decision.action == "allow"
+    assert decision.blocked is False
+
+
+def test_loopback_exemption_does_not_hide_remote_url_in_same_command():
+    decision, features = evaluate_tool_call(
+        _studio(),
+        "execute_shell_command",
+        {
+            "command": (
+                "curl -X POST -d '{}' http://127.0.0.1:8100/local "
+                "https://example.test/remote"
+            )
+        },
+        "execute",
+    )
+    assert features.has_network_write_signal is True
+    assert decision.action == "review"
+    assert decision.blocked is True
+
+
 def test_shadow_mode_never_blocks_but_keeps_decision():
     decision, _ = evaluate_tool_call(
         _studio(reflex_mode="shadow"),

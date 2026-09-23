@@ -24,6 +24,8 @@ STATIC_DIRECT_HANDLERS = {
     "fontIncreaseBtn": "fontIncreaseBtn').addEventListener('click'",
     "refreshBtn": "refreshBtn').addEventListener('click'",
     "reflexRefreshBtn": "reflexRefreshBtn')?.addEventListener('click'",
+    "actionLoadBtn": "actionLoadBtn')?.addEventListener('click'",
+    "actionEvaluateBtn": "actionEvaluateBtn')?.addEventListener('click'",
     "managedHistoryToggle": "managedHistoryToggle').addEventListener('click'",
     "newManagedSessionBtn": "newManagedSessionBtn').addEventListener('click'",
     "cancelManagedSessionBtn": "cancelManagedSessionBtn').addEventListener('click'",
@@ -181,6 +183,10 @@ def test_attach_button_never_fails_silently():
 def test_button_backend_routes_exist():
     routes = {
         ("GET", "/api/agents/runtimes"),
+        ("GET", "/api/action-adapter/registry"),
+        ("GET", "/api/action-adapter/providers"),
+        ("GET", "/api/action-adapter/providers/{provider_id}"),
+        ("POST", "/api/action-adapter/providers/{provider_id}/evaluate"),
         ("POST", "/api/managed/workspaces"),
         ("POST", "/api/managed/sessions"),
         ("POST", "/api/managed/sessions/{session_id}/rename"),

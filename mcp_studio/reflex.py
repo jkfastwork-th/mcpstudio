@@ -21,6 +21,11 @@ _NETWORK_WRITE = re.compile(
     r"\b(?:curl|wget)\b.*(?:--data(?:-binary)?|-d\b|--upload-file|-T\b|--request\s+(?:POST|PUT|PATCH|DELETE)|-X\s*(?:POST|PUT|PATCH|DELETE))",
     re.IGNORECASE,
 )
+_HTTP_URL = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
+_LOOPBACK_HTTP = re.compile(
+    r"https?://(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::\d+)?(?:[/?#]|$)",
+    re.IGNORECASE,
+)
 _CREDENTIAL_TEXT = re.compile(
     r"(?i)\b(?:authorization|bearer|password|secret|token|api[_-]?key|credential)\b"
 )
@@ -78,6 +83,15 @@ def _bounded(value: float) -> float:
     return round(max(0.0, min(1.0, float(value))), 3)
 
 
+def _has_remote_network_write(command_text: str) -> bool:
+    if not _NETWORK_WRITE.search(command_text):
+        return False
+    urls = _HTTP_URL.findall(command_text)
+    if not urls:
+        return True
+    return any(not _LOOPBACK_HTTP.match(url) for url in urls)
+
+
 def _command_shape(arguments: dict[str, Any]) -> tuple[str | None, str | None, str]:
     raw = arguments.get("command")
     if not isinstance(raw, str) or not raw.strip():
@@ -132,7 +146,7 @@ def extract_features(
         shell_subcommand=subcommand,
         has_force_flag=bool(_FORCE_FLAG.search(command_text)),
         has_privilege_signal=bool(_PRIVILEGE.search(command_text)),
-        has_network_write_signal=bool(_NETWORK_WRITE.search(command_text)),
+        has_network_write_signal=_has_remote_network_write(command_text),
         has_credential_text_signal=bool(credential_text or _CREDENTIAL_TEXT.search(command_text)),
         risky_git_operation=bool(_RISKY_GIT.search(command_text)),
         argument_size_bucket=bucket,

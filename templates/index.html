@@ -48,6 +48,7 @@
 <a data-help="Inspect capsule state, routing, handoffs, and session history." data-view="sessions" href="#sessions"><span>◉</span>Capsule Lanes</a>
 <a data-help="Monitor Claude, Codex, and Hermes runtime availability." data-view="agents" href="#agents"><span>◈</span>Agents</a>
 <a data-help="Inspect HIRDA Reflex decisions, JEV teacher agreement, latency, risk, and dataset growth." data-view="reflex" href="#reflex"><span>◇</span>Reflex</a>
+<a data-help="Test the generic JEV Action Adapter with side-effect-free Browser, World, and Finance fixtures." data-view="actions" href="#actions"><span>◎</span>Actions</a>
 <a data-help="Approved project folders, managed sessions and workspace safety." data-view="workspaces" href="#workspaces"><span>▢</span>Workspaces</a>
 <a data-help="Quick start, daily workflow, setup, and troubleshooting guidance." data-view="guide" href="#guide"><span>?</span>Guide</a>
 <a data-help="Shared browser desktop for OAuth, login and consent screens." data-view="computer" href="#computer"><span>▤</span>Computer</a>
@@ -198,6 +199,37 @@
 </div>
 <div id="reflexMetricsPanel" class="reflex-metrics-root">
   <div class="panel-card"><div class="empty">Loading Reflex metrics…</div></div>
+</div>
+</section>
+
+<section class="view-page" data-page="actions">
+<div class="page-section-head focus-page-head action-page-head">
+  <div><span class="eyebrow">GENERIC ACTION FABRIC</span><h2>JEV Action Adapter</h2><p>Test one shared action schema across Browser, World, and Finance. This playground never executes a candidate.</p></div>
+</div>
+<div class="action-playground-grid">
+  <article class="panel-card action-provider-card">
+    <div class="panel-head"><div><span class="eyebrow">TEST PROVIDER</span><h3>Scenario</h3></div><span class="pill healthy">NO EXECUTOR</span></div>
+    <div class="action-playground-controls">
+      <label><span>Provider</span><select id="actionProviderSelect"></select></label>
+      <div class="action-playground-buttons">
+        <button class="button secondary small" id="actionLoadBtn" type="button">Load sample</button>
+        <button class="button small" id="actionEvaluateBtn" type="button">Evaluate with JEV</button>
+      </div>
+    </div>
+    <div id="actionProviderSummary" class="action-provider-summary"><div class="empty">Choose a test provider.</div></div>
+  </article>
+  <article class="panel-card action-judgment-card">
+    <div class="panel-head"><div><span class="eyebrow">JEV JUDGMENT</span><h3>Advisory result</h3></div><small>may_execute=false</small></div>
+    <div id="actionJudgmentPanel" class="action-judgment-panel"><div class="empty">Run an evaluation to see JEV choice, confidence, and risk signals.</div></div>
+  </article>
+</div>
+<article class="panel-card action-envelope-card">
+  <div class="panel-head"><div><span class="eyebrow">HIRDA ACTION ENVELOPE</span><h3>Normalized candidates</h3></div><small>hirda-action-envelope-v1</small></div>
+  <div id="actionEnvelopePanel" class="action-envelope-panel"><div class="empty">Load a provider sample to inspect its state and candidate actions.</div></div>
+</article>
+<div class="reflex-boundary-note action-boundary-note">
+  <strong>Authority boundary</strong>
+  <span>JEV only judges a bounded candidate set. The playground has no executor, performs no browser/world/financial action, and cannot authorize runtime execution.</span>
 </div>
 </section>
 
@@ -415,6 +447,7 @@
 <a data-view="sessions" href="#sessions"><span>◉</span><small>Capsule Lanes</small></a>
 <a data-view="agents" href="#agents"><span>◈</span><small>Agents</small></a>
 <a data-view="reflex" href="#reflex"><span>◇</span><small>Reflex</small></a>
+<a data-view="actions" href="#actions"><span>◎</span><small>Actions</small></a>
 <a data-view="workspaces" href="#workspaces"><span>▢</span><small>Workspaces</small></a>
 <a data-view="guide" href="#guide"><span>?</span><small>Guide</small></a>
 <a data-view="computer" href="#computer"><span>▤</span><small>Computer</small></a>
