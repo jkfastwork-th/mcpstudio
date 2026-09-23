@@ -84,6 +84,12 @@ async def test_managed_session_overview_rolls_up_transport_activity(tmp_path: Pa
     assert row["ingress_providers"] == ["openai"]
 
 
+def test_context_telemetry_unknown_is_not_rendered_as_healthy():
+    js = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text()
+    assert "!ctx.telemetry_available?'unknown'" in js
+    assert "Context telemetry unavailable" in js
+
+
 @pytest.mark.asyncio
 async def test_managed_session_history_and_tools_are_exposed(tmp_path: Path):
     settings = settings_for(tmp_path)

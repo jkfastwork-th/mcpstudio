@@ -1308,7 +1308,7 @@ function renderManagedSessions(data){
     const last=x.last_used_at||x.last_transport_seen_at||x.last_started_at||x.updated_at;
     const ctx=x.context_usage||{};
     const ctxPct=ctx.telemetry_available?Number(ctx.context_usage_percent):null;
-    const ctxClass=ctx.urgency==='critical'?'critical':ctx.urgency==='recommended'?'warning':'ok';
+    const ctxClass=!ctx.telemetry_available?'unknown':ctx.urgency==='critical'?'critical':ctx.urgency==='recommended'?'warning':'ok';
     const ctxText=ctxPct==null?'Context telemetry unavailable':`Context ${ctxPct.toFixed(1)}% · ${ctx.urgency==='critical'?'rollover now':ctx.urgency==='recommended'?'prepare rollover':'healthy'}`;
     const resume=x.status==='stopped'?`<button class="button small" data-managed-resume="${esc(x.id)}" type="button">Resume</button>`:`<button class="button secondary small" data-managed-restart="${esc(x.id)}" type="button" ${x.connected_transports?'disabled':''}>Restart</button>`;
     const stop=x.status!=='stopped'?`<button class="button danger small" data-managed-stop="${esc(x.id)}" type="button" ${x.connected_transports?'disabled':''}>Stop</button>`:'';
