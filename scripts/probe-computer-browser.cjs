@@ -85,7 +85,14 @@ async function connectCdp(wsUrl) {
   console.log('BEFORE', before.result?.value);
 
   const connect = await call('Runtime.evaluate', {
-    expression: `(async()=>{ await connectComputerView(${JSON.stringify(sessionId)}); return true; })()`,
+    expression: `(async()=>{
+      for(let i=0;i<50;i++){
+        const card=document.querySelector('[data-computer-session="'+${JSON.stringify(sessionId)}+'"]');
+        if(card){card.click();return {clicked:true};}
+        await new Promise(r=>setTimeout(r,100));
+      }
+      return {clicked:false};
+    })()`,
     awaitPromise:true,
     returnByValue:true
   });
