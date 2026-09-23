@@ -1755,7 +1755,7 @@ async function refreshComputerView(){
     else if(!status.novnc_available)computerMessage('Local noVNC assets are missing.','warning');
     else if(!(status.runtime_mode==='session-isolated'?status.transport_ready:status.websockify_reachable))computerMessage(status.runtime_mode==='session-isolated'?'Session VNC transport is offline.':'Local websockify bridge is offline.','warning');
     else if(!sessions.length)computerMessage('Computer desktop is ready, but no managed sessions are available.','warning');
-    else if(ready)computerMessage('Choose a monitor to open that session desktop.','good');
+    else if(ready&&!computerUiState.selectedSessionId)computerMessage('Choose a monitor to open that session desktop.','good');
   }catch(err){
     updateComputerStatus({enabled:false});
     renderComputerSessions([]);

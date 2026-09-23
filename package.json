@@ -1,0 +1,15 @@
+{
+  "name": "hirda-local-diagnostics",
+  "version": "0.9.10",
+  "private": true,
+  "description": "Local browser and Computer Use diagnostics for HIRDA",
+  "type": "commonjs",
+  "scripts": {
+    "check:js": "node --check static/app.js",
+    "smoke:ui": "node scripts/check-ui-browser-smoke.mjs",
+    "check:computer": "node scripts/check-computer-gpu-status.cjs"
+  },
+  "dependencies": {
+    "playwright": "^1.63.0"
+  }
+}

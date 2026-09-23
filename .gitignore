@@ -31,3 +31,16 @@ static/brand/.*.b64
 .DS_Store
 *.swp
 *~
+
+# Local agent/research scratch
+*.tmp
+.claude-flow/
+graft/.cache/
+/references/
+
+# Superseded local brand/reference experiments
+/static/brand/hirda-sidebar-approved-dark.webp
+
+# One-off machine/session-specific browser experiments
+/scripts/restart-oriverse-chrome-tieroff.cjs
+/scripts/test-webgpu-tier-off.cjs

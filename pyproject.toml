@@ -26,3 +26,4 @@ packages = ["mcp_studio"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+testpaths = ["tests"]

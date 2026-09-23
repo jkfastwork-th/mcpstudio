@@ -22,6 +22,7 @@ def test_computer_monitor_gallery_contract() -> None:
     assert "computerMonitorSvg" in js
     assert "connectComputerView(sessionCard.dataset.computerSession)" in js
     assert "if(view==='computer') setTimeout(refreshComputerView,0);" in js
+    assert "ready&&!computerUiState.selectedSessionId" in js
     assert "getJson('/api/managed/sessions')" in js
     assert "computerSessionSelect" not in html
     assert "computerConnectBtn" not in html
