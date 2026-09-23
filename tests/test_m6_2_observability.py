@@ -12,8 +12,8 @@ async def test_schema_v3_contains_observability_tables(tmp_path: Path):
     db = Database(str(tmp_path / "studio.sqlite3"))
     await db.init()
     schema = await db.schema_status()
-    assert schema["current_version"] == 7
-    assert schema["expected_version"] == 7
+    assert schema["current_version"] == 8
+    assert schema["expected_version"] == 8
     assert schema["integrity"] == "ok"
 
 
