@@ -219,6 +219,17 @@ class ManagedGatewayAttach(BaseModel):
     managed_session_id: str = Field(min_length=1, max_length=120)
 
 
+class GatewayContextUsageReport(BaseModel):
+    context_usage_percent: float = Field(ge=0.0, le=100.0)
+    source: str = Field(default="product_surface", min_length=1, max_length=120)
+
+
+class SessionHandoffPrepareRequest(BaseModel):
+    summary: str = Field(min_length=1, max_length=12000)
+    reason: str | None = Field(default=None, max_length=500)
+    ttl_seconds: int = Field(default=1800, ge=60, le=86400)
+
+
 AgentId = Literal["claude", "codex", "hermes"]
 
 

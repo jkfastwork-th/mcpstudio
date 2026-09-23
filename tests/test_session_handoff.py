@@ -131,8 +131,84 @@ def test_session_handoff_tools_are_exposed_and_classified(tmp_path: Path):
     names = {tool["name"] for tool in manager._management_tools()}
     assert "mcpstudio_handoff_session" in names
     assert "mcpstudio_accept_handoff" in names
+    assert "mcpstudio_context_status" in names
+    assert "mcpstudio_report_context_usage" in names
     assert classify_tool("mcpstudio_handoff_session", {}) == "execute"
     assert classify_tool("mcpstudio_accept_handoff", {}) == "execute"
+    assert classify_tool("mcpstudio_context_status", {}) == "read"
+    assert classify_tool("mcpstudio_report_context_usage", {}) == "execute"
+
+
+@pytest.mark.asyncio
+async def test_context_usage_reporting_opens_escalates_and_resolves_rollover_alert(tmp_path: Path):
+    _, db, manager, managed, source_gateway, _, _, _ = await setup_pair(tmp_path)
+
+    low = await manager.report_context_usage(
+        source_gateway["id"],
+        context_usage_percent=79,
+        source="product_surface",
+    )
+    assert low["telemetry_available"] is True
+    assert low["rollover"]["urgency"] == "optional"
+    assert low["alert_open"] is False
+    assert await db.list_alerts(status="open") == []
+
+    warning = await manager.report_context_usage(
+        source_gateway["id"],
+        context_usage_percent=85,
+        source="product_surface",
+    )
+    assert warning["rollover"]["urgency"] == "recommended"
+    assert warning["next_action"] == "prepare-rollover"
+    alerts = await db.list_alerts(status="open")
+    assert len(alerts) == 1
+    assert alerts[0]["kind"] == "managed.session.context_near_full"
+    assert alerts[0]["data"]["managed_session_id"] == managed["id"]
+    assert alerts[0]["data"]["context_usage_percent"] == 85
+
+    critical = await manager.report_context_usage(
+        source_gateway["id"],
+        context_usage_percent=93,
+        source="product_surface",
+    )
+    assert critical["rollover"]["urgency"] == "critical"
+    assert critical["next_action"] == "rollover-now"
+    alerts = await db.list_alerts(status="open")
+    assert len(alerts) == 1
+    assert alerts[0]["kind"] == "managed.session.context_critical"
+    assert alerts[0]["severity"] == "critical"
+
+    rows = await db.managed_session_overview()
+    row = next(item for item in rows if item["id"] == managed["id"])
+    assert row["context_usage"]["context_usage_percent"] == 93
+    assert row["context_usage"]["urgency"] == "critical"
+
+    recovered = await manager.report_context_usage(
+        source_gateway["id"],
+        context_usage_percent=60,
+        source="product_surface",
+    )
+    assert recovered["rollover"]["urgency"] == "optional"
+    assert await db.list_alerts(status="open") == []
+
+
+@pytest.mark.asyncio
+async def test_handoff_reuses_latest_reported_context_when_percent_is_omitted(tmp_path: Path):
+    _, _, manager, _, source_gateway, _, _, _ = await setup_pair(tmp_path)
+
+    await manager.report_context_usage(
+        source_gateway["id"],
+        context_usage_percent=91,
+        source="product_surface",
+    )
+    prepared = await manager.prepare_session_handoff(
+        source_gateway["id"],
+        summary="Continue in a fresh conversation with the same managed session.",
+    )
+
+    assert prepared["handoff"]["context_usage_percent"] == 91
+    assert prepared["rollover"]["urgency"] == "critical"
+    assert prepared["rollover"]["recommended"] is True
 
 
 @pytest.mark.asyncio

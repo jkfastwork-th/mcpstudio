@@ -34,6 +34,8 @@ CONTROL_TOOL_NAMES = (
     "mcpstudio_use_workspace",
     "mcpstudio_create_session",
     "mcpstudio_use_session",
+    "mcpstudio_context_status",
+    "mcpstudio_report_context_usage",
     "mcpstudio_handoff_session",
     "mcpstudio_accept_handoff",
 )
@@ -180,6 +182,26 @@ class GatewaySessionManager:
             "conversation_identity_available": identity_scope in {"explicit", "conversation"},
             "observed_header_names": observed_header_names,
         }
+
+    @staticmethod
+    def context_usage_from_request(request: Request) -> tuple[float, str] | None:
+        """Read explicit context telemetry headers without inferring missing usage."""
+        for header in (
+            "x-openai-context-usage-percent",
+            "x-chatgpt-context-usage-percent",
+            "x-mcp-context-usage-percent",
+        ):
+            raw = request.headers.get(header)
+            if raw is None:
+                continue
+            try:
+                pct = float(str(raw).strip())
+            except (TypeError, ValueError):
+                return None
+            if 0.0 <= pct <= 100.0:
+                return pct, f"header:{header}"
+            return None
+        return None
 
     @staticmethod
     def _norm_path(value: str | None) -> str:
@@ -362,6 +384,24 @@ class GatewaySessionManager:
                         "request": {"type": "string"},
                         "record_handoff": {"type": "boolean", "default": True},
                     },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "mcpstudio_context_status",
+                "description": "Show exact context-usage telemetry for this ChatGPT/MCP conversation when a product/caller has reported it. HIRDA never estimates missing context usage.",
+                "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            {
+                "name": "mcpstudio_report_context_usage",
+                "description": "Report authoritative context-window usage for the currently attached conversation/session. Use only a measured product/caller percentage; never estimate. HIRDA opens rollover alerts at 80% and marks them critical at 90%.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "context_usage_percent": {"type": "number", "minimum": 0, "maximum": 100},
+                        "source": {"type": "string", "minLength": 1, "maxLength": 120, "default": "product_surface"},
+                    },
+                    "required": ["context_usage_percent"],
                     "additionalProperties": False,
                 },
             },
@@ -1083,6 +1123,150 @@ class GatewaySessionManager:
             "critical_threshold_percent": 90.0,
         }
 
+
+    def context_status_from_gateway(self, gateway: dict[str, Any]) -> dict[str, Any]:
+        metadata = gateway.get("metadata") if isinstance(gateway.get("metadata"), dict) else {}
+        reading = metadata.get("context_usage") if isinstance(metadata, dict) else None
+        if not isinstance(reading, dict) or reading.get("context_usage_percent") is None:
+            return {
+                "telemetry_available": False,
+                "context_usage_percent": None,
+                "source": None,
+                "observed_at": None,
+                "rollover": self._rollover_advice(None),
+                "message": "Context usage telemetry is unavailable; HIRDA will not estimate it.",
+            }
+        pct = float(reading.get("context_usage_percent"))
+        advice = self._rollover_advice(pct)
+        return {
+            "telemetry_available": True,
+            "context_usage_percent": advice["context_usage_percent"],
+            "source": str(reading.get("source") or "unknown"),
+            "observed_at": reading.get("observed_at"),
+            "rollover": advice,
+            "message": (
+                "Context is critical; prepare rollover now."
+                if advice["urgency"] == "critical"
+                else "Context is near full; prepare rollover."
+                if advice["urgency"] == "recommended"
+                else "Context usage is below the rollover threshold."
+            ),
+        }
+
+    async def context_status(self, gateway_session_id: str) -> dict[str, Any]:
+        gateway = await self.db.get_gateway_session(gateway_session_id)
+        status = self.context_status_from_gateway(gateway)
+        status["gateway_session_id"] = gateway_session_id
+        status["managed_session_id"] = gateway.get("managed_session_id")
+        return status
+
+    async def report_context_usage(
+        self,
+        gateway_session_id: str,
+        *,
+        context_usage_percent: float,
+        source: str = "product_surface",
+        actor: str = "chatgpt/mcp",
+    ) -> dict[str, Any]:
+        gateway = await self.db.get_gateway_session(gateway_session_id)
+        managed_id = str(gateway.get("managed_session_id") or "").strip()
+        if not managed_id:
+            raise ManagedSessionError("CONTEXT_USAGE_REQUIRES_BOUND_SESSION")
+        pct = float(context_usage_percent)
+        if pct < 0.0 or pct > 100.0:
+            raise ManagedSessionError("context_usage_percent must be between 0 and 100")
+        clean_source = str(source or "product_surface").strip()[:120] or "product_surface"
+        previous = self.context_status_from_gateway(gateway)
+        advice = self._rollover_advice(pct)
+        observed_at = time.time()
+        updated = await self.db.update_gateway_session_metadata(
+            gateway_session_id,
+            {
+                "context_usage": {
+                    "context_usage_percent": pct,
+                    "source": clean_source,
+                    "observed_at": observed_at,
+                }
+            },
+        )
+        managed = await self.managed_sessions.get_session(managed_id)
+        dedupe_key = f"session-context-rollover:{gateway_session_id}"
+        urgency = str(advice["urgency"])
+        previous_urgency = str((previous.get("rollover") or {}).get("urgency") or "unknown")
+        if advice["recommended"]:
+            severity = "critical" if urgency == "critical" else "warning"
+            kind = "managed.session.context_critical" if urgency == "critical" else "managed.session.context_near_full"
+            action_text = "Open a new conversation and roll over now." if urgency == "critical" else "Prepare a conversation rollover."
+            await self.db.open_alert(
+                dedupe_key,
+                kind,
+                f"{managed.get('name') or managed.get('workspace_key')} context is {pct:.1f}% full. {action_text}",
+                severity=severity,
+                data={
+                    "gateway_session_id": gateway_session_id,
+                    "managed_session_id": managed_id,
+                    "workspace_key": managed.get("workspace_key"),
+                    "context_usage_percent": pct,
+                    "source": clean_source,
+                    "rollover": advice,
+                },
+            )
+        else:
+            await self.db.resolve_alert(dedupe_key)
+
+        should_emit_transition = urgency != previous_urgency and (
+            urgency in {"recommended", "critical"}
+            or previous_urgency in {"recommended", "critical"}
+        )
+        if should_emit_transition:
+            event_kind = (
+                "managed.session.context_critical"
+                if urgency == "critical"
+                else "managed.session.context_near_full"
+                if urgency == "recommended"
+                else "managed.session.context_recovered"
+            )
+            await self.db.add_event(
+                event_kind,
+                f"{managed.get('name') or managed_id} context usage {pct:.1f}% ({urgency})",
+                data={
+                    "gateway_session_id": gateway_session_id,
+                    "managed_session_id": managed_id,
+                    "workspace_key": managed.get("workspace_key"),
+                    "context_usage_percent": pct,
+                    "source": clean_source,
+                    "previous_urgency": previous_urgency,
+                    "urgency": urgency,
+                },
+            )
+        await self.db.add_audit(
+            "managed.session.context.report",
+            actor=actor,
+            target_type="managed_session",
+            target_id=managed_id,
+            data={
+                "gateway_session_id": gateway_session_id,
+                "context_usage_percent": pct,
+                "source": clean_source,
+                "urgency": urgency,
+            },
+        )
+        status = self.context_status_from_gateway(updated)
+        return {
+            **status,
+            "gateway_session_id": gateway_session_id,
+            "managed_session": managed,
+            "alert_open": bool(advice["recommended"]),
+            "handoff_tool": "mcpstudio_handoff_session" if advice["recommended"] else None,
+            "next_action": (
+                "rollover-now"
+                if urgency == "critical"
+                else "prepare-rollover"
+                if urgency == "recommended"
+                else "continue"
+            ),
+        }
+
     async def prepare_session_handoff(
         self,
         gateway_session_id: str,
@@ -1109,6 +1293,17 @@ class GatewaySessionManager:
             if pct < 0.0 or pct > 100.0:
                 raise ManagedSessionError("context_usage_percent must be between 0 and 100")
         ttl = max(60, min(int(ttl_seconds), 86400))
+        if pct is None:
+            reported = await self.context_status(gateway_session_id)
+            if reported.get("telemetry_available"):
+                pct = float(reported["context_usage_percent"])
+        else:
+            await self.report_context_usage(
+                gateway_session_id,
+                context_usage_percent=pct,
+                source="handoff_caller",
+                actor=actor,
+            )
 
         # The raw token is returned exactly once and never persisted. Only its
         # SHA-256 digest is stored so DB/audit access cannot claim a handoff.
@@ -1220,6 +1415,7 @@ class GatewaySessionManager:
                     source_gateway_id,
                     error="session handoff claimed by another conversation",
                 )
+                await self.db.resolve_alert(f"session-context-rollover:{source_gateway_id}")
                 source_closed = True
                 if old_url or old_upstream_id:
                     await self._close_upstream_session(old_url, old_upstream_id)
@@ -1392,6 +1588,15 @@ class GatewaySessionManager:
                 },
                 "handoff": self._public_session_handoff(observed) if observed else None,
             }
+        if name == "mcpstudio_context_status":
+            return await self.context_status(gateway_session_id)
+        if name == "mcpstudio_report_context_usage":
+            return await self.report_context_usage(
+                gateway_session_id,
+                context_usage_percent=float(args.get("context_usage_percent")),
+                source=str(args.get("source") or "product_surface"),
+                actor="chatgpt/mcp",
+            )
         if name == "mcpstudio_handoff_session":
             return await self.prepare_session_handoff(
                 gateway_session_id,
@@ -1417,6 +1622,7 @@ class GatewaySessionManager:
             return {
                 "gateway_session_id": gateway_session_id,
                 "managed_session": await self.managed_sessions.get_session(managed_id) if managed_id else None,
+                "context": self.context_status_from_gateway(gateway),
             }
         if name == "mcpstudio_detach_session":
             return await self.detach_managed_session(gateway_session_id, actor="chatgpt/mcp")
@@ -1722,6 +1928,20 @@ class GatewaySessionManager:
         await self.db.touch_gateway_session(gateway_session_id)
         session = await self.db.get_gateway_session(gateway_session_id)
         session = await self._reconcile_gateway_managed_binding(gateway_session_id, session)
+        header_context = self.context_usage_from_request(request)
+        if header_context is not None and session.get("managed_session_id"):
+            pct, source = header_context
+            try:
+                await self.report_context_usage(
+                    gateway_session_id,
+                    context_usage_percent=pct,
+                    source=source,
+                    actor="gateway/header",
+                )
+                session = await self.db.get_gateway_session(gateway_session_id)
+            except (ManagedSessionError, KeyError):
+                # Context telemetry is advisory UX metadata and must never break MCP transport.
+                pass
 
         jsonrpc = self.parse_jsonrpc(body)
         rpc_method = jsonrpc.get("method") if jsonrpc else None

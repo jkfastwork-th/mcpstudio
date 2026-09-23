@@ -3648,3 +3648,13 @@ html[data-theme="dark"] .reflex-disagree{color:#efbd68!important}
     max-width:78px;
   }
 }
+
+
+/* Context rollover telemetry */
+.context-usage{display:inline-flex;align-items:center;width:max-content;max-width:100%;margin-top:4px;padding:3px 7px;border-radius:999px;font-size:var(--fs-75);font-weight:650;line-height:1.2;background:rgba(95,99,104,.10);color:var(--ref-muted)}
+.context-usage.ok{background:rgba(52,168,83,.12);color:#188038}
+.context-usage.warning{background:rgba(249,171,0,.16);color:#9a6700}
+.context-usage.critical{background:rgba(234,67,53,.14);color:#b3261e}
+html[data-theme="dark"] .context-usage.ok{color:#81c995}html[data-theme="dark"] .context-usage.warning{color:#fdd663}html[data-theme="dark"] .context-usage.critical{color:#f28b82}
+.reference-icon-button i[hidden]{display:none}
+.context-rollover-button{border-color:rgba(249,171,0,.55);background:rgba(249,171,0,.12);color:#8a5b00}.context-rollover-button.critical{border-color:rgba(234,67,53,.55);background:rgba(234,67,53,.12);color:#b3261e}html[data-theme="dark"] .context-rollover-button{color:#fdd663}html[data-theme="dark"] .context-rollover-button.critical{color:#f28b82}

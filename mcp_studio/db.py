@@ -898,6 +898,31 @@ class Database:
         await self._run(op)
         return await self.get_gateway_session(gateway_id)
 
+
+    async def update_gateway_session_metadata(
+        self,
+        gateway_id: str,
+        patch: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Merge top-level gateway metadata without replacing unrelated fields."""
+        def op() -> None:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT metadata_json FROM gateway_sessions WHERE id=?",
+                    (gateway_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(gateway_id)
+                metadata = json.loads(row["metadata_json"] or "{}")
+                metadata.update(dict(patch or {}))
+                db.execute(
+                    "UPDATE gateway_sessions SET metadata_json=?, last_seen_at=? WHERE id=?",
+                    (json.dumps(metadata, ensure_ascii=False), _now(), gateway_id),
+                )
+
+        await self._run(op)
+        return await self.get_gateway_session(gateway_id)
+
     async def reconnect_gateway_session(
         self,
         gateway_id: str,
@@ -2987,6 +3012,34 @@ class Database:
             providers = sorted({str(g.get("ingress_provider") or "direct") for g in connected})
             last_seen = max((str(g.get("last_seen_at") or "") for g in linked), default="") or None
             lifecycle = "active" if connected else ("idle" if item.get("status") == "ready" else item.get("status") or "unknown")
+            context_readings: list[dict[str, Any]] = []
+            for gateway in connected:
+                metadata = gateway.get("metadata") if isinstance(gateway.get("metadata"), dict) else {}
+                reading = metadata.get("context_usage") if isinstance(metadata, dict) else None
+                if not isinstance(reading, dict) or reading.get("context_usage_percent") is None:
+                    continue
+                try:
+                    pct = max(0.0, min(float(reading.get("context_usage_percent")), 100.0))
+                except (TypeError, ValueError):
+                    continue
+                urgency = "critical" if pct >= 90.0 else "recommended" if pct >= 80.0 else "optional"
+                context_readings.append({
+                    "telemetry_available": True,
+                    "gateway_session_id": gateway.get("id"),
+                    "context_usage_percent": pct,
+                    "source": reading.get("source"),
+                    "observed_at": reading.get("observed_at"),
+                    "urgency": urgency,
+                    "recommended": pct >= 80.0,
+                })
+            context_usage = max(context_readings, key=lambda row: row["context_usage_percent"]) if context_readings else {
+                "telemetry_available": False,
+                "context_usage_percent": None,
+                "source": None,
+                "observed_at": None,
+                "urgency": "unknown",
+                "recommended": None,
+            }
             out.append({
                 **item,
                 "lifecycle_state": lifecycle,
@@ -2994,6 +3047,8 @@ class Database:
                 "transport_history_count": len(linked),
                 "ingress_providers": providers,
                 "last_transport_seen_at": last_seen,
+                "context_usage": context_usage,
+                "context_readings": context_readings,
             })
         out.sort(key=lambda x: (0 if x.get("lifecycle_state") == "active" else 1 if x.get("lifecycle_state") == "idle" else 2, x.get("name") or ""))
         return out

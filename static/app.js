@@ -527,6 +527,7 @@ function openAppDialog({title,message='',icon='?',tone='info',confirmText='Conti
     input.value=field.value||'';
     if(field.placeholder)input.placeholder=tr(field.placeholder);
     if(field.required)input.required=true;
+    if(field.readonly)input.readOnly=true;
     if(field.pattern)input.pattern=field.pattern;
     if(field.autocomplete)input.autocomplete=field.autocomplete;
     label.append(span,input);
@@ -1091,6 +1092,10 @@ function renderOverview(data){
   const running=items.filter(x=>x.status==='ready' || x.status==='running');
   const activeSessions=running.filter(x=>(x.connected_transports||0)>0 || x.lifecycle_state==='active');
   const openAlerts=(alertsData.alerts||[]).length;
+  const notificationDot=document.querySelector('#notificationBtn i');
+  if(notificationDot)notificationDot.hidden=openAlerts===0;
+  const notificationButton=document.getElementById('notificationBtn');
+  if(notificationButton)notificationButton.setAttribute('aria-label',openAlerts?`Notifications · ${openAlerts} open alert${openAlerts===1?'':'s'}`:'Notifications · no open alerts');
   const runtime=status.studio.status||'unknown';
   const healthy=runtime==='healthy' && openAlerts===0;
 
@@ -1286,7 +1291,8 @@ function renderManagedSessions(data){
   const idle=items.filter(x=>x.lifecycle_state==='idle').length;
   const stopped=items.filter(x=>x.status==='stopped').length;
   const errors=items.filter(x=>x.status==='error').length;
-  document.getElementById('managedSessionSummary').innerHTML=`<span class="mini-stat primary">Active <strong>${active}</strong></span><span class="mini-stat">Idle <strong>${idle}</strong></span><span class="mini-stat">Errors <strong>${errors}</strong></span>${(status.cutover?.unbound_transports??0)?`<span class="mini-stat warning">Unbound clients <strong>${status.cutover.unbound_transports}</strong></span>`:''}`;
+  const contextWarnings=items.filter(x=>x.context_usage?.recommended).length;
+  document.getElementById('managedSessionSummary').innerHTML=`<span class="mini-stat primary">Active <strong>${active}</strong></span><span class="mini-stat">Idle <strong>${idle}</strong></span><span class="mini-stat">Errors <strong>${errors}</strong></span>${contextWarnings?`<span class="mini-stat warning">Context alerts <strong>${contextWarnings}</strong></span>`:''}${(status.cutover?.unbound_transports??0)?`<span class="mini-stat warning">Unbound clients <strong>${status.cutover.unbound_transports}</strong></span>`:''}`;
   const select=document.getElementById('managedSessionWorkspace');
   const old=select.value;
   select.innerHTML=ws.map(w=>`<option value="${esc(w.key)}">${esc(w.name||w.key)} · ${esc(w.project_path)}</option>`).join('')||'<option value="">Register a workspace first</option>';
@@ -1300,9 +1306,14 @@ function renderManagedSessions(data){
     const lifecycle=x.lifecycle_state||x.status;
     const providers=(x.ingress_providers||[]).join(', ')||'—';
     const last=x.last_used_at||x.last_transport_seen_at||x.last_started_at||x.updated_at;
+    const ctx=x.context_usage||{};
+    const ctxPct=ctx.telemetry_available?Number(ctx.context_usage_percent):null;
+    const ctxClass=ctx.urgency==='critical'?'critical':ctx.urgency==='recommended'?'warning':'ok';
+    const ctxText=ctxPct==null?'Context telemetry unavailable':`Context ${ctxPct.toFixed(1)}% · ${ctx.urgency==='critical'?'rollover now':ctx.urgency==='recommended'?'prepare rollover':'healthy'}`;
     const resume=x.status==='stopped'?`<button class="button small" data-managed-resume="${esc(x.id)}" type="button">Resume</button>`:`<button class="button secondary small" data-managed-restart="${esc(x.id)}" type="button" ${x.connected_transports?'disabled':''}>Restart</button>`;
     const stop=x.status!=='stopped'?`<button class="button danger small" data-managed-stop="${esc(x.id)}" type="button" ${x.connected_transports?'disabled':''}>Stop</button>`:'';
-    return `<div class="managed-session-row"><div><strong>${esc(x.name)}</strong><small>${esc(shortId(x.id,18))}</small><span class="project-pin">🔒 PINNED</span></div><div><strong>${esc(x.workspace_key)}</strong><small>${esc(x.project_path)}</small></div><div>${badge(lifecycle)}<small>${esc(x.status)} · port ${esc(x.port||'—')}</small></div><div><strong>${esc(x.connected_transports||0)} transport${x.connected_transports===1?'':'s'}</strong><small>${esc(providers)} · ${esc(ago(last))}</small></div><div class="managed-actions">${resume}<button class="button secondary small" data-managed-rename="${esc(x.id)}" data-managed-name="${esc(x.name)}" type="button">Rename</button><button class="text-button" data-managed-history="${esc(x.id)}" type="button">History</button>${stop}</div></div>`;
+    const rollover=ctx.recommended&&ctx.gateway_session_id?`<button class="button small context-rollover-button ${ctx.urgency==='critical'?'critical':''}" data-managed-rollover="${esc(ctx.gateway_session_id)}" data-managed-rollover-name="${esc(x.name)}" data-managed-rollover-workspace="${esc(x.workspace_key)}" type="button">${ctx.urgency==='critical'?'Rollover now':'Prepare rollover'}</button>`:'';
+    return `<div class="managed-session-row"><div><strong>${esc(x.name)}</strong><small>${esc(shortId(x.id,18))}</small><span class="project-pin">🔒 PINNED</span></div><div><strong>${esc(x.workspace_key)}</strong><small>${esc(x.project_path)}</small></div><div>${badge(lifecycle)}<small>${esc(x.status)} · port ${esc(x.port||'—')}</small></div><div><strong>${esc(x.connected_transports||0)} transport${x.connected_transports===1?'':'s'}</strong><small>${esc(providers)} · ${esc(ago(last))}</small><span class="context-usage ${ctxClass}">${esc(ctxText)}</span></div><div class="managed-actions">${rollover}${resume}<button class="button secondary small" data-managed-rename="${esc(x.id)}" data-managed-name="${esc(x.name)}" type="button">Rename</button><button class="text-button" data-managed-history="${esc(x.id)}" type="button">History</button>${stop}</div></div>`;
   }).join('')}`:`<div class="empty ${status.enabled?'':'good'}">${status.enabled?'No managed sessions in this view.':'Managed session isolation is disabled in config.'}</div>`;
   document.getElementById('managedWorkspacesPanel').innerHTML=ws.length?`<div class="workspace-reference-table">
     <div class="workspace-reference-row header"><span>Name</span><span>Path</span><span>Active Sessions</span><span>Status</span><span>Actions</span></div>
@@ -1553,6 +1564,29 @@ document.addEventListener('click',e=>uiAction(async()=>{
   const rename=e.target.closest('[data-managed-rename]'); if(rename){
     const result=await openAppDialog({title:'Rename session',message:'Choose a clear name for this pinned project session.',icon:'✎',tone:'info',confirmText:'Rename',fields:[{name:'name',label:'Session name',value:rename.dataset.managedName||'',required:true}]});
     if(result.confirmed&&result.values.name){await sendJson(`/api/managed/sessions/${encodeURIComponent(rename.dataset.managedRename)}/rename`,{name:result.values.name});await load();}
+    return;
+  }
+  const rollover=e.target.closest('[data-managed-rollover]'); if(rollover){
+    const gatewayId=rollover.dataset.managedRollover;
+    const name=rollover.dataset.managedRolloverName||'managed session';
+    const workspace=rollover.dataset.managedRolloverWorkspace||'';
+    const result=await openAppDialog({
+      title:'Prepare context rollover',
+      message:'Create a bounded handoff packet before moving to a fresh ChatGPT conversation. The current conversation remains authoritative until the token is claimed.',
+      icon:'↗',tone:'info',confirmText:'Prepare rollover',
+      fields:[{name:'summary',label:'Handoff summary',type:'textarea',required:true,value:`Continue ${name}${workspace?` on workspace ${workspace}`:''}. Preserve current decisions, blockers, and next action from this conversation.`}]
+    });
+    if(!result.confirmed)return;
+    const prepared=await sendJson(`/api/gateway/sessions/${encodeURIComponent(gatewayId)}/handoff`,{summary:result.values.summary,reason:'context near full',ttl_seconds:1800});
+    const token=prepared.claim_token||'';
+    const tokenResult=await openAppDialog({
+      title:'Rollover ready',
+      message:'Open a fresh ChatGPT conversation, reconnect HIRDA, then claim this one-time token. The old conversation stays attached until the claim succeeds.',
+      icon:'✓',tone:'info',confirmText:'Copy token',cancelText:'Close',
+      fields:[{name:'claim_token',label:'One-time claim token',value:token,readonly:true}]
+    });
+    if(tokenResult.confirmed&&token)await copyText(token);
+    await load();
     return;
   }
   const history=e.target.closest('[data-managed-history]'); if(history){renderManagedHistory(await getJson(`/api/managed/sessions/${encodeURIComponent(history.dataset.managedHistory)}/history`));return;}

@@ -27,7 +27,7 @@ from .models import (
     SessionCreate, SessionHeartbeat, WorkerBind, WorkerHeartbeat, WorkerStatePatch,
     WorkSubmit, WorkFinish, WorkFail, WorkDetach, AlertAcknowledge, RetryDispatch, FaultInject, BatchDispatch,
     SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate,
-    GraftConfigureRequest, GraftQueryRequest, GraftRollbackRequest, ComputerRepairRequest, ManagedGatewayAttach,
+    GraftConfigureRequest, GraftQueryRequest, GraftRollbackRequest, ComputerRepairRequest, ManagedGatewayAttach, GatewayContextUsageReport, SessionHandoffPrepareRequest,
     CapsuleCreate, CapsuleStageUpdate, CapsuleHandoff, CapsuleHandoffAck, CapsuleComplete,
 )
 from .settings import Settings, load_settings
@@ -782,6 +782,37 @@ async def managed_session_stop(session_id: str):
         raise HTTPException(status_code=404, detail="Unknown managed session")
     except ManagedSessionConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.post("/api/gateway/sessions/{gateway_session_id}/context")
+async def gateway_context_usage_report(gateway_session_id: str, payload: GatewayContextUsageReport):
+    try:
+        return await gateway_sessions.report_context_usage(
+            gateway_session_id,
+            context_usage_percent=payload.context_usage_percent,
+            source=payload.source,
+            actor="ui/api",
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown gateway session")
+    except ManagedSessionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/gateway/sessions/{gateway_session_id}/handoff")
+async def gateway_session_handoff_prepare(gateway_session_id: str, payload: SessionHandoffPrepareRequest):
+    try:
+        return await gateway_sessions.prepare_session_handoff(
+            gateway_session_id,
+            summary=payload.summary,
+            reason=payload.reason,
+            ttl_seconds=payload.ttl_seconds,
+            actor="ui/api",
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown gateway session")
+    except ManagedSessionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/api/gateway/sessions/{gateway_session_id}/managed/attach")

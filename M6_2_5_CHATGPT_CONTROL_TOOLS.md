@@ -46,10 +46,9 @@ The handoff token is returned once; only its SHA-256 digest is persisted. Creati
 new pending handoff supersedes any older pending token for that managed session.
 Expired, superseded, or already-claimed tokens cannot transfer ownership.
 
-A caller may include `context_usage_percent` when preparing a handoff. HIRDA reports
-rollover advice at 80% and marks it critical at 90%. ChatGPT does not currently expose
-its raw context-meter percentage to the MCP server automatically, so this value must
-come from the caller/product surface when available.
+HIRDA keeps context telemetry conversation-scoped, never inferred from request size or token guesses. `mcpstudio_report_context_usage` (or `POST /api/gateway/sessions/{gateway_session_id}/context`) accepts an authoritative measured percentage from a product/caller surface, while `mcpstudio_context_status` reports the latest exact reading or `telemetry_available=false`. Authenticated MCP requests also consume `x-openai-context-usage-percent`, `x-chatgpt-context-usage-percent`, or `x-mcp-context-usage-percent` when a client provides one.
+
+At 80% HIRDA opens a `managed.session.context_near_full` warning and marks rollover `recommended`; at 90% it upgrades the same deduplicated alert to `managed.session.context_critical`. Dropping below 80% resolves the alert. The Studio Sessions UI shows the exact reading and exposes `Prepare rollover` / `Rollover now`, which creates the same one-time handoff token used by `mcpstudio_handoff_session`. If a handoff omits `context_usage_percent`, HIRDA reuses the latest reported reading for that conversation. A successful claim resolves the source conversation's context alert and the target conversation starts with telemetry unavailable until a new exact reading arrives.
 
 Example flow:
 

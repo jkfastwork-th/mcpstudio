@@ -56,6 +56,7 @@ DYNAMIC_ACTION_HANDLERS = {
     "data-managed-stop": "closest('[data-managed-stop]')",
     "data-managed-rename": "closest('[data-managed-rename]')",
     "data-managed-history": "closest('[data-managed-history]')",
+    "data-managed-rollover": "closest('[data-managed-rollover]')",
     "data-managed-history-close": "closest('[data-managed-history-close]')",
     "data-copy-command": "closest('[data-copy-command],[data-copy-source]')",
     "data-gateway-attach": "closest('[data-gateway-attach]')",
