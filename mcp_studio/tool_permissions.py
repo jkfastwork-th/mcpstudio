@@ -124,9 +124,22 @@ def _segment_class(segment: str) -> ToolClass:
     if command == "git":
         return _git_command_class(tokens)
     if command == "systemctl":
-        if len(tokens) < 2:
+        args = tokens[1:]
+        # systemctl commonly places connection/scope flags before the verb
+        # (notably `systemctl --user restart ...`). Treat only known
+        # argument-free local flags as transparent; remote/unknown options stay
+        # fail-closed so classification cannot silently broaden authority.
+        local_flags = {
+            "--user", "--system", "--no-pager", "--quiet", "--no-ask-password",
+            "--runtime", "--global",
+        }
+        while args and args[0] in local_flags:
+            args.pop(0)
+        if not args:
             return "read"
-        sub = tokens[1]
+        if args[0].startswith("-"):
+            return "unknown"
+        sub = args[0]
         if sub in {"status", "is-active", "is-enabled", "show", "list-units", "list-unit-files"}:
             return "read"
         if sub in {"restart", "start", "reload", "try-restart"}:

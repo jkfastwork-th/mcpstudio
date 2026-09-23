@@ -605,6 +605,70 @@ class GatewaySessionManager:
         except Exception:
             return content
 
+    @staticmethod
+    def _context_transition_notice(report: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Build one model-visible notice only when context crosses a rollover threshold."""
+        if not isinstance(report, dict) or not report.get("transitioned"):
+            return None
+        rollover = report.get("rollover") if isinstance(report.get("rollover"), dict) else {}
+        urgency = str(rollover.get("urgency") or "unknown")
+        if urgency not in {"recommended", "critical"}:
+            return None
+        pct = rollover.get("context_usage_percent")
+        action = "Open a fresh conversation and roll over now." if urgency == "critical" else "Prepare a fresh-conversation rollover."
+        return {
+            "type": "hirda.context_rollover",
+            "severity": "critical" if urgency == "critical" else "warning",
+            "context_usage_percent": pct,
+            "urgency": urgency,
+            "message": f"HIRDA context warning: conversation context is {float(pct):.1f}% full. {action}",
+            "next_action": report.get("next_action"),
+            "handoff_tool": report.get("handoff_tool"),
+        }
+
+    @staticmethod
+    def _augment_tool_result_context_notice(
+        content: bytes,
+        content_type: str,
+        notice: dict[str, Any] | None,
+    ) -> bytes:
+        """Append a one-shot rollover warning to an MCP tool result without replacing it."""
+        if not notice:
+            return content
+        notice_text = json.dumps({"HIRDA_CONTEXT_WARNING": notice}, ensure_ascii=False, separators=(",", ":"))
+
+        def inject(payload: Any) -> Any:
+            if not isinstance(payload, dict):
+                return payload
+            result = payload.get("result")
+            if not isinstance(result, dict):
+                return payload
+            blocks = result.get("content")
+            if not isinstance(blocks, list):
+                return payload
+            blocks.append({"type": "text", "text": notice_text})
+            return payload
+
+        try:
+            if "text/event-stream" in content_type:
+                out: list[str] = []
+                for line in content.decode("utf-8").splitlines(keepends=True):
+                    core = line.rstrip("\r\n")
+                    ending = line[len(core):]
+                    if core.startswith("data:"):
+                        raw = core[5:].strip()
+                        try:
+                            payload = inject(json.loads(raw))
+                            core = "data: " + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                        except Exception:
+                            pass
+                    out.append(core + ending)
+                return "".join(out).encode("utf-8")
+            payload = inject(json.loads(content.decode("utf-8")))
+            return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        except Exception:
+            return content
+
     def _control_tools_payload(self, request_id: Any) -> dict[str, Any]:
         """Minimal valid tools/list response that never depends on Serena.
 
@@ -1257,6 +1321,7 @@ class GatewaySessionManager:
             "gateway_session_id": gateway_session_id,
             "managed_session": managed,
             "alert_open": bool(advice["recommended"]),
+            "transitioned": should_emit_transition,
             "handoff_tool": "mcpstudio_handoff_session" if advice["recommended"] else None,
             "next_action": (
                 "rollover-now"
@@ -1929,10 +1994,11 @@ class GatewaySessionManager:
         session = await self.db.get_gateway_session(gateway_session_id)
         session = await self._reconcile_gateway_managed_binding(gateway_session_id, session)
         header_context = self.context_usage_from_request(request)
+        context_report: dict[str, Any] | None = None
         if header_context is not None and session.get("managed_session_id"):
             pct, source = header_context
             try:
-                await self.report_context_usage(
+                context_report = await self.report_context_usage(
                     gateway_session_id,
                     context_usage_percent=pct,
                     source=source,
@@ -1942,6 +2008,7 @@ class GatewaySessionManager:
             except (ManagedSessionError, KeyError):
                 # Context telemetry is advisory UX metadata and must never break MCP transport.
                 pass
+        context_notice = self._context_transition_notice(context_report)
 
         jsonrpc = self.parse_jsonrpc(body)
         rpc_method = jsonrpc.get("method") if jsonrpc else None
@@ -1958,14 +2025,20 @@ class GatewaySessionManager:
                 response.headers["X-MCP-Studio-Tunnel-Id"] = str(session["last_tunnel_id"])
             if session.get("managed_session_id"):
                 response.headers["X-MCP-Studio-Managed-Session-Id"] = str(session["managed_session_id"])
+            if isinstance(context_report, dict) and context_report.get("telemetry_available"):
+                response.headers["X-HIRDA-Context-Usage-Percent"] = str(context_report.get("context_usage_percent"))
+                response.headers["X-HIRDA-Context-Urgency"] = str((context_report.get("rollover") or {}).get("urgency") or "unknown")
             response.headers["Cache-Control"] = "no-store"
             response.headers["X-Content-Type-Options"] = "nosniff"
             return response
 
         def local_tool_response(payload: Any, *, is_error: bool = False) -> Response:
+            visible_payload = payload
+            if context_notice and isinstance(payload, dict):
+                visible_payload = {**payload, "context_notice": context_notice}
             return _decorate_local_response(
                 self._jsonrpc_tool_response(
-                    jsonrpc.get("id") if jsonrpc else None, payload, is_error=is_error
+                    jsonrpc.get("id") if jsonrpc else None, visible_payload, is_error=is_error
                 )
             )
 
@@ -2265,6 +2338,9 @@ class GatewaySessionManager:
             response_headers["X-MCP-Studio-Tunnel-Id"] = str(session["last_tunnel_id"])
         if session.get("managed_session_id"):
             response_headers["X-MCP-Studio-Managed-Session-Id"] = str(session["managed_session_id"])
+        if isinstance(context_report, dict) and context_report.get("telemetry_available"):
+            response_headers["X-HIRDA-Context-Usage-Percent"] = str(context_report.get("context_usage_percent"))
+            response_headers["X-HIRDA-Context-Urgency"] = str((context_report.get("rollover") or {}).get("urgency") or "unknown")
         response_headers["Cache-Control"] = "no-store"
         response_headers["X-Content-Type-Options"] = "nosniff"
 
@@ -2320,8 +2396,27 @@ class GatewaySessionManager:
             status_code = response.status_code
             await response.aclose()
             await client.aclose()
+            if rpc_method == "tools/call" and context_notice:
+                content = self._augment_tool_result_context_notice(content, ctype, context_notice)
             await record_reflex_outcome(status_code, "buffered")
             return Response(content=content, status_code=status_code, headers=response_headers)
+
+        # A rollover transition must be visible to the model in the same tool
+        # turn. Buffer only that rare SSE response, append the notice once, then
+        # return it intact; normal SSE traffic stays streaming.
+        if rpc_method == "tools/call" and context_notice:
+            content = await response.aread()
+            status_code = response.status_code
+            await response.aclose()
+            await client.aclose()
+            content = self._augment_tool_result_context_notice(content, ctype, context_notice)
+            await record_reflex_outcome(status_code, "buffered-context-notice")
+            return Response(
+                content=content,
+                status_code=status_code,
+                headers=response_headers,
+                media_type="text/event-stream",
+            )
 
         await record_reflex_outcome(response.status_code, "streaming")
 

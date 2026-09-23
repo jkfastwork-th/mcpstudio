@@ -67,6 +67,10 @@ def test_shell_classifier_keeps_read_write_execute_separate():
     assert classify_shell_command("herdr agent list") == "execute"
     assert classify_shell_command("curl -fsS http://127.0.0.1:8100/api/cognition/status") == "execute"
     assert classify_shell_command("systemctl status mcp-studio.service") == "read"
+    assert classify_shell_command("systemctl --user status mcp-studio.service") == "read"
+    assert classify_shell_command("systemctl --user restart mcp-studio.service") == "execute"
+    assert classify_shell_command("systemctl --user stop mcp-studio.service") == "destructive"
+    assert classify_shell_command("systemctl --host remote restart mcp-studio.service") == "unknown"
     assert classify_shell_command("sudo systemctl restart mcp-studio.service") == "execute"
     assert classify_shell_command("sudo systemctl stop mcp-studio.service") == "destructive"
     # Shell control-flow stays fail-closed: a loop can hide arbitrary commands and must not

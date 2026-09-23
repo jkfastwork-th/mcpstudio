@@ -211,3 +211,22 @@ def test_bearer_fingerprint_is_stable_without_storing_secret(tmp_path: Path):
     assert cid1.startswith("bearer-")
     assert scope1 == scope2 == "connector"
     assert source1 == source2 == "bearer-fingerprint"
+
+
+def test_context_usage_header_is_accepted_without_estimation(tmp_path: Path):
+    manager = GatewaySessionManager(make_settings(tmp_path), Database(str(tmp_path / "db.sqlite3")))
+
+    req = make_request()
+    req.scope["headers"].append((b"x-openai-context-usage-percent", b"84.5"))
+    assert manager.context_usage_from_request(req) == (84.5, "header:x-openai-context-usage-percent")
+
+    missing = make_request()
+    assert manager.context_usage_from_request(missing) is None
+
+    invalid = make_request()
+    invalid.scope["headers"].append((b"x-openai-context-usage-percent", b"not-a-number"))
+    assert manager.context_usage_from_request(invalid) is None
+
+    out_of_range = make_request()
+    out_of_range.scope["headers"].append((b"x-openai-context-usage-percent", b"101"))
+    assert manager.context_usage_from_request(out_of_range) is None

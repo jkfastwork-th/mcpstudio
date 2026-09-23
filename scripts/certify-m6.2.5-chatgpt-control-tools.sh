@@ -38,16 +38,21 @@ TOOLS_JSON="$(printf '%s\n' "$TOOLS" | sed -n 's/^data:[[:space:]]*//p' | tail -
 if [[ -z "$TOOLS_JSON" ]]; then TOOLS_JSON="$TOOLS"; fi
 
 printf '%s' "$TOOLS_JSON" | jq -e '
-  [.result.tools[].name][0:3] == [
+  [.result.tools[].name][0:7] == [
     "mcpstudio_use_workspace",
     "mcpstudio_create_session",
-    "mcpstudio_use_session"
+    "mcpstudio_use_session",
+    "mcpstudio_context_status",
+    "mcpstudio_report_context_usage",
+    "mcpstudio_handoff_session",
+    "mcpstudio_accept_handoff"
   ]
 ' >/dev/null
 
 echo M6_2_5_CONTROL_TOOLS_FIRST_PASS
 
-for tool in mcpstudio_use_workspace mcpstudio_create_session mcpstudio_use_session; do
+for tool in   mcpstudio_use_workspace   mcpstudio_create_session   mcpstudio_use_session   mcpstudio_context_status   mcpstudio_report_context_usage   mcpstudio_handoff_session   mcpstudio_accept_handoff
+do
   printf '%s' "$TOOLS_JSON" | jq -e --arg tool "$tool" '.result.tools | any(.name == $tool)' >/dev/null
   echo "M6_2_5_EXPOSE_${tool}_PASS"
 done

@@ -160,6 +160,7 @@ async def test_context_usage_reporting_opens_escalates_and_resolves_rollover_ale
     )
     assert warning["rollover"]["urgency"] == "recommended"
     assert warning["next_action"] == "prepare-rollover"
+    assert warning["transitioned"] is True
     alerts = await db.list_alerts(status="open")
     assert len(alerts) == 1
     assert alerts[0]["kind"] == "managed.session.context_near_full"
@@ -173,6 +174,7 @@ async def test_context_usage_reporting_opens_escalates_and_resolves_rollover_ale
     )
     assert critical["rollover"]["urgency"] == "critical"
     assert critical["next_action"] == "rollover-now"
+    assert critical["transitioned"] is True
     alerts = await db.list_alerts(status="open")
     assert len(alerts) == 1
     assert alerts[0]["kind"] == "managed.session.context_critical"
@@ -190,6 +192,51 @@ async def test_context_usage_reporting_opens_escalates_and_resolves_rollover_ale
     )
     assert recovered["rollover"]["urgency"] == "optional"
     assert await db.list_alerts(status="open") == []
+
+
+@pytest.mark.asyncio
+async def test_context_rollover_notice_emits_once_per_threshold_transition(tmp_path: Path):
+    _, _, manager, _, source_gateway, _, _, _ = await setup_pair(tmp_path)
+
+    first = await manager.report_context_usage(
+        source_gateway["id"],
+        context_usage_percent=85,
+        source="product_surface",
+    )
+    repeated = await manager.report_context_usage(
+        source_gateway["id"],
+        context_usage_percent=86,
+        source="product_surface",
+    )
+    critical = await manager.report_context_usage(
+        source_gateway["id"],
+        context_usage_percent=92,
+        source="product_surface",
+    )
+
+    first_notice = manager._context_transition_notice(first)
+    repeated_notice = manager._context_transition_notice(repeated)
+    critical_notice = manager._context_transition_notice(critical)
+
+    assert first["transitioned"] is True
+    assert repeated["transitioned"] is False
+    assert critical["transitioned"] is True
+    assert first_notice["severity"] == "warning"
+    assert repeated_notice is None
+    assert critical_notice["severity"] == "critical"
+
+    payload = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 9,
+        "result": {"content": [{"type": "text", "text": "UPSTREAM_OK"}], "isError": False},
+    }).encode()
+    augmented = json.loads(
+        manager._augment_tool_result_context_notice(payload, "application/json", critical_notice)
+    )
+    blocks = augmented["result"]["content"]
+    assert blocks[0]["text"] == "UPSTREAM_OK"
+    assert "HIRDA_CONTEXT_WARNING" in blocks[1]["text"]
+    assert "92.0% full" in blocks[1]["text"]
 
 
 @pytest.mark.asyncio
