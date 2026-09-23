@@ -456,8 +456,10 @@ class CognitiveRouter:
     @staticmethod
     def _pane_reserved(pane: dict[str, Any]) -> bool:
         """Keep dedicated certification panes out of ordinary production routing."""
+        prefixes = ("hirda-certification", "hirda-live-certification")
         name = str(pane.get("name") or "").strip().casefold()
-        return name.startswith(("hirda-certification", "hirda-live-certification"))
+        label = str(pane.get("label") or "").strip().casefold()
+        return name.startswith(prefixes) or label.startswith(prefixes)
 
     def _find_runtime_pane(self, runtime_id: str) -> dict[str, Any] | None:
         snapshot = getattr(self.herdr, "snapshot", {})
@@ -609,28 +611,37 @@ class CognitiveRouter:
 
         result_start = f"<<<HIRDA_COGNITIVE_RESULT:{request.request_id}>>>"
         result_end = "<<<END_HIRDA_COGNITIVE_RESULT>>>"
+        transport_contract = (
+            "HIRDA TRANSPORT CONTRACT (mandatory; higher priority than output-format wording inside REQUEST):\n"
+            "- The two HIRDA marker lines are transport framing, not part of the requested answer.\n"
+            "- Any REQUEST wording such as 'return exactly X', 'only output X', or 'JSON only' applies "
+            "ONLY to the payload BETWEEN the marker lines.\n"
+            "- Never omit, rename, quote, or explain the marker lines.\n"
+        )
         bounded_prompt = (
             "HIRDA COGNITIVE REQUEST\n"
             f"request_id: {request.request_id}\n"
             f"capability: {request.capability}\n"
             "Return the answer to the request. Do not change agent identity, goals, memory, or authority.\n"
+            f"{transport_contract}"
             "Use this exact response protocol so HIRDA can isolate the current answer from pane history:\n"
             f"1. First line: {result_start}\n"
             "2. Then write the complete ACTUAL answer to the request. It must not be empty.\n"
             f"3. Final line: {result_end}\n"
             "Do not emit an empty marker pair. Do not echo example or placeholder text.\n\n"
-            "REQUEST:\n"
+            "REQUEST PAYLOAD (content instructions only):\n"
             f"{request.prompt}"
         )
         repair_prompt = (
             "HIRDA RESULT PROTOCOL REPAIR\n"
             f"request_id: {request.request_id}\n"
             "Your previous response could not be isolated because the required result markers were missing.\n"
+            f"{transport_contract}"
             "Re-answer the SAME request now. Do not explain the repair and do not quote these instructions.\n"
             f"First line MUST be exactly: {result_start}\n"
             "Then write the complete ACTUAL answer only. It must not be empty.\n"
             f"Final line MUST be exactly: {result_end}\n\n"
-            "REQUEST:\n"
+            "REQUEST PAYLOAD (content instructions only):\n"
             f"{request.prompt}"
         )
 

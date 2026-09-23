@@ -364,6 +364,11 @@ async def test_prompt_contains_markers_not_placeholder():
     ) not in sent_prompt
     # Must NOT contain the literal placeholder
     assert "<final answer here>" not in sent_prompt
+    # Output-format wording inside the task must be scoped to the payload so
+    # requests such as "Return exactly X" cannot suppress HIRDA framing.
+    assert "HIRDA TRANSPORT CONTRACT" in sent_prompt
+    assert "applies ONLY to the payload BETWEEN the marker lines" in sent_prompt
+    assert "REQUEST PAYLOAD (content instructions only):" in sent_prompt
 
 
 @pytest.mark.asyncio
@@ -405,6 +410,8 @@ async def test_missing_markers_get_one_bounded_repair_retry():
     prompt_calls = [call for call in herdr.calls if call[0] == "herdr_prompt_agent"]
     assert len(prompt_calls) == 2
     assert "HIRDA RESULT PROTOCOL REPAIR" in prompt_calls[1][1]["prompt"]
+    assert "HIRDA TRANSPORT CONTRACT" in prompt_calls[1][1]["prompt"]
+    assert "applies ONLY to the payload BETWEEN the marker lines" in prompt_calls[1][1]["prompt"]
     assert "COG-REPAIR" in prompt_calls[1][1]["prompt"]
 
 
@@ -753,6 +760,36 @@ async def test_reserved_certification_pane_is_excluded_from_default_routing():
     plan = await router.plan(
         {
             "request_id": "COG-RESERVED",
+            "prompt": "Return exactly OK.",
+            "capability": "fast_utility",
+            "preferred_depth": "fast",
+        }
+    )
+
+    assert plan["candidates"]
+    assert plan["candidates"][0]["runtime"] == "claude"
+    assert plan["candidates"][0]["pane_id"] == "wC:p1"
+
+
+@pytest.mark.asyncio
+async def test_label_only_certification_pane_is_excluded_from_default_routing():
+    herdr = FakeHerdr()
+    herdr.snapshot["panes"]["panes"] = [
+        pane for pane in herdr.snapshot["panes"]["panes"] if pane["agent"] != "hermes"
+    ]
+    herdr.snapshot["panes"]["panes"].append(
+        {
+            "pane_id": "wH:p9",
+            "agent": "hermes",
+            "agent_status": "done",
+            "label": "HIRDA-certification-test",
+        }
+    )
+    router = CognitiveRouter(studio(), herdr, FakeRuntimes())
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-RESERVED-LABEL",
             "prompt": "Return exactly OK.",
             "capability": "fast_utility",
             "preferred_depth": "fast",
