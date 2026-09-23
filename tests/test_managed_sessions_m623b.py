@@ -87,6 +87,46 @@ async def test_schema_v6_managed_session_tables_and_gateway_columns(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_managed_runtime_update_rejects_stale_pid_writer(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite3"))
+    await db.init()
+    project = tmp_path / "project"
+    project.mkdir()
+    await db.upsert_managed_workspace(
+        key="race", name="race", project_path=str(project), metadata={"source": "test"}
+    )
+    session = await db.create_managed_session(
+        name="race",
+        workspace_key="race",
+        project_path=str(project),
+        server_id="serena-8001",
+        port=43110,
+    )
+    session_id = session["id"]
+
+    await db.update_managed_session_runtime(session_id, status="ready", pid=200)
+    stale = await db.update_managed_session_runtime(
+        session_id,
+        status="stopped",
+        pid=None,
+        error=None,
+        expected_pid=100,
+    )
+    assert stale["status"] == "ready"
+    assert stale["pid"] == 200
+
+    current = await db.update_managed_session_runtime(
+        session_id,
+        status="stopped",
+        pid=None,
+        error=None,
+        expected_pid=200,
+    )
+    assert current["status"] == "stopped"
+    assert current["pid"] is None
+
+
+@pytest.mark.asyncio
 async def test_workspace_registry_is_confined_to_approved_roots(tmp_path: Path):
     settings = settings_for(tmp_path)
     db = Database(settings.studio.database); await db.init()

@@ -2609,7 +2609,7 @@ class Database:
         self, session_id: str, *, status: str | None = None, pid: int | None | object = ...,
         error: str | None | object = ..., endpoint: str | None | object = ...,
         log_path: str | None | object = ..., port: int | None = None,
-        increment_generation: bool = False,
+        increment_generation: bool = False, expected_pid: int | None | object = ...,
     ) -> dict[str, Any]:
         now = _now()
         def op() -> None:
@@ -2637,8 +2637,18 @@ class Database:
                     fields.append("port=?"); values.append(int(port))
                 if increment_generation:
                     fields.append("generation=generation+1")
-                values.append(session_id)
-                db.execute(f"UPDATE managed_sessions SET {', '.join(fields)} WHERE id=?", values)
+                where = "id=?"
+                where_values: list[Any] = [session_id]
+                if expected_pid is not ...:
+                    if expected_pid is None:
+                        where += " AND pid IS NULL"
+                    else:
+                        where += " AND pid=?"
+                        where_values.append(int(expected_pid))
+                db.execute(
+                    f"UPDATE managed_sessions SET {', '.join(fields)} WHERE {where}",
+                    [*values, *where_values],
+                )
         await self._run(op)
         return await self.get_managed_session(session_id)
 

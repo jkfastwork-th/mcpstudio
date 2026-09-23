@@ -217,15 +217,24 @@ class ManagedSessionManager:
                 rc = instance.process.returncode
                 if rc is None:
                     continue
-                self._instances.pop(session_id, None)
+                if self._instances.get(session_id) is instance:
+                    self._instances.pop(session_id, None)
                 try:
                     instance.log_handle.close()
                 except Exception:
                     pass
                 item = await self.db.get_managed_session(session_id)
-                await self.db.update_managed_session_runtime(
-                    session_id, status="error", error=f"Serena process exited rc={rc}", pid=None,
+                updated = await self.db.update_managed_session_runtime(
+                    session_id,
+                    status="error",
+                    error=f"Serena process exited rc={rc}",
+                    pid=None,
+                    expected_pid=instance.process.pid,
                 )
+                if updated.get("pid") is not None:
+                    # A newer Serena generation already owns this durable
+                    # session. Never let a stale process watcher clobber it.
+                    continue
                 await self.db.add_event(
                     "managed.session.process_exited",
                     f"Managed Serena process exited for {session_id} rc={rc}",
@@ -553,8 +562,10 @@ class ManagedSessionManager:
 
     async def _terminate_instance(self, session_id: str, *, preserve_desired: bool) -> None:
         instance = self._instances.pop(session_id, None)
+        expected_pid: int | None | object = ...
         if instance:
             process = instance.process
+            expected_pid = process.pid
             if process.returncode is None:
                 try:
                     os.killpg(process.pid, signal.SIGTERM)
@@ -577,7 +588,13 @@ class ManagedSessionManager:
                 pass
         if not preserve_desired:
             await self.db.set_managed_session_desired_state(session_id, "stopped")
-        await self.db.update_managed_session_runtime(session_id, status="stopped", pid=None, error=None)
+        await self.db.update_managed_session_runtime(
+            session_id,
+            status="stopped",
+            pid=None,
+            error=None,
+            expected_pid=expected_pid,
+        )
 
     async def stop_session(self, session_id: str, *, actor: str = "operator") -> dict[str, Any]:
         connected = await self.db.count_connected_gateways_for_managed_session(session_id)
