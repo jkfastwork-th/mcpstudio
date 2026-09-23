@@ -35,7 +35,7 @@ ProtectHostname=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
-ReadWritePaths=/home/alfred/mcp-studio/data /home/alfred/mcp-studio/backups
+ReadWritePaths=/home/alfred/mcp-studio/data /home/alfred/mcp-studio/backups /home/alfred/mcp-studio-ux-ui
 
 [Install]
 WantedBy=multi-user.target
