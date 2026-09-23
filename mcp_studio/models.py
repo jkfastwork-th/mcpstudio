@@ -245,6 +245,12 @@ class CapsuleHandoff(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class CapsuleHandoffAck(BaseModel):
+    agent: AgentId
+    delivery_token: str = Field(min_length=16, max_length=512)
+    receipt: dict[str, Any] = Field(default_factory=dict)
+
+
 class CapsuleComplete(BaseModel):
     agent: AgentId | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)

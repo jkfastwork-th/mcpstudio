@@ -21,14 +21,14 @@ from .gateway import GatewaySessionManager, make_gateway_router
 from .managed_sessions import ManagedSessionManager, ManagedSessionError, ManagedSessionConflict, WorkspaceNotAllowed
 from .health import HealthManager
 from .herdr import HerdrManager
-from .capsules import CapsuleService, CapsuleNotFound
+from .capsules import CapsuleService, CapsuleNotFound, CapsuleDeliveryError
 from .agent_runtimes import AgentRuntimeInventory
 from .models import (
     SessionCreate, SessionHeartbeat, WorkerBind, WorkerHeartbeat, WorkerStatePatch,
     WorkSubmit, WorkFinish, WorkFail, WorkDetach, AlertAcknowledge, RetryDispatch, FaultInject, BatchDispatch,
     SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate,
     GraftConfigureRequest, GraftQueryRequest, GraftRollbackRequest, ComputerRepairRequest, ManagedGatewayAttach,
-    CapsuleCreate, CapsuleStageUpdate, CapsuleHandoff, CapsuleComplete,
+    CapsuleCreate, CapsuleStageUpdate, CapsuleHandoff, CapsuleHandoffAck, CapsuleComplete,
 )
 from .settings import Settings, load_settings
 from .workers import WorkerManager
@@ -53,7 +53,11 @@ db = Database(settings.studio.database)
 health = HealthManager(settings, db)
 workers = WorkerManager(settings, db)
 herdr = HerdrManager(settings, db, health)
-capsules = CapsuleService(db)
+capsules = CapsuleService(
+    db,
+    herdr,
+    local_api_base=f"http://127.0.0.1:{settings.studio.bind_port}",
+)
 agent_runtimes = AgentRuntimeInventory(herdr)
 scheduler = Scheduler(settings, db, health, herdr)
 execution = ExecutionSupervisor(settings, db, herdr, scheduler)
@@ -549,6 +553,24 @@ async def capsule_handoff(capsule_id: str, body: CapsuleHandoff):
             from_stage=body.from_stage,
             to_stage=body.to_stage,
             metadata=body.metadata,
+        )
+    except CapsuleNotFound:
+        raise HTTPException(status_code=404, detail="capsule not found")
+    except CapsuleDeliveryError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/capsules/{capsule_id}/handoff/{handoff_id}/ack")
+async def capsule_handoff_ack(capsule_id: str, handoff_id: str, body: CapsuleHandoffAck):
+    try:
+        return await capsules.acknowledge_handoff(
+            capsule_id,
+            handoff_id,
+            agent=body.agent,
+            delivery_token=body.delivery_token,
+            receipt=body.receipt,
         )
     except CapsuleNotFound:
         raise HTTPException(status_code=404, detail="capsule not found")

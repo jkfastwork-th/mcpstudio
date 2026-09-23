@@ -1,10 +1,65 @@
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from mcp_studio.capsules import CapsuleNotFound, CapsuleService
 from mcp_studio.agent_runtimes import AgentRuntimeInventory
 from mcp_studio.context_fit import ContextProfile, ModelCapability, evaluate_context_fit
+
+
+class FakeDeliveryClient:
+    def __init__(self):
+        self.calls = []
+
+    async def call_tool(self, name, args, client_name=None):
+        self.calls.append({"name": name, "args": dict(args), "client_name": client_name})
+        return {"content": [{"type": "text", "text": '{"ok":true}'}]}
+
+
+class FakeDeliveryHerdr:
+    def __init__(self):
+        self.snapshot = {"status": "healthy"}
+        self.client_instance = FakeDeliveryClient()
+        self.tool_definition = {
+            "name": "herdr_prompt_agent",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Unique agent name or pane ID.",
+                    },
+                    "message": {"type": "string"},
+                    "wait": {"type": "boolean", "default": False},
+                    "timeout_ms": {"type": "integer"},
+                },
+                "required": ["agent_id", "message"],
+            },
+        }
+
+    async def refresh(self):
+        return self.snapshot
+
+    def find_pane(self, *, pane_id=None, workspace=None, agent=None):
+        pane = {
+            "pane_id": "w1:p7",
+            "workspace_id": "w1",
+            "agent": "hermes",
+            "agent_status": "idle",
+        }
+        if pane_id and pane_id != pane["pane_id"]:
+            return None
+        if agent and agent != pane["agent"]:
+            return None
+        return pane
+
+    def tool(self, name):
+        return self.tool_definition if name == "herdr_prompt_agent" else None
+
+    def client(self):
+        return self.client_instance
 
 
 class FakeDB:
@@ -31,7 +86,8 @@ class FakeDB:
 
 @pytest.mark.asyncio
 async def test_capsule_handoff_uses_capsule_id_as_visual_connector():
-    service = CapsuleService(FakeDB())
+    herdr = FakeDeliveryHerdr()
+    service = CapsuleService(FakeDB(), herdr)
     created = await service.create(
         title="Continue MCP Studio",
         workspace="mcp-studio",
@@ -63,19 +119,37 @@ async def test_capsule_handoff_uses_capsule_id_as_visual_connector():
         },
     )
 
-    assert handed["current_agent"] == "hermes"
+    assert handed["current_agent"] == "claude"
     assert handed["current_stage"] == "agent_runtime"
-    assert handed["last_handoff"]["connector_id"] == "C-204"
-    assert handed["last_handoff"]["handoff_id"].startswith("H-")
-    assert handed["last_handoff"]["reason"] == "quota_exhausted"
+    assert handed["last_handoff"] is None
+    assert handed["pending_handoff"]["handoff_id"].startswith("H-")
+    assert handed["pending_handoff"]["reason"] == "quota_exhausted"
+    assert handed["pending_handoff"]["context_fit"]["fit"] is True
+    assert handed["pending_handoff"]["state"] == "dispatched"
     assert handed["capsule_type"] == "full"
     assert handed["context_profile"]["retained_percent"] == 100.0
-    assert handed["last_handoff"]["context_fit"]["fit"] is True
-    assert handed["last_handoff"]["a2a"]["protocol"] == "a2a"
-    assert handed["last_handoff"]["a2a"]["task_id"].startswith("A2A-")
-    assert handed["last_handoff"]["a2a"]["context_id"] == "C-204"
-    assert handed["last_handoff"]["a2a"]["task"]["kind"] == "task"
-    assert handed["last_handoff"]["a2a"]["task"]["status"]["state"] == "submitted"
+
+    prompt = herdr.client_instance.calls[-1]["args"]["message"]
+    token_match = re.search(r'"delivery_token":"([^"]+)"', prompt)
+    assert token_match
+    committed = await service.acknowledge_handoff(
+        "C-204",
+        handed["pending_handoff"]["handoff_id"],
+        agent="hermes",
+        delivery_token=token_match.group(1),
+        receipt={"transport": "herdr", "pane_id": "w1:p7"},
+    )
+
+    assert committed["current_agent"] == "hermes"
+    assert committed["last_handoff"]["connector_id"] == "C-204"
+    assert committed["last_handoff"]["handoff_id"].startswith("H-")
+    assert committed["last_handoff"]["reason"] == "quota_exhausted"
+    assert committed["last_handoff"]["context_fit"]["fit"] is True
+    assert committed["last_handoff"]["a2a"]["protocol"] == "a2a"
+    assert committed["last_handoff"]["a2a"]["task_id"].startswith("A2A-")
+    assert committed["last_handoff"]["a2a"]["context_id"] == "C-204"
+    assert committed["last_handoff"]["a2a"]["task"]["kind"] == "task"
+    assert committed["last_handoff"]["a2a"]["task"]["status"]["state"] == "working"
 
     overview = await service.overview()
     assert overview["summary"] == {"active": 1, "total": 1, "handoffs": 1}
@@ -391,6 +465,52 @@ def test_cli_auth_probe_reports_logged_out(monkeypatch):
     )
     health = AgentRuntimeInventory._cli_auth_health(
         "codex", binary="/usr/bin/codex", provider="OpenAI"
+    )
+    assert health["status"] == "error"
+    assert health["authenticated"] is False
+
+
+
+def test_hermes_custom_provider_logged_out_is_non_blocking(monkeypatch):
+    monkeypatch.setattr(
+        AgentRuntimeInventory,
+        "_run_probe",
+        staticmethod(
+            lambda binary, args, timeout=4.0: {
+                "returncode": 0,
+                "stdout": "custom:9router: logged out",
+                "stderr": "",
+            }
+        ),
+    )
+    health = AgentRuntimeInventory._cli_auth_health(
+        "hermes", binary="/usr/bin/hermes", provider="9router"
+    )
+    assert health == {
+        "status": "configured",
+        "authenticated": None,
+        "source": "hermes_custom_provider",
+        "detail": (
+            "Hermes custom provider 9router has no Hermes-managed login; "
+            "runtime availability must be verified by the configured backend."
+        ),
+    }
+
+
+def test_hermes_regular_provider_logged_out_remains_error(monkeypatch):
+    monkeypatch.setattr(
+        AgentRuntimeInventory,
+        "_run_probe",
+        staticmethod(
+            lambda binary, args, timeout=4.0: {
+                "returncode": 0,
+                "stdout": "9router: logged out",
+                "stderr": "",
+            }
+        ),
+    )
+    health = AgentRuntimeInventory._cli_auth_health(
+        "hermes", binary="/usr/bin/hermes", provider="9router"
     )
     assert health["status"] == "error"
     assert health["authenticated"] is False
