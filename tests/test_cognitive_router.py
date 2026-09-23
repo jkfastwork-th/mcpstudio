@@ -165,6 +165,23 @@ class FakeRuntimes:
         }
 
 
+class FakeLaneStates:
+    def __init__(self, **states):
+        self.states = states
+
+    async def lane_states(self):
+        return {
+            agent: {
+                "agent": agent,
+                "state": self.states.get(agent, "normal"),
+                "reason": None,
+                "actor": "test",
+                "updated_at": None,
+            }
+            for agent in ("claude", "codex", "hermes")
+        }
+
+
 def studio():
     return SimpleNamespace(
         jev_enabled=False,
@@ -578,6 +595,35 @@ async def test_deep_lane_prefers_claude():
     assert result.lane == "deep"
     assert result.runtime == "claude"
     assert result.output == "CLAUDE_RESULT"
+
+
+@pytest.mark.asyncio
+async def test_disabled_claude_lane_is_removed_from_deep_candidates():
+    router = CognitiveRouter(
+        studio(),
+        FakeHerdr(),
+        FakeRuntimes(),
+        FakeLaneStates(claude="disabled"),
+    )
+    result = await router.execute(
+        {
+            "request_id": "COG-DEEP-CLAUDE-DISABLED",
+            "prompt": "Continue a complex task while Claude is disabled.",
+            "capability": "reasoning_high",
+        }
+    )
+    assert result.status == "success"
+    assert result.lane == "deep"
+    assert result.runtime == "hermes"
+    plan = await router.plan(
+        {
+            "request_id": "COG-PLAN-CLAUDE-DISABLED",
+            "prompt": "Plan a complex task.",
+            "capability": "reasoning_high",
+        }
+    )
+    assert plan["lane_states"]["claude"]["state"] == "disabled"
+    assert [candidate["runtime"] for candidate in plan["candidates"]] == ["hermes"]
 
 
 @pytest.mark.asyncio

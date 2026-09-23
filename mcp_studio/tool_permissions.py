@@ -22,12 +22,14 @@ _READ_TOOLS = {
     "family_context_read", "fern_bridge_status", "fern_inbox_list_or_peek",
     "mcpstudio_current_session", "mcpstudio_get_session", "mcpstudio_list_sessions",
     "mcpstudio_list_workspaces", "mcpstudio_session_history", "mcpstudio_context_status",
+    "mcpstudio_lane_status", "mcpstudio_list_capsules", "mcpstudio_get_capsule",
 }
 _WRITE_TOOLS = {
     "replace_content", "replace_symbol_body", "insert_after_symbol",
     "insert_before_symbol", "rename_symbol", "write_memory", "edit_memory",
     "rename_memory", "create_text_file", "onboarding",
     "mcpstudio_register_workspace", "mcpstudio_rename_session",
+    "mcpstudio_set_capsule_contract",
 }
 _DESTRUCTIVE_TOOLS = {"safe_delete_symbol", "delete_memory"}
 _EXECUTE_TOOLS = {
@@ -35,6 +37,7 @@ _EXECUTE_TOOLS = {
     "mcpstudio_use_workspace", "mcpstudio_create_session", "mcpstudio_use_session",
     "mcpstudio_handoff_session", "mcpstudio_accept_handoff", "mcpstudio_report_context_usage",
     "mcpstudio_close_session", "mcpstudio_detach_session",
+    "mcpstudio_set_lane_state", "mcpstudio_approve_capsule_handoff",
     "fern_inbox_claim", "fern_reply_submit", "fern_interjection_decide",
 }
 _SHELL_TOOLS = {"execute_shell_command", "shell", "run_command"}

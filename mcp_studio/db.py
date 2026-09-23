@@ -132,6 +132,13 @@ class Database:
                         metadata_json TEXT NOT NULL DEFAULT '{}',
                         FOREIGN KEY(workspace_key) REFERENCES managed_workspaces(key)
                     );
+                    CREATE TABLE IF NOT EXISTS lane_states (
+                        agent TEXT PRIMARY KEY,
+                        state TEXT NOT NULL DEFAULT 'normal',
+                        reason TEXT,
+                        actor TEXT NOT NULL DEFAULT 'system',
+                        updated_at TEXT NOT NULL
+                    );
                     CREATE TABLE IF NOT EXISTS session_handoffs (
                         id TEXT PRIMARY KEY,
                         token_hash TEXT NOT NULL UNIQUE,
@@ -496,8 +503,54 @@ class Database:
                     "INSERT OR IGNORE INTO schema_migrations(version, name, applied_at) VALUES(8, 'hirda-session-handoff-rollover', ?)",
                     (now,),
                 )
+                db.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version, name, applied_at) VALUES(9, 'hirda-lane-state-and-capsule-contract', ?)",
+                    (now,),
+                )
 
         await self._run(op)
+
+    async def set_lane_state(
+        self,
+        agent: str,
+        state: str,
+        *,
+        reason: str | None = None,
+        actor: str = "system",
+    ) -> dict[str, Any]:
+        stamp = _now()
+
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                db.execute(
+                    """
+                    INSERT INTO lane_states(agent, state, reason, actor, updated_at)
+                    VALUES(?,?,?,?,?)
+                    ON CONFLICT(agent) DO UPDATE SET
+                        state=excluded.state,
+                        reason=excluded.reason,
+                        actor=excluded.actor,
+                        updated_at=excluded.updated_at
+                    """,
+                    (agent, state, reason, actor, stamp),
+                )
+                row = db.execute(
+                    "SELECT agent, state, reason, actor, updated_at FROM lane_states WHERE agent=?",
+                    (agent,),
+                ).fetchone()
+                return dict(row)
+
+        return await self._run(op)
+
+    async def list_lane_states(self) -> list[dict[str, Any]]:
+        def op() -> list[dict[str, Any]]:
+            with self._connect() as db:
+                rows = db.execute(
+                    "SELECT agent, state, reason, actor, updated_at FROM lane_states ORDER BY agent"
+                ).fetchall()
+                return [dict(row) for row in rows]
+
+        return await self._run(op)
 
     async def add_event(
         self,
@@ -639,7 +692,7 @@ class Database:
                 integrity = db.execute("PRAGMA quick_check").fetchone()[0]
                 return {
                     "current_version": int(rows[-1]["version"]) if rows else 0,
-                    "expected_version": 8,
+                    "expected_version": 9,
                     "integrity": integrity,
                     "migrations": [dict(r) for r in rows],
                 }

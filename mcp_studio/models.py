@@ -262,6 +262,30 @@ class CapsuleHandoffAck(BaseModel):
     receipt: dict[str, Any] = Field(default_factory=dict)
 
 
+class CapsuleContractUpdate(BaseModel):
+    contract: dict[str, Any]
+
+
+class CapsuleHandoffValidation(BaseModel):
+    agent: AgentId
+    delivery_token: str = Field(min_length=16, max_length=512)
+    passed: bool
+    checks: list[dict[str, Any]] = Field(default_factory=list)
+    plan: str | None = Field(default=None, max_length=12000)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class CapsuleHandoffApproval(BaseModel):
+    approved_by: str = Field(min_length=1, max_length=240)
+
+
+class LaneStateUpdate(BaseModel):
+    state: Literal["normal", "draining", "disabled", "emergency"]
+    reason: str | None = Field(default=None, max_length=500)
+    actor: str = Field(default="operator", min_length=1, max_length=240)
+    auto_handoff: bool = True
+
+
 class CapsuleComplete(BaseModel):
     agent: AgentId | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)

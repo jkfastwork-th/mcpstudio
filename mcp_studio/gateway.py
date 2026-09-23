@@ -28,12 +28,19 @@ from .reflex import (
     evaluate_tool_call as evaluate_reflex_tool_call,
 )
 from .graft import GraftManager, GraftError
+from .capsules import CapsuleService, CapsuleNotFound
 
 
 CONTROL_TOOL_NAMES = (
     "mcpstudio_use_workspace",
     "mcpstudio_create_session",
     "mcpstudio_use_session",
+    "mcpstudio_lane_status",
+    "mcpstudio_set_lane_state",
+    "mcpstudio_list_capsules",
+    "mcpstudio_get_capsule",
+    "mcpstudio_set_capsule_contract",
+    "mcpstudio_approve_capsule_handoff",
     "mcpstudio_context_status",
     "mcpstudio_report_context_usage",
     "mcpstudio_handoff_session",
@@ -67,12 +74,14 @@ class GatewaySessionManager:
         self, settings: Settings, db: Database, oauth: OAuthManager | None = None,
         managed_sessions: ManagedSessionManager | None = None,
         graft: GraftManager | None = None,
+        capsules: CapsuleService | None = None,
     ):
         self.settings = settings
         self.db = db
         self.oauth = oauth
         self.managed_sessions = managed_sessions
         self.graft = graft
+        self.capsules = capsules
 
     def authenticate(self, request: Request) -> tuple[str, str, str, str, str]:
         """Authenticate and derive a stable client identity.
@@ -384,6 +393,72 @@ class GatewaySessionManager:
                         "request": {"type": "string"},
                         "record_handoff": {"type": "boolean", "default": True},
                     },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "mcpstudio_lane_status",
+                "description": "Show HIRDA routing state for Claude, Codex, and Hermes lanes. Only normal lanes accept new work.",
+                "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            {
+                "name": "mcpstudio_set_lane_state",
+                "description": "Set one agent lane to normal, draining, disabled, or emergency. Disabled/emergency can auto-handoff active portable capsules; Guarded waits for approval and Pinned never moves automatically.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "agent": {"type": "string", "enum": ["claude", "codex", "hermes"]},
+                        "state": {"type": "string", "enum": ["normal", "draining", "disabled", "emergency"]},
+                        "reason": {"type": "string", "maxLength": 500},
+                        "auto_handoff": {"type": "boolean", "default": True},
+                    },
+                    "required": ["agent", "state"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "mcpstudio_list_capsules",
+                "description": "List current HIRDA capsules, their owner lane, Capsule Contract portability, and handoff state.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 100}},
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "mcpstudio_get_capsule",
+                "description": "Get one HIRDA capsule by capsule id.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"capsule_id": {"type": "string"}},
+                    "required": ["capsule_id"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "mcpstudio_set_capsule_contract",
+                "description": "Set the model-independent Capsule Contract used to preserve task semantics across lane handoff. Safe/Guarded contracts should define handoff checks and target capabilities.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "capsule_id": {"type": "string"},
+                        "contract": {"type": "object"},
+                    },
+                    "required": ["capsule_id", "contract"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "mcpstudio_approve_capsule_handoff",
+                "description": "Approve a Guarded Capsule handoff after the target lane has acknowledged receipt and passed contract validation.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "capsule_id": {"type": "string"},
+                        "handoff_id": {"type": "string"},
+                        "approved_by": {"type": "string", "default": "chatgpt/mcp"},
+                    },
+                    "required": ["capsule_id", "handoff_id"],
                     "additionalProperties": False,
                 },
             },
@@ -1562,6 +1637,54 @@ class GatewaySessionManager:
             }
             session = await self.managed_sessions.update_permissions(target["id"], changes, actor="chatgpt/mcp")
             return {"session": session, "permissions": await self.managed_sessions.permissions(target["id"])}
+        if name in {
+            "mcpstudio_lane_status",
+            "mcpstudio_set_lane_state",
+            "mcpstudio_list_capsules",
+            "mcpstudio_get_capsule",
+            "mcpstudio_set_capsule_contract",
+            "mcpstudio_approve_capsule_handoff",
+        }:
+            if not self.capsules:
+                raise ManagedSessionError("HIRDA capsule control is unavailable")
+            if name == "mcpstudio_lane_status":
+                return {"lanes": await self.capsules.lane_states()}
+            if name == "mcpstudio_set_lane_state":
+                return await self.capsules.set_lane_state(
+                    str(args.get("agent") or ""),
+                    str(args.get("state") or ""),
+                    reason=(str(args.get("reason")) if args.get("reason") is not None else None),
+                    actor="chatgpt/mcp",
+                    auto_handoff=bool(args.get("auto_handoff", True)),
+                )
+            if name == "mcpstudio_list_capsules":
+                return await self.capsules.overview(int(args.get("limit") or 100))
+            if name == "mcpstudio_get_capsule":
+                try:
+                    return {"capsule": await self.capsules.get(str(args.get("capsule_id") or ""))}
+                except CapsuleNotFound as exc:
+                    raise ManagedSessionError("capsule not found") from exc
+            if name == "mcpstudio_set_capsule_contract":
+                try:
+                    return {
+                        "capsule": await self.capsules.update_contract(
+                            str(args.get("capsule_id") or ""),
+                            dict(args.get("contract") or {}),
+                        )
+                    }
+                except CapsuleNotFound as exc:
+                    raise ManagedSessionError("capsule not found") from exc
+            if name == "mcpstudio_approve_capsule_handoff":
+                try:
+                    return {
+                        "capsule": await self.capsules.approve_handoff(
+                            str(args.get("capsule_id") or ""),
+                            str(args.get("handoff_id") or ""),
+                            approved_by=str(args.get("approved_by") or "chatgpt/mcp"),
+                        )
+                    }
+                except CapsuleNotFound as exc:
+                    raise ManagedSessionError("capsule not found") from exc
         if name.startswith("mcpstudio_graft_"):
             if not self.graft:
                 raise GraftError("HIRDA Graft integration is unavailable")

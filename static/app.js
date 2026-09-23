@@ -766,8 +766,11 @@ function renderAgentLanes(data){
     {id:'hermes',name:'Hermes',brand:'Local/Custom',provider:'Local/Custom',status:'unknown',installed:false}
   ];
   const cards=discovered.length?discovered:fallback;
+  const laneStateById=data?.laneStatesData?.lanes||{};
   grid.innerHTML=cards.map(r=>{
     const id=String(r.id||'').toLowerCase();
+    const laneState=String(laneStateById[id]?.state||'normal').toLowerCase();
+    const laneReason=laneStateById[id]?.reason||'';
     const icon=id==='claude'?'✷':id==='codex'?'◎':'⬡';
     const state=String(r.status||'unknown').toLowerCase();
     const version=r.version||tr('Not reported');
@@ -792,12 +795,18 @@ function renderAgentLanes(data){
         <div><span>Status</span><strong class="${presence.online?'fact-ready':state==='blocked'?'fact-danger':'fact-muted'}">${esc(runtimeStateLabel(state))}</strong></div>
         <div><span>Authentication</span><strong class="${runtimeHealthClass(authHealth.status)}">${esc(authHealthLabel(authHealth))}</strong></div>
         <div><span>Rate limit</span><strong class="${runtimeHealthClass(limitHealth.status)}">${esc(limitHealthLabel(limitHealth))}</strong></div>
+        <div><span>Lane routing</span><strong class="${laneState==='normal'?'fact-ready':laneState==='draining'?'fact-muted':'fact-danger'}">${esc(laneState.replaceAll('_',' ').replace(/\b\w/g,ch=>ch.toUpperCase()))}</strong></div>
+        ${laneReason?`<div><span>Lane reason</span><strong>${esc(laneReason)}</strong></div>`:''}
         <div><span>Active panes</span><strong>${paneCount}</strong></div>
         ${queueLength==null?'':`<div><span>Queue Length</span><strong>${esc(queueLength)}</strong></div>`}
         ${contextLimit==null?'':`<div><span>Context Limit</span><strong>${esc(contextLimit)}</strong></div>`}
         ${lastError? `<div><span>Last Error</span><strong class="fact-danger">${esc(lastError)}</strong></div>` : ''}
       </div>
       <div class="agent-reference-actions">
+        <select class="button secondary small" data-lane-state-select="${esc(id)}" aria-label="Lane routing state for ${esc(r.name||id)}">
+          ${['normal','draining','disabled','emergency'].map(value=>`<option value="${value}"${value===laneState?' selected':''}>${value.replaceAll('_',' ').replace(/\b\w/g,ch=>ch.toUpperCase())}</option>`).join('')}
+        </select>
+        <button class="button secondary small" data-lane-state-apply="${esc(id)}" type="button">Apply Lane State</button>
         <button class="button secondary small" data-agent-check="${esc(id)}" type="button">Check Runtime</button>
         <button class="button secondary small agent-log-button" data-agent-details="${esc(id)}" type="button">View Details</button>
       </div>
@@ -1087,7 +1096,7 @@ async function evaluateActionProvider(){
 }
 
 function renderOverview(data){
-  const {status,managedSessions,alertsData,capsulesData,agentRuntimesData}=data;
+  const {status,managedSessions,alertsData,capsulesData,agentRuntimesData,laneStatesData}=data;
   const items=managedSessions?.sessions||[];
   const running=items.filter(x=>x.status==='ready' || x.status==='running');
   const activeSessions=running.filter(x=>(x.connected_transports||0)>0 || x.lifecycle_state==='active');
@@ -1129,10 +1138,15 @@ function renderOverview(data){
   };
   const fromAgent=String(routeHandoff?.from_agent||'').toLowerCase();
   const toAgent=String(routeHandoff?.to_agent||'').toLowerCase();
+  const laneStateById=laneStatesData?.lanes||{};
   const lanes=Object.entries(laneDefs).map(([key,meta])=>{
     const participates=key===currentAgent||key===fromAgent||key===toAgent;
     const active=key===currentAgent && liveCapsule?.status!=='completed';
-    const statusText=pendingHandoff&&key===toAgent?'Awaiting ACK':active&&pendingHandoff&&key===fromAgent?'Running · handoff in flight':active?'Running':key===fromAgent&&lastHandoff?'Handoff source':key===toAgent&&lastHandoff?'Received':'Ready';
+    const laneState=String(laneStateById[key]?.state||'normal').toLowerCase();
+    const policyStatus=laneState==='normal'?null:laneState.replaceAll('_',' ').replace(/\b\w/g,ch=>ch.toUpperCase());
+    const statusText=policyStatus||(
+      pendingHandoff&&key===toAgent?'Awaiting ACK':active&&pendingHandoff&&key===fromAgent?'Running · handoff in flight':active?'Running':key===fromAgent&&lastHandoff?'Handoff source':key===toAgent&&lastHandoff?'Received':'Ready'
+    );
     const eventStage=key===fromAgent?(routeHandoff?.from_stage||''):key===toAgent?(routeHandoff?.to_stage||''):'';
     return renderCapsuleLane({
       agent:meta.name,
@@ -1415,10 +1429,10 @@ function renderDebug(data){
 
 async function load(){
   try{
-    const [status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,openaiCompat,operationsData,observabilityData,alertsData,auditData,events,capsulesData,agentRuntimesData,reflexMetricsData]=await Promise.all([
-      getJson('/api/status'),getJson('/api/workers'),getJson('/api/work?limit=100'),getJson('/api/sessions'),getJson('/api/gateway/sessions'),getJson('/api/managed/sessions'),getJson('/api/managed/workspaces'),getJson('/api/openai/compatibility'),getJson('/api/operations'),getJson('/api/observability'),getJson('/api/alerts?status=open&limit=20'),getJson('/api/audit?limit=30'),getJson('/api/events?limit=40'),getJson('/api/capsules?limit=100'),getJson('/api/agents/runtimes'),getJson(`/api/reflex/metrics?window=${encodeURIComponent(reflexWindow)}&recent=20`).catch(()=>null)
+    const [status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,openaiCompat,operationsData,observabilityData,alertsData,auditData,events,capsulesData,agentRuntimesData,laneStatesData,reflexMetricsData]=await Promise.all([
+      getJson('/api/status'),getJson('/api/workers'),getJson('/api/work?limit=100'),getJson('/api/sessions'),getJson('/api/gateway/sessions'),getJson('/api/managed/sessions'),getJson('/api/managed/workspaces'),getJson('/api/openai/compatibility'),getJson('/api/operations'),getJson('/api/observability'),getJson('/api/alerts?status=open&limit=20'),getJson('/api/audit?limit=30'),getJson('/api/events?limit=40'),getJson('/api/capsules?limit=100'),getJson('/api/agents/runtimes'),getJson('/api/lanes'),getJson(`/api/reflex/metrics?window=${encodeURIComponent(reflexWindow)}&recent=20`).catch(()=>null)
     ]);
-    latestData={status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,openaiCompat,operationsData,observabilityData,alertsData,auditData,events,capsulesData,agentRuntimesData,reflexMetricsData};
+    latestData={status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,openaiCompat,operationsData,observabilityData,alertsData,auditData,events,capsulesData,agentRuntimesData,laneStatesData,reflexMetricsData};
     const studio=document.getElementById('studioStatus'); studio.className=`pill ${status.studio.status}`; studio.textContent=String(status.studio.status||'unknown').toUpperCase();
     document.getElementById('lastUpdated').textContent=`Updated ${new Date().toLocaleTimeString()} · ${status.studio.version}`;
     renderOverview(latestData); renderReflexMetrics(latestData); renderCapsuleLedger(latestData); renderManagedSessions(latestData); renderSessions(latestData); renderWorkspaces(latestData); renderWorkers(latestData); renderTunnels(latestData); renderReliability(latestData); renderActivity(latestData); renderDebug(latestData); captureAndTranslateText(document);
@@ -1449,6 +1463,34 @@ function runtimeDetailMessage(runtime){
     `Active panes: ${runtime.pane_count||0}`,
     `Binary: ${runtime.binary||'not reported'}`
   ].join('\n');
+}
+
+async function applyLaneState(id){
+  const select=document.querySelector(`[data-lane-state-select="${CSS.escape(String(id))}"]`);
+  const state=String(select?.value||'normal').toLowerCase();
+  let reason='';
+  const autoHandoff=state==='disabled'||state==='emergency';
+  if(state!=='normal'){
+    const result=await openAppDialog({
+      title:`Set ${id} lane to ${state}?`,
+      message:autoHandoff
+        ? 'New work will stop routing to this lane. Active portable capsules may be handed off automatically; Guarded capsules wait for approval and Pinned capsules stay put.'
+        : 'New work will stop routing to this lane, while active work can finish.',
+      icon:autoHandoff?'!':'i',
+      tone:autoHandoff?'danger':'info',
+      confirmText:'Apply lane state',
+      fields:[{name:'reason',label:'Reason',placeholder:'quota near limit / maintenance / operator choice'}]
+    });
+    if(!result.confirmed)return;
+    reason=result.values.reason||'';
+  }
+  await sendJson(`/api/lanes/${encodeURIComponent(id)}/state`,{
+    state,
+    reason:reason||null,
+    actor:'web-ui',
+    auto_handoff:autoHandoff
+  });
+  await load();
 }
 
 async function checkAgentRuntime(id){
@@ -1555,6 +1597,7 @@ document.addEventListener('click',e=>uiAction(async()=>{
   const copy=e.target.closest('[data-copy-command],[data-copy-source]'); if(copy){await copyChatGPTCommand(copy);return;}
   const settingsAction=e.target.closest('[data-settings-action]'); if(settingsAction){await handleSettingsAction(settingsAction.dataset.settingsAction);return;}
   const scheme=e.target.closest('button[data-color-scheme]'); if(scheme){applyColorScheme(scheme.dataset.colorScheme);return;}
+  const laneApply=e.target.closest('[data-lane-state-apply]'); if(laneApply){await applyLaneState(laneApply.dataset.laneStateApply);return;}
   const agentCheck=e.target.closest('[data-agent-check]'); if(agentCheck){await checkAgentRuntime(agentCheck.dataset.agentCheck);return;}
   const agentDetails=e.target.closest('[data-agent-details]'); if(agentDetails){await showAgentRuntimeDetails(agentDetails.dataset.agentDetails);return;}
   const go=e.target.closest('[data-go-view]'); if(go){setView(go.dataset.goView);if(go.dataset.capsuleId){if(latestData)renderCapsuleLedger(latestData);const focused=focusCapsuleLedgerItem(go.dataset.capsuleId);if(!focused&&go.dataset.managedSessionId){renderManagedHistory(await getJson(`/api/managed/sessions/${encodeURIComponent(go.dataset.managedSessionId)}/history`));}}return;}

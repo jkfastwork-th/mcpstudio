@@ -28,7 +28,8 @@ from .models import (
     WorkSubmit, WorkFinish, WorkFail, WorkDetach, AlertAcknowledge, RetryDispatch, FaultInject, BatchDispatch,
     SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate,
     GraftConfigureRequest, GraftQueryRequest, GraftRollbackRequest, ComputerRepairRequest, ManagedGatewayAttach, GatewayContextUsageReport, SessionHandoffPrepareRequest,
-    CapsuleCreate, CapsuleStageUpdate, CapsuleHandoff, CapsuleHandoffAck, CapsuleComplete,
+    CapsuleCreate, CapsuleStageUpdate, CapsuleHandoff, CapsuleHandoffAck, CapsuleContractUpdate,
+    CapsuleHandoffValidation, CapsuleHandoffApproval, LaneStateUpdate, CapsuleComplete,
 )
 from .settings import Settings, load_settings
 from .workers import WorkerManager
@@ -65,13 +66,13 @@ connectivity = ConnectivityManager(settings, db)
 oauth = OAuthManager(settings, db)
 managed_sessions = ManagedSessionManager(settings, db)
 graft = GraftManager(settings, db)
-gateway_sessions = GatewaySessionManager(settings, db, oauth, managed_sessions, graft)
+gateway_sessions = GatewaySessionManager(settings, db, oauth, managed_sessions, graft, capsules)
 operations = OperationsManager(settings, db)
 observability = ObservabilityManager(settings, db)
 computer = ComputerUseManager(settings.studio, db)
 reflex_metrics = ReflexMetrics(settings.studio)
 action_provider_registry = build_action_provider_registry(settings.studio)
-cognitive_router = CognitiveRouter(settings.studio, herdr, agent_runtimes)
+cognitive_router = CognitiveRouter(settings.studio, herdr, agent_runtimes, capsules)
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
 
 
@@ -527,6 +528,16 @@ async def capsule_create(body: CapsuleCreate):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.post("/api/capsules/{capsule_id}/contract")
+async def capsule_contract_update(capsule_id: str, body: CapsuleContractUpdate):
+    try:
+        return await capsules.update_contract(capsule_id, body.contract)
+    except CapsuleNotFound:
+        raise HTTPException(status_code=404, detail="capsule not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/api/capsules/{capsule_id}/stage")
 async def capsule_stage(capsule_id: str, body: CapsuleStageUpdate):
     try:
@@ -578,6 +589,39 @@ async def capsule_handoff_ack(capsule_id: str, handoff_id: str, body: CapsuleHan
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.post("/api/capsules/{capsule_id}/handoff/{handoff_id}/validate")
+async def capsule_handoff_validate(capsule_id: str, handoff_id: str, body: CapsuleHandoffValidation):
+    try:
+        return await capsules.validate_handoff(
+            capsule_id,
+            handoff_id,
+            agent=body.agent,
+            delivery_token=body.delivery_token,
+            passed=body.passed,
+            checks=body.checks,
+            plan=body.plan,
+            evidence=body.evidence,
+        )
+    except CapsuleNotFound:
+        raise HTTPException(status_code=404, detail="capsule not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/capsules/{capsule_id}/handoff/{handoff_id}/approve")
+async def capsule_handoff_approve(capsule_id: str, handoff_id: str, body: CapsuleHandoffApproval):
+    try:
+        return await capsules.approve_handoff(
+            capsule_id,
+            handoff_id,
+            approved_by=body.approved_by,
+        )
+    except CapsuleNotFound:
+        raise HTTPException(status_code=404, detail="capsule not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/api/capsules/{capsule_id}/complete")
 async def capsule_complete(capsule_id: str, body: CapsuleComplete):
     try:
@@ -597,6 +641,25 @@ async def agent_runtime_list(refresh: bool = False):
     if refresh:
         await herdr.refresh()
     return agent_runtimes.snapshot(force=refresh)
+
+
+@app.get("/api/lanes")
+async def lane_state_list():
+    return {"lanes": await capsules.lane_states()}
+
+
+@app.post("/api/lanes/{agent}/state")
+async def lane_state_update(agent: str, body: LaneStateUpdate):
+    try:
+        return await capsules.set_lane_state(
+            agent,
+            body.state,
+            reason=body.reason,
+            actor=body.actor,
+            auto_handoff=body.auto_handoff,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 

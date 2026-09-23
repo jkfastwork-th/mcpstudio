@@ -421,10 +421,11 @@ class CognitiveRouter:
     lane/runtime and can fail over between compatible runtimes. JEV is teacher evidence only.
     """
 
-    def __init__(self, studio: Any, herdr: HerdrManager, runtimes: Any) -> None:
+    def __init__(self, studio: Any, herdr: HerdrManager, runtimes: Any, capsules: Any | None = None) -> None:
         self.studio = studio
         self.herdr = herdr
         self.runtimes = runtimes
+        self.capsules = capsules
 
     @staticmethod
     def _deterministic_lane(request: CognitiveRequest) -> str:
@@ -489,11 +490,19 @@ class CognitiveRouter:
         request: CognitiveRequest,
         lane: str,
         runtime_snapshot: dict[str, Any],
+        lane_states: dict[str, dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
+        lane_states = lane_states or {}
+
+        def accepts_new_work(row: dict[str, Any]) -> bool:
+            runtime_id = str(row.get("id") or "").casefold()
+            state = str((lane_states.get(runtime_id) or {}).get("state") or "normal").casefold()
+            return state == "normal"
+
         rows = [
             dict(row)
             for row in runtime_snapshot.get("runtimes", [])
-            if isinstance(row, dict) and self._runtime_healthy(row)
+            if isinstance(row, dict) and self._runtime_healthy(row) and accepts_new_work(row)
         ]
         by_id = {str(row.get("id") or "").casefold(): row for row in rows}
 
@@ -560,6 +569,7 @@ class CognitiveRouter:
         request = normalize_cognitive_request(payload)
         await self.herdr.refresh()
         runtime_snapshot = self.runtimes.snapshot(force=True)
+        lane_states = await self.capsules.lane_states() if self.capsules is not None else {}
         jev = await evaluate_cognitive_request(self.studio, request)
         deterministic = self._deterministic_lane(request)
         min_confidence = max(0.0, min(1.0, float(getattr(self.studio, "jev_min_confidence", 0.90) or 0.90)))
@@ -574,12 +584,13 @@ class CognitiveRouter:
             and jev.confidence >= min_confidence
         ):
             lane = "deep"
-        candidates = self._ordered_candidates(request, lane, runtime_snapshot)
+        candidates = self._ordered_candidates(request, lane, runtime_snapshot, lane_states)
         return {
             "schema": "hirda-cognitive-plan-v1",
             "request": request.as_dict(),
             "lane": lane,
             "deterministic_lane": deterministic,
+            "lane_states": lane_states,
             "jev": jev.as_dict(),
             "candidates": [
                 {

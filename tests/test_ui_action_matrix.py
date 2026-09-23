@@ -48,6 +48,7 @@ STATIC_DATA_HANDLERS = {
 }
 
 DYNAMIC_ACTION_HANDLERS = {
+    "data-lane-state-apply": "closest('[data-lane-state-apply]')",
     "data-agent-check": "closest('[data-agent-check]')",
     "data-agent-details": "closest('[data-agent-details]')",
     "data-go-view": "closest('[data-go-view]')",

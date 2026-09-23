@@ -133,10 +133,93 @@ def test_session_handoff_tools_are_exposed_and_classified(tmp_path: Path):
     assert "mcpstudio_accept_handoff" in names
     assert "mcpstudio_context_status" in names
     assert "mcpstudio_report_context_usage" in names
+    assert "mcpstudio_lane_status" in names
+    assert "mcpstudio_set_lane_state" in names
+    assert "mcpstudio_list_capsules" in names
+    assert "mcpstudio_get_capsule" in names
+    assert "mcpstudio_set_capsule_contract" in names
+    assert "mcpstudio_approve_capsule_handoff" in names
     assert classify_tool("mcpstudio_handoff_session", {}) == "execute"
     assert classify_tool("mcpstudio_accept_handoff", {}) == "execute"
     assert classify_tool("mcpstudio_context_status", {}) == "read"
     assert classify_tool("mcpstudio_report_context_usage", {}) == "execute"
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_capsule_lane_control_tools_delegate_to_capsule_service(tmp_path: Path):
+    settings = settings_for(tmp_path)
+
+    class Pool:
+        enabled = True
+
+    class Capsules:
+        async def lane_states(self):
+            return {"claude": {"agent": "claude", "state": "normal"}}
+
+        async def set_lane_state(self, agent, state, *, reason=None, actor="operator", auto_handoff=True):
+            return {
+                "lane": {"agent": agent, "state": state, "reason": reason, "actor": actor},
+                "auto_handoff": [],
+            }
+
+        async def overview(self, limit=100):
+            return {"capsules": [], "summary": {"active": 0, "total": 0, "handoffs": 0}}
+
+        async def get(self, capsule_id):
+            return {"capsule_id": capsule_id}
+
+        async def update_contract(self, capsule_id, contract):
+            return {"capsule_id": capsule_id, "contract": contract}
+
+        async def approve_handoff(self, capsule_id, handoff_id, *, approved_by):
+            return {
+                "capsule_id": capsule_id,
+                "handoff_id": handoff_id,
+                "approved_by": approved_by,
+            }
+
+    manager = GatewaySessionManager(
+        settings,
+        Database(settings.studio.database),
+        managed_sessions=Pool(),
+        capsules=Capsules(),
+    )
+
+    status = await manager._handle_management_tool("gws-test", "mcpstudio_lane_status", {})
+    assert status["lanes"]["claude"]["state"] == "normal"
+
+    changed = await manager._handle_management_tool(
+        "gws-test",
+        "mcpstudio_set_lane_state",
+        {
+            "agent": "claude",
+            "state": "disabled",
+            "reason": "quota",
+            "auto_handoff": True,
+        },
+    )
+    assert changed["lane"]["state"] == "disabled"
+    assert changed["lane"]["actor"] == "chatgpt/mcp"
+
+    contract = await manager._handle_management_tool(
+        "gws-test",
+        "mcpstudio_set_capsule_contract",
+        {
+            "capsule_id": "C-TEST",
+            "contract": {"objective": "keep semantics"},
+        },
+    )
+    assert contract["capsule"]["capsule_id"] == "C-TEST"
+
+    approved = await manager._handle_management_tool(
+        "gws-test",
+        "mcpstudio_approve_capsule_handoff",
+        {
+            "capsule_id": "C-TEST",
+            "handoff_id": "H-TEST",
+        },
+    )
+    assert approved["capsule"]["approved_by"] == "chatgpt/mcp"
 
 
 @pytest.mark.asyncio

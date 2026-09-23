@@ -29,8 +29,8 @@ async def test_schema_v7_adds_managed_session_activity_columns(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite3"))
     await db.init()
     status = await db.schema_status()
-    assert status["current_version"] == 8
-    assert status["expected_version"] == 8
+    assert status["current_version"] == 9
+    assert status["expected_version"] == 9
 
     def inspect():
         with db._connect() as conn:
@@ -38,6 +38,25 @@ async def test_schema_v7_adds_managed_session_activity_columns(tmp_path: Path):
 
     columns = await db._run(inspect)
     assert {"last_used_at", "use_count"} <= columns
+
+
+@pytest.mark.asyncio
+async def test_schema_v9_persists_lane_state(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite3"))
+    await db.init()
+
+    saved = await db.set_lane_state(
+        "claude",
+        "draining",
+        reason="quota_near_limit",
+        actor="test",
+    )
+    assert saved["agent"] == "claude"
+    assert saved["state"] == "draining"
+    assert saved["reason"] == "quota_near_limit"
+
+    rows = await db.list_lane_states()
+    assert rows == [saved]
 
 
 @pytest.mark.asyncio

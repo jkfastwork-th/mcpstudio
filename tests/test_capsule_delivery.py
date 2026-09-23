@@ -11,6 +11,7 @@ from mcp_studio.capsules import CapsuleDeliveryError, CapsuleService
 class FakeDB:
     def __init__(self):
         self.events = []
+        self.lanes = {}
 
     async def add_event(
         self,
@@ -35,6 +36,20 @@ class FakeDB:
 
     async def recent_events(self, limit=100):
         return list(reversed(self.events[-limit:]))
+
+    async def list_lane_states(self):
+        return [dict(value) for value in self.lanes.values()]
+
+    async def set_lane_state(self, agent, state, *, reason=None, actor="system"):
+        row = {
+            "agent": agent,
+            "state": state,
+            "reason": reason,
+            "actor": actor,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self.lanes[agent] = row
+        return dict(row)
 
 
 class FakeClient:
@@ -92,6 +107,18 @@ class FakeHerdr:
             return None
         return pane
 
+    def pane_list(self, snapshot=None):
+        if not self.pane_enabled:
+            return []
+        return [
+            {
+                "pane_id": "pane-hermes",
+                "agent": "hermes",
+                "agent_status": "idle",
+                "revision": 1,
+            }
+        ]
+
     def tool(self, name):
         return self.tool_definition if name == "herdr_prompt_agent" else None
 
@@ -110,6 +137,24 @@ def handoff_metadata():
             "tool_schema_tokens": 1000,
             "safety_reserve_tokens": 4096,
         }
+    }
+
+
+def capsule_contract(portability="safe"):
+    return {
+        "objective": "Preserve the existing implementation while continuing the task.",
+        "locked_decisions": ["Do not change the public API."],
+        "artifacts": ["mcp_studio/capsules.py"],
+        "current_state": {"tests": "passing"},
+        "checkpoint": {"git": "clean"},
+        "next_actions": ["Continue implementation."],
+        "acceptance_criteria": ["Existing behavior remains compatible."],
+        "handoff_checks": ["baseline tests pass"],
+        "constraints": ["Preserve semantic intent."],
+        "portability": portability,
+        "target_capabilities": {
+            "hermes": handoff_metadata()["model_capability"],
+        },
     }
 
 
@@ -320,3 +365,136 @@ async def test_pending_handoff_blocks_stage_and_completion_until_ack():
 
     with pytest.raises(ValueError, match="capsule_handoff_in_progress"):
         await service.complete(capsule_id, agent="claude")
+
+
+@pytest.mark.asyncio
+async def test_safe_emergency_lane_handoff_requires_validation_before_commit():
+    service, _, herdr, capsule_id = await prepared_service()
+    await service.update_contract(capsule_id, capsule_contract("safe"))
+
+    result = await service.set_lane_state(
+        "claude",
+        "emergency",
+        reason="quota_critical",
+        actor="test",
+        auto_handoff=True,
+    )
+    assert result["auto_handoff"][0]["status"] == "dispatched"
+
+    pending = await service.get(capsule_id)
+    assert pending["current_agent"] == "claude"
+    assert pending["pending_handoff"]["to_agent"] == "hermes"
+    handoff_id = pending["pending_handoff"]["handoff_id"]
+    token = delivery_token_from_call(herdr)
+
+    acknowledged = await service.acknowledge_handoff(
+        capsule_id,
+        handoff_id,
+        agent="hermes",
+        delivery_token=token,
+        receipt={"transport": "herdr", "pane_id": "pane-hermes"},
+    )
+    assert acknowledged["current_agent"] == "claude"
+    assert acknowledged["pending_handoff"]["state"] == "acknowledged"
+
+    committed = await service.validate_handoff(
+        capsule_id,
+        handoff_id,
+        agent="hermes",
+        delivery_token=token,
+        passed=True,
+        checks=[
+            {
+                "criterion": "baseline tests pass",
+                "status": "pass",
+                "evidence": "pytest green",
+            }
+        ],
+    )
+    assert committed["current_agent"] == "hermes"
+    assert committed["pending_handoff"] is None
+
+
+@pytest.mark.asyncio
+async def test_guarded_emergency_handoff_waits_for_explicit_approval():
+    service, _, herdr, capsule_id = await prepared_service()
+    await service.update_contract(capsule_id, capsule_contract("guarded"))
+
+    await service.set_lane_state(
+        "claude",
+        "disabled",
+        reason="preserve_quota",
+        actor="test",
+        auto_handoff=True,
+    )
+    pending = await service.get(capsule_id)
+    handoff_id = pending["pending_handoff"]["handoff_id"]
+    token = delivery_token_from_call(herdr)
+
+    await service.acknowledge_handoff(
+        capsule_id,
+        handoff_id,
+        agent="hermes",
+        delivery_token=token,
+        receipt={"transport": "herdr", "pane_id": "pane-hermes"},
+    )
+    validated = await service.validate_handoff(
+        capsule_id,
+        handoff_id,
+        agent="hermes",
+        delivery_token=token,
+        passed=True,
+        checks=[
+            {
+                "criterion": "baseline tests pass",
+                "status": "pass",
+                "evidence": "pytest green",
+            }
+        ],
+        plan="Continue without changing locked decisions.",
+    )
+    assert validated["current_agent"] == "claude"
+    assert validated["pending_handoff"]["state"] == "awaiting_approval"
+
+    committed = await service.approve_handoff(
+        capsule_id,
+        handoff_id,
+        approved_by="chatgpt/sol",
+    )
+    assert committed["current_agent"] == "hermes"
+    assert committed["pending_handoff"] is None
+
+
+@pytest.mark.asyncio
+async def test_pinned_capsule_is_not_auto_handed_off_from_emergency_lane():
+    service, _, _, capsule_id = await prepared_service()
+    await service.update_contract(capsule_id, capsule_contract("pinned"))
+
+    result = await service.set_lane_state(
+        "claude",
+        "emergency",
+        reason="quota_critical",
+        actor="test",
+        auto_handoff=True,
+    )
+
+    assert result["auto_handoff"] == [
+        {
+            "capsule_id": capsule_id,
+            "status": "blocked",
+            "reason": "capsule_pinned",
+        }
+    ]
+    state = await service.get(capsule_id)
+    assert state["current_agent"] == "claude"
+    assert state["pending_handoff"] is None
+    assert state["handoff_review"]["reason"] == "capsule_pinned"
+
+
+@pytest.mark.asyncio
+async def test_guarded_contract_without_handoff_checks_is_rejected():
+    service, _, _, capsule_id = await prepared_service()
+    contract = capsule_contract("guarded")
+    contract["handoff_checks"] = []
+    with pytest.raises(ValueError, match="requires at least one handoff_check"):
+        await service.update_contract(capsule_id, contract)
