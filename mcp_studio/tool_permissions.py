@@ -93,6 +93,8 @@ def _git_command_class(tokens: list[str]) -> ToolClass:
         return "read"
     if sub in {"add", "commit", "merge", "rebase", "cherry-pick", "tag", "switch", "checkout"}:
         return "write"
+    if sub in {"push"}:
+        return "execute"
     if sub in {"reset", "clean", "restore"}:
         return "destructive"
     return "unknown"

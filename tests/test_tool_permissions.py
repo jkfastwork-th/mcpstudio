@@ -58,6 +58,7 @@ def test_shell_classifier_keeps_read_write_execute_separate():
     assert classify_shell_command("uv run pytest -q tests") == "execute"
     assert classify_shell_command("python3 -m unittest -v tests.test_tool_permissions") == "execute"
     assert classify_shell_command("git add x.py && git commit -m test") == "write"
+    assert classify_shell_command("git push origin review/remove-hca") == "execute"
     assert classify_shell_command("git reset --hard HEAD") == "destructive"
     assert classify_shell_command("python -c 'open(\"x\",\"w\").write(\"x\")'") == "unknown"
     assert classify_shell_command("grep -E 'foo|bar' README.md") == "read"
