@@ -944,6 +944,16 @@ async def machine_registry_status():
     return await machine_router.machine_snapshot()
 
 
+@app.get("/api/machines/{machine_id}/policy")
+async def machine_policy(machine_id: str):
+    try:
+        return machine_router.machine_policy(machine_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown machine")
+    except MachineRegistryError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
 @app.put("/api/managed/sessions/{session_id}/machine")
 async def managed_session_machine_update(session_id: str, payload: ManagedSessionMachineUpdate):
     try:
@@ -1762,6 +1772,21 @@ def _computer_token_ok(websocket: WebSocket) -> bool:
     return websocket.query_params.get("token") == expected
 
 
+def _require_machine_permission(session: dict[str, Any], category: str) -> None:
+    decision = machine_router.authorize_session(session, category)
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": decision.code,
+                "message": decision.message,
+                "machine_id": decision.machine_id,
+                "permission_class": decision.category,
+                "machine_policy": decision.policy,
+            },
+        )
+
+
 @app.get("/api/computer/status")
 async def computer_status():
     return await computer.status()
@@ -1771,6 +1796,7 @@ async def computer_status():
 async def computer_descriptor(managed_session_id: str):
     try:
         session = await managed_sessions.get_session(managed_session_id)
+        _require_machine_permission(session, "read")
         return await machine_router.computer_descriptor(managed_session_id, session)
     except KeyError:
         raise HTTPException(status_code=404, detail="Unknown managed session")
@@ -1782,6 +1808,7 @@ async def computer_descriptor(managed_session_id: str):
 async def computer_re_pair_targets(managed_session_id: str):
     try:
         session = await managed_sessions.get_session(managed_session_id)
+        _require_machine_permission(session, "read")
         machine_router.require_local_computer(session)
         return await computer.repair_targets(managed_session_id)
     except KeyError:
@@ -1796,6 +1823,7 @@ async def computer_re_pair_targets(managed_session_id: str):
 async def computer_re_pair(managed_session_id: str, payload: ComputerRepairRequest):
     try:
         session = await managed_sessions.get_session(managed_session_id)
+        _require_machine_permission(session, "execute")
         machine_router.require_local_computer(session)
         return await computer.repair_runtime(
             managed_session_id,
@@ -1824,6 +1852,7 @@ async def computer_vnc_ws(websocket: WebSocket, managed_session_id: str):
 
     try:
         session = await managed_sessions.get_session(managed_session_id)
+        _require_machine_permission(session, "execute")
         await machine_router.computer_descriptor(managed_session_id, session)
     except KeyError:
         await websocket.accept(subprotocol=_computer_ws_subprotocol(websocket))

@@ -54,12 +54,27 @@ Control surfaces:
 Remote machines must declare a `workspace_map` for each logical HIRDA workspace they may access. Missing mappings fail
 closed. A remote session never silently falls through to the local filesystem or local Computer Use runtime.
 
+## Per-machine policy
+
+Every machine may declare a hard permission ceiling with `read`, `write`, `execute`, `destructive`, and
+`fail_closed_unknown`. Effective authority is the intersection of the managed-session policy and the target-machine
+policy. A machine can therefore restrict a session further but can never grant authority the session does not already
+have. Backend requests blocked by this ceiling return `MACHINE_PERMISSION_DENIED` (or
+`MACHINE_PERMISSION_UNCLASSIFIED` for fail-closed unknown operations) before Reflex/JEV or physical backend dispatch.
+
+The same machine policy protects Computer Use: descriptor/repair-target reads require machine `read`, while runtime
+repair and interactive VNC require machine `execute`. This prevents GUI access from becoming a bypass around shell/file
+policy. The registry snapshot and `GET /api/machines/{machine_id}/policy` expose the effective configured ceiling for
+operators and UI surfaces.
+
+Production defaults are deliberately asymmetric: openclaw permits read/write/execute but denies destructive actions;
+JKFASTDEV permits read/write while execute/destructive remain disabled until explicitly approved in configuration.
+
 ## JKFASTDEV transport
 
 The initial Windows node uses its Tailscale address and runs `scripts/hirda_machine_agent.py`. The listener binds only
 to the machine's Tailscale IP and accepts requests only from the declared openclaw Tailscale IP. No public interface is
-opened and no shared bearer secret is copied between machines. A limited current-user scheduled task starts the agent on
-Windows logon.
+opened and no shared bearer secret is copied between machines. A limited current-user Startup launcher starts the agent on Windows logon.
 
 Computer Use is intentionally not advertised for JKFASTDEV in this phase. A session bound to JKFASTDEV will therefore
 reject Computer Use instead of opening openclaw's VNC desktop. Remote GUI transport can be added as a later provider

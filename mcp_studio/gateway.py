@@ -2634,6 +2634,26 @@ class GatewaySessionManager:
                         is_error=True,
                     )
 
+                machine_decision = None
+                if backend_tool and self.machine_router is not None:
+                    machine_decision = self.machine_router.authorize_session(
+                        managed_session, decision.category
+                    )
+                    if not machine_decision.allowed:
+                        return local_tool_response(
+                            {
+                                "error": machine_decision.code,
+                                "message": machine_decision.message,
+                                "tool": tool_name,
+                                "permission_class": decision.category,
+                                "workspace_key": managed_session.get("workspace_key"),
+                                "machine_id": machine_decision.machine_id,
+                                "session_policy": decision.policy,
+                                "machine_policy": machine_decision.policy,
+                            },
+                            is_error=True,
+                        )
+
                 reflex_started = time.perf_counter()
                 reflex_decision, reflex_features = evaluate_reflex_tool_call(
                     self.settings.studio,
@@ -2671,6 +2691,14 @@ class GatewaySessionManager:
                         "reflex_id": reflex_id,
                         "request_id": jsonrpc.get("id") if jsonrpc else None,
                         "workspace_key": managed_session.get("workspace_key"),
+                        "machine": (
+                            {
+                                "id": machine_decision.machine_id,
+                                "policy": machine_decision.policy,
+                            }
+                            if machine_decision is not None
+                            else None
+                        ),
                         "features": reflex_features.as_dict(),
                         "reflex": reflex_decision.as_dict(),
                         "teacher": {
@@ -2701,6 +2729,16 @@ class GatewaySessionManager:
                             "studio_session_id": session["studio_session_id"],
                             "managed_session_id": session.get("managed_session_id"),
                             "workspace_key": managed_session.get("workspace_key"),
+                            "machine_id": (
+                                machine_decision.machine_id
+                                if machine_decision is not None
+                                else None
+                            ),
+                            "machine_policy": (
+                                machine_decision.policy
+                                if machine_decision is not None
+                                else None
+                            ),
                             "tool": tool_name,
                             "permission_class": decision.category,
                             "reflex": reflex_decision.as_dict(),

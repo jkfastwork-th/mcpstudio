@@ -19,6 +19,45 @@ class MachineRegistryError(RuntimeError):
     pass
 
 
+_MACHINE_PERMISSION_KEYS = ("read", "write", "execute", "destructive")
+_DEFAULT_MACHINE_POLICY: dict[str, Any] = {
+    "read": True,
+    "write": True,
+    "execute": True,
+    "destructive": False,
+    "fail_closed_unknown": True,
+}
+
+
+def _normalize_machine_policy(raw: object) -> dict[str, Any]:
+    policy = dict(_DEFAULT_MACHINE_POLICY)
+    if raw is None:
+        return policy
+    if not isinstance(raw, dict):
+        raise MachineRegistryError("machine policy must be an object")
+    for key in _MACHINE_PERMISSION_KEYS:
+        if key not in raw:
+            continue
+        if not isinstance(raw[key], bool):
+            raise MachineRegistryError(f"machine policy {key} must be boolean")
+        policy[key] = raw[key]
+    if "fail_closed_unknown" in raw:
+        if not isinstance(raw["fail_closed_unknown"], bool):
+            raise MachineRegistryError("machine policy fail_closed_unknown must be boolean")
+        policy["fail_closed_unknown"] = raw["fail_closed_unknown"]
+    return policy
+
+
+@dataclass(frozen=True, slots=True)
+class MachinePolicyDecision:
+    allowed: bool
+    category: str
+    code: str | None
+    message: str
+    machine_id: str
+    policy: dict[str, Any]
+
+
 @dataclass(slots=True)
 class MachineDescriptor:
     machine_id: str
@@ -30,6 +69,7 @@ class MachineDescriptor:
     capabilities: tuple[str, ...] = ()
     providers: dict[str, dict[str, Any]] = field(default_factory=dict)
     workspace_map: dict[str, str] = field(default_factory=dict)
+    policy: dict[str, Any] = field(default_factory=lambda: dict(_DEFAULT_MACHINE_POLICY))
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def public(self) -> dict[str, Any]:
@@ -49,6 +89,7 @@ class MachineDescriptor:
             "capabilities": list(self.capabilities),
             "providers": providers,
             "workspace_keys": sorted(self.workspace_map),
+            "policy": dict(self.policy),
             "metadata": dict(self.metadata),
         }
 
@@ -88,6 +129,7 @@ class MachineRegistry:
                     "desktop_commander": {"mode": "local"},
                     "computer_use": {"mode": "local"},
                 },
+                policy=dict(_DEFAULT_MACHINE_POLICY),
             )
 
     @staticmethod
@@ -111,6 +153,7 @@ class MachineRegistry:
             capabilities=capabilities,
             providers={str(k): dict(v) for k, v in providers.items() if isinstance(v, dict)},
             workspace_map={str(k): str(v) for k, v in workspace_map.items() if str(k).strip() and str(v).strip()},
+            policy=_normalize_machine_policy(raw.get("policy")),
             metadata=dict(raw.get("metadata") or {}) if isinstance(raw.get("metadata"), dict) else {},
         )
 
@@ -130,6 +173,51 @@ class MachineRegistry:
         metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
         machine_id = str(metadata.get("machine_id") or self.local_machine_id)
         return self.get(machine_id)
+
+    def authorize_session(
+        self,
+        session: dict[str, Any],
+        category: str,
+    ) -> MachinePolicyDecision:
+        machine = self.machine_for_session(session)
+        policy = dict(machine.policy)
+        normalized = str(category or "unknown").strip().lower() or "unknown"
+        if normalized == "unknown":
+            allowed = not bool(policy.get("fail_closed_unknown", True))
+            return MachinePolicyDecision(
+                allowed=allowed,
+                category=normalized,
+                code=None if allowed else "MACHINE_PERMISSION_UNCLASSIFIED",
+                message=(
+                    "Unclassified machine capability allowed by machine policy."
+                    if allowed
+                    else f"Machine {machine.machine_id} blocks unclassified capabilities."
+                ),
+                machine_id=machine.machine_id,
+                policy=policy,
+            )
+        if normalized not in _MACHINE_PERMISSION_KEYS:
+            return MachinePolicyDecision(
+                allowed=False,
+                category=normalized,
+                code="MACHINE_PERMISSION_UNCLASSIFIED",
+                message=f"Machine {machine.machine_id} has no policy class for {normalized}.",
+                machine_id=machine.machine_id,
+                policy=policy,
+            )
+        allowed = bool(policy.get(normalized, False))
+        return MachinePolicyDecision(
+            allowed=allowed,
+            category=normalized,
+            code=None if allowed else "MACHINE_PERMISSION_DENIED",
+            message=(
+                f"{normalized.upper()} permission granted by machine {machine.machine_id}."
+                if allowed
+                else f"{normalized.upper()} permission is disabled for machine {machine.machine_id}."
+            ),
+            machine_id=machine.machine_id,
+            policy=policy,
+        )
 
     def workspace_root(self, machine: MachineDescriptor, workspace_key: str, fallback_path: str | None = None) -> str:
         mapped = str(machine.workspace_map.get(str(workspace_key or "")) or "").strip()

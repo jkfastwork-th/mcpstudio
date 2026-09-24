@@ -29,6 +29,9 @@ class MachineCapabilityRouter:
     def is_backend_tool(self, name: str) -> bool:
         return self.integrations.is_backend_tool(name)
 
+    def authorize_session(self, session: dict[str, Any], category: str):
+        return self.registry.authorize_session(session, category)
+
     async def call_backend_tool(
         self,
         exposed_name: str,
@@ -114,6 +117,13 @@ class MachineCapabilityRouter:
 
     def session_machine(self, session: dict[str, Any]) -> dict[str, Any]:
         return self.registry.machine_for_session(session).public()
+
+    def machine_policy(self, machine_id: str) -> dict[str, Any]:
+        machine = self.registry.get(machine_id)
+        return {
+            "machine": machine.public(),
+            "policy": dict(machine.policy),
+        }
 
     def require_local_computer(self, session: dict[str, Any]) -> dict[str, Any]:
         machine = self.registry.machine_for_session(session)

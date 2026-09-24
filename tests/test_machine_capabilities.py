@@ -64,6 +64,13 @@ def machine_config():
             "name": "openclaw",
             "local": True,
             "capabilities": ["filesystem", "computer_use"],
+            "policy": {
+                "read": True,
+                "write": True,
+                "execute": True,
+                "destructive": False,
+                "fail_closed_unknown": True,
+            },
             "providers": {
                 "desktop_commander": {"mode": "local"},
                 "computer_use": {"mode": "local"},
@@ -75,6 +82,13 @@ def machine_config():
             "os": "windows",
             "address": "100.85.206.7",
             "capabilities": ["filesystem", "process"],
+            "policy": {
+                "read": True,
+                "write": True,
+                "execute": False,
+                "destructive": False,
+                "fail_closed_unknown": True,
+            },
             "providers": {
                 "desktop_commander": {
                     "mode": "agent",
@@ -169,3 +183,56 @@ async def test_remote_machine_cannot_fall_through_to_local_computer_use(tmp_path
     session = {"metadata": {"machine_id": "JKFASTDEV"}}
     with pytest.raises(MachineRegistryError, match="Computer Use backend is unavailable"):
         await router.computer_descriptor("ms-2", session)
+
+def test_machine_policy_is_hard_ceiling_for_remote_machine(tmp_path: Path):
+    registry = MachineRegistry(studio(machine_config()), base_dir=tmp_path)
+    session = {"metadata": {"machine_id": "JKFASTDEV"}}
+
+    read = registry.authorize_session(session, "read")
+    execute = registry.authorize_session(session, "execute")
+    destructive = registry.authorize_session(session, "destructive")
+
+    assert read.allowed is True
+    assert execute.allowed is False
+    assert execute.code == "MACHINE_PERMISSION_DENIED"
+    assert execute.machine_id == "JKFASTDEV"
+    assert destructive.allowed is False
+
+
+def test_machine_policy_preserves_local_execute_but_denies_destructive(tmp_path: Path):
+    registry = MachineRegistry(studio(machine_config()), base_dir=tmp_path)
+    session = {"metadata": {"machine_id": "openclaw"}}
+
+    assert registry.authorize_session(session, "execute").allowed is True
+    denied = registry.authorize_session(session, "destructive")
+    assert denied.allowed is False
+    assert denied.code == "MACHINE_PERMISSION_DENIED"
+
+
+def test_machine_policy_unknown_is_fail_closed(tmp_path: Path):
+    registry = MachineRegistry(studio(machine_config()), base_dir=tmp_path)
+    decision = registry.authorize_session(
+        {"metadata": {"machine_id": "JKFASTDEV"}}, "unknown"
+    )
+    assert decision.allowed is False
+    assert decision.code == "MACHINE_PERMISSION_UNCLASSIFIED"
+
+
+def test_machine_public_snapshot_exposes_policy_without_secrets(tmp_path: Path):
+    registry = MachineRegistry(studio(machine_config()), base_dir=tmp_path)
+    remote = registry.get("JKFASTDEV").public()
+    assert remote["policy"] == {
+        "read": True,
+        "write": True,
+        "execute": False,
+        "destructive": False,
+        "fail_closed_unknown": True,
+    }
+    assert "token" not in remote["providers"]["desktop_commander"]
+
+
+def test_invalid_machine_policy_is_rejected(tmp_path: Path):
+    broken = machine_config()
+    broken[1]["policy"] = {"execute": "yes"}
+    with pytest.raises(MachineRegistryError, match="execute must be boolean"):
+        MachineRegistry(studio(broken), base_dir=tmp_path)

@@ -21,7 +21,7 @@ _READ_TOOLS = {
     "herdr_list_agents", "herdr_list_panes", "herdr_get_agent", "herdr_read_agent", "herdr_wait_agent",
     "family_context_read", "fern_bridge_status", "fern_inbox_list_or_peek",
     "mcpstudio_current_session", "mcpstudio_get_session", "mcpstudio_list_sessions",
-    "mcpstudio_list_workspaces", "mcpstudio_session_history", "mcpstudio_context_status",
+    "mcpstudio_list_workspaces", "mcpstudio_list_machines", "mcpstudio_session_history", "mcpstudio_context_status",
     "mcpstudio_lane_status", "mcpstudio_list_capsules", "mcpstudio_get_capsule",
 }
 _WRITE_TOOLS = {
@@ -34,7 +34,7 @@ _WRITE_TOOLS = {
 _DESTRUCTIVE_TOOLS = {"safe_delete_symbol", "delete_memory"}
 _EXECUTE_TOOLS = {
     "activate_project", "herdr_prompt_agent",
-    "mcpstudio_use_workspace", "mcpstudio_create_session", "mcpstudio_use_session",
+    "mcpstudio_use_workspace", "mcpstudio_create_session", "mcpstudio_use_session", "mcpstudio_bind_machine",
     "mcpstudio_handoff_session", "mcpstudio_accept_handoff", "mcpstudio_report_context_usage",
     "mcpstudio_world_authoring_preview", "mcpstudio_world_authoring_audit",
     "mcpstudio_close_session", "mcpstudio_detach_session",

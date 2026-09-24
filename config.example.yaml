@@ -131,6 +131,12 @@ studio:
   #    name: openclaw
   #    local: true
   #    capabilities: [filesystem, process, computer_use]
+  #    policy:
+  #      read: true
+  #      write: true
+  #      execute: true
+  #      destructive: false
+  #      fail_closed_unknown: true
   #    providers:
   #      desktop_commander: {mode: local}
   #      computer_use: {mode: local}
@@ -138,6 +144,12 @@ studio:
   #    name: Windows Dev
   #    address: 100.64.0.10
   #    capabilities: [filesystem, process]
+  #    policy:
+  #      read: true
+  #      write: true
+  #      execute: false
+  #      destructive: false
+  #      fail_closed_unknown: true
   #    providers:
   #      desktop_commander:
   #        mode: agent
