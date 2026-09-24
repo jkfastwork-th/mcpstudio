@@ -1,7 +1,7 @@
 schema: hirda-plugin-v1
 id: openbrowser
 name: OpenBrowser
-version: 0.1.0
+version: 0.1.2
 adapter:
   runtime: python
   entry: adapter.py
@@ -45,5 +45,7 @@ metadata:
   raw_mcp_not_exposed: true
   managed_session_profile_isolation: true
   permission_router: hirda
+  routing_strategy: dom_cdp_first_visual_fallback
+  visual_fallback_provider: computer_use
   upstream: openbrowser-ai
   upstream_version: 0.1.54

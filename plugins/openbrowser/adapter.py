@@ -263,6 +263,15 @@ class _OpenBrowserSessionClient:
         env["XDG_CONFIG_HOME"] = str(xdg_config)
         env["XDG_DATA_HOME"] = str(xdg_data)
         env["OPENBROWSER_HEADLESS"] = "true"
+        # OpenBrowser MCP creates a disposable per-process profile unless this
+        # environment variable is set explicitly. The CLI flag alone is not
+        # sufficient for MCP profile reuse across server restarts.
+        env["OPENBROWSER_USER_DATA_DIR"] = str(self.profile_dir)
+        # OpenBrowser's force-stop path can terminate Chromium before its native
+        # cookie DB is flushed. A per-session storage_state gives HIRDA an
+        # explicit CDP-backed persistence file that is saved before shutdown and
+        # restored on the next MCP process.
+        env["OPENBROWSER_STORAGE_STATE"] = str(self.profile_dir / "storage_state.json")
         command = [
             self.uvx_binary,
             "--from",
@@ -313,6 +322,18 @@ class _OpenBrowserSessionClient:
             )
             if result.get("isError"):
                 raise OpenBrowserAdapterError("openbrowser_execute_code_failed")
+            # OpenBrowser 0.1.x reports some code/runtime failures as a normal
+            # TextContent block beginning with ``Error:`` instead of MCP
+            # isError=true. Normalize that soft failure so HIRDA can trigger the
+            # Computer Use fallback rather than treating a failed action as done.
+            for block in result.get("content") or []:
+                if not isinstance(block, dict) or block.get("type") != "text":
+                    continue
+                message = str(block.get("text") or "").strip()
+                if message.lower().startswith("error:"):
+                    raise OpenBrowserAdapterError(
+                        "openbrowser_execute_code_failed:" + message[:1000]
+                    )
             return result
 
     async def _close_unlocked(self) -> None:
@@ -320,6 +341,22 @@ class _OpenBrowserSessionClient:
         self.process = None
         if process is None or process.returncode is not None:
             return
+
+        # Close MCP stdin first so OpenBrowser can leave server.run(), execute
+        # its shutdown/finalization path, and let Chromium flush profile state
+        # (notably cookies). SIGTERM skips that path and loses fresh logins.
+        if process.stdin is not None:
+            process.stdin.close()
+            try:
+                await process.stdin.wait_closed()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5.0)
+            return
+        except TimeoutError:
+            pass
+
         process.terminate()
         try:
             await asyncio.wait_for(process.wait(), timeout=3.0)
@@ -391,6 +428,8 @@ class OpenBrowserIntegration:
                     "raw_mcp_not_exposed": True,
                     "managed_session_profile_isolation": True,
                     "permission_router": "hirda",
+                    "routing_strategy": "dom_cdp_first_visual_fallback",
+                    "visual_fallback_provider": "computer_use",
                 },
             }
         )

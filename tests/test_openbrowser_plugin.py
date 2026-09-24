@@ -118,3 +118,88 @@ async def test_call_tool_requires_managed_session_context(monkeypatch):
         context={"managed_session_id": "managed-1"},
     )
     assert "await click(3)" in result["code"]
+
+@pytest.mark.asyncio
+async def test_session_process_uses_persistent_profile_and_graceful_eof(monkeypatch, tmp_path):
+    module = _load_module()
+    captured = {}
+
+    class FakeStdin:
+        def __init__(self):
+            self.closed = False
+        def write(self, data):
+            captured.setdefault("writes", []).append(data)
+        async def drain(self):
+            return None
+        def close(self):
+            self.closed = True
+        async def wait_closed(self):
+            return None
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdin = FakeStdin()
+            self.stdout = None
+            self.stderr = None
+            self.returncode = None
+            self.terminated = False
+        async def wait(self):
+            self.returncode = 0
+            return 0
+        def terminate(self):
+            self.terminated = True
+        def kill(self):
+            self.returncode = -9
+
+    process = FakeProcess()
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        captured["env"] = kwargs["env"]
+        return process
+
+    client = module._OpenBrowserSessionClient(
+        "uvx", tmp_path / "profile",
+        runtime_root=tmp_path / "runtime",
+        timeout_seconds=2,
+        version="0.1.54",
+    )
+
+    async def fake_request(method, params=None):
+        return {"serverInfo": {"name": "openbrowser", "version": "test"}}
+
+    monkeypatch.setattr(module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(client, "_request", fake_request)
+    await client._ensure_started()
+
+    assert captured["env"]["OPENBROWSER_USER_DATA_DIR"] == str(tmp_path / "profile")
+    assert captured["env"]["OPENBROWSER_STORAGE_STATE"] == str(tmp_path / "profile" / "storage_state.json")
+
+    await client.close()
+    assert process.stdin.closed is True
+    assert process.terminated is False
+
+@pytest.mark.asyncio
+async def test_upstream_soft_error_is_normalized_for_hirda_fallback(tmp_path, monkeypatch):
+    module = _load_module()
+    client = module._OpenBrowserSessionClient(
+        "uvx",
+        tmp_path / "profile",
+        runtime_root=tmp_path / "runtime",
+        timeout_seconds=2,
+        version="0.1.54",
+    )
+
+    async def no_start():
+        return None
+
+    async def soft_error(method, params=None):
+        assert method == "tools/call"
+        return {
+            "content": [{"type": "text", "text": "Error: DOM element is no longer attached"}],
+            "isError": False,
+        }
+
+    monkeypatch.setattr(client, "_ensure_started", no_start)
+    monkeypatch.setattr(client, "_request", soft_error)
+    with pytest.raises(module.OpenBrowserAdapterError, match="openbrowser_execute_code_failed"):
+        await client.execute_code("await click(1)")

@@ -236,3 +236,193 @@ def test_invalid_machine_policy_is_rejected(tmp_path: Path):
     broken[1]["policy"] = {"execute": "yes"}
     with pytest.raises(MachineRegistryError, match="execute must be boolean"):
         MachineRegistry(studio(broken), base_dir=tmp_path)
+
+class FakeBrowserIntegrations(FakeIntegrations):
+    def __init__(self, *, result=None, error=None):
+        super().__init__()
+        self.result = result or {"content": [{"type": "text", "text": '{"ok":true}'}]}
+        self.error = error
+
+    def backend_tools(self):
+        return [
+            {
+                "name": "hirda__openbrowser__click",
+                "inputSchema": {"type": "object"},
+            }
+        ]
+
+    def backend_permission(self, name):
+        if name == "hirda__openbrowser__click":
+            return "execute"
+        return None
+
+    def is_backend_tool(self, name):
+        return name == "hirda__openbrowser__click"
+
+    def backend_route(self, name):
+        if name == "hirda__openbrowser__click":
+            return ("openbrowser", "click")
+        return None
+
+    async def call_backend_tool(self, name, arguments, *, context):
+        self.local_calls.append((name, arguments, context))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+class TrackingComputer(FakeComputer):
+    def __init__(self):
+        self.calls = []
+
+    async def descriptor(self, session_id):
+        self.calls.append(session_id)
+        return {
+            "session_id": session_id,
+            "viewer_url": "/computer/novnc/vnc.html",
+            "websocket_path": f"/api/computer/vnc/ws/{session_id}",
+            "novnc_available": True,
+            "auth_required": False,
+            "desktop_display": ":5",
+            "cdp_port": 9225,
+            "runtime_mode": "session-isolated",
+        }
+
+
+def test_router_exposes_visual_browser_fallback_as_execute_tool(tmp_path: Path):
+    registry = MachineRegistry(studio(machine_config()), base_dir=tmp_path)
+    router = MachineCapabilityRouter(registry, FakeBrowserIntegrations(), TrackingComputer())
+    names = {tool["name"] for tool in router.backend_tools()}
+    assert "hirda__browser__visual_fallback" in names
+    assert router.is_backend_tool("hirda__browser__visual_fallback") is True
+    assert router.backend_permission("hirda__browser__visual_fallback") == "execute"
+
+
+@pytest.mark.asyncio
+async def test_openbrowser_failure_escalates_to_session_vnc(tmp_path: Path):
+    registry = MachineRegistry(studio(machine_config()), base_dir=tmp_path)
+    computer = TrackingComputer()
+    router = MachineCapabilityRouter(
+        registry,
+        FakeBrowserIntegrations(error=RuntimeError("dom target missing")),
+        computer,
+    )
+    result = await router.call_backend_tool(
+        "hirda__openbrowser__click",
+        {"index": 42},
+        context={
+            "machine_id": "openclaw",
+            "managed_session_id": "ms-browser-1",
+            "workspace_key": "mcp-studio",
+            "project_path": "/home/alfred/mcp-studio",
+            "permission_class": "execute",
+        },
+    )
+    import json
+    payload = json.loads(result["content"][0]["text"])
+    assert result["isError"] is True
+    assert payload["action_completed"] is False
+    assert payload["fallback_required"] is True
+    assert payload["fallback_mode"] == "computer_use_vnc"
+    assert payload["routing_strategy"] == "dom_cdp_first_visual_fallback"
+    assert payload["automatic"] is True
+    assert payload["failed_tool"] == "hirda__openbrowser__click"
+    assert payload["computer_use"]["websocket_path"].endswith("/ms-browser-1")
+    assert "vnc_port" not in payload["computer_use"]
+    assert computer.calls == ["ms-browser-1"]
+
+
+@pytest.mark.asyncio
+async def test_openbrowser_soft_error_escalates_to_session_vnc(tmp_path: Path):
+    registry = MachineRegistry(studio(machine_config()), base_dir=tmp_path)
+    router = MachineCapabilityRouter(
+        registry,
+        FakeBrowserIntegrations(
+            result={"content": [{"type": "text", "text": "Error: element detached"}], "isError": False}
+        ),
+        TrackingComputer(),
+    )
+    result = await router.call_backend_tool(
+        "hirda__openbrowser__click",
+        {"index": 7},
+        context={"machine_id": "openclaw", "managed_session_id": "ms-browser-soft", "permission_class": "execute"},
+    )
+    payload = __import__("json").loads(result["content"][0]["text"])
+    assert result["isError"] is True
+    assert payload["fallback_required"] is True
+    assert "element detached" in payload["reason"]
+
+
+@pytest.mark.asyncio
+async def test_openbrowser_success_stays_on_dom_cdp_path(tmp_path: Path):
+    registry = MachineRegistry(studio(machine_config()), base_dir=tmp_path)
+    computer = TrackingComputer()
+    expected = {"content": [{"type": "text", "text": '{"ok":true,"action":"click"}'}]}
+    router = MachineCapabilityRouter(
+        registry,
+        FakeBrowserIntegrations(result=expected),
+        computer,
+    )
+    result = await router.call_backend_tool(
+        "hirda__openbrowser__click",
+        {"index": 3},
+        context={"machine_id": "openclaw", "managed_session_id": "ms-browser-dom"},
+    )
+    assert result == expected
+    assert computer.calls == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_visual_fallback_returns_descriptor_without_claiming_action(tmp_path: Path):
+    registry = MachineRegistry(studio(machine_config()), base_dir=tmp_path)
+    router = MachineCapabilityRouter(registry, FakeBrowserIntegrations(), TrackingComputer())
+    result = await router.call_backend_tool(
+        "hirda__browser__visual_fallback",
+        {"reason": "canvas-only UI", "failed_tool": "hirda__openbrowser__state"},
+        context={"machine_id": "openclaw", "managed_session_id": "ms-browser-explicit"},
+    )
+    payload = __import__("json").loads(result["content"][0]["text"])
+    assert result["isError"] is False
+    assert payload["fallback_required"] is True
+    assert payload["action_completed"] is False
+    assert payload["automatic"] is False
+    assert payload["reason"] == "canvas-only UI"
+
+
+@pytest.mark.asyncio
+async def test_read_failure_requires_separate_execute_escalation(tmp_path: Path):
+    registry = MachineRegistry(studio(machine_config()), base_dir=tmp_path)
+    computer = TrackingComputer()
+    router = MachineCapabilityRouter(
+        registry,
+        FakeBrowserIntegrations(error=RuntimeError("dom unavailable")),
+        computer,
+    )
+    result = await router.call_backend_tool(
+        "hirda__openbrowser__click",
+        {"index": 4},
+        context={
+            "machine_id": "openclaw",
+            "managed_session_id": "ms-browser-read",
+            "permission_class": "read",
+        },
+    )
+    payload = __import__("json").loads(result["content"][0]["text"])
+    assert result["isError"] is True
+    assert payload["fallback_required"] is True
+    assert payload["fallback_tool"] == "hirda__browser__visual_fallback"
+    assert payload["fallback_permission_required"] == "execute"
+    assert payload["computer_use"] is None
+    assert computer.calls == []
+
+
+@pytest.mark.asyncio
+async def test_remote_machine_cannot_use_local_visual_browser_fallback(tmp_path: Path):
+    registry = MachineRegistry(studio(machine_config()), base_dir=tmp_path)
+    router = MachineCapabilityRouter(registry, FakeBrowserIntegrations(), TrackingComputer())
+    with pytest.raises(MachineRegistryError, match="Computer Use browser fallback is unavailable"):
+        await router.call_backend_tool(
+            "hirda__browser__visual_fallback",
+            {},
+            context={"machine_id": "JKFASTDEV", "managed_session_id": "ms-remote-browser"},
+        )

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .computer import ComputerUseManager
 from .integrations import IntegrationManager, IntegrationError
 from .machine_registry import MachineRegistry, MachineRegistryError
+
+
+_BROWSER_VISUAL_FALLBACK_TOOL = "hirda__browser__visual_fallback"
 
 
 class MachineCapabilityRouter:
@@ -21,16 +25,150 @@ class MachineCapabilityRouter:
         self.computer = computer
 
     def backend_tools(self) -> list[dict[str, Any]]:
-        return self.integrations.backend_tools()
+        tools = list(self.integrations.backend_tools())
+        tools.append(
+            {
+                "name": _BROWSER_VISUAL_FALLBACK_TOOL,
+                "description": (
+                    "Escalate the current managed browser task to session-isolated "
+                    "Computer Use/VNC when DOM/CDP automation is unavailable or "
+                    "insufficient. This returns a safe viewer descriptor; it does not "
+                    "claim the pending click/type action completed."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "reason": {"type": "string", "maxLength": 1000},
+                        "failed_tool": {"type": "string", "maxLength": 200},
+                    },
+                    "additionalProperties": False,
+                },
+                "annotations": {
+                    "readOnlyHint": False,
+                    "destructiveHint": False,
+                    "idempotentHint": True,
+                    "openWorldHint": True,
+                },
+            }
+        )
+        return tools
 
     def backend_permission(self, name: str) -> str | None:
+        if str(name or "") == _BROWSER_VISUAL_FALLBACK_TOOL:
+            # descriptor() may provision a session-owned desktop runtime.
+            return "execute"
         return self.integrations.backend_permission(name)
 
     def is_backend_tool(self, name: str) -> bool:
-        return self.integrations.is_backend_tool(name)
+        return str(name or "") == _BROWSER_VISUAL_FALLBACK_TOOL or self.integrations.is_backend_tool(name)
 
     def authorize_session(self, session: dict[str, Any], category: str):
         return self.registry.authorize_session(session, category)
+
+    @staticmethod
+    def _backend_result_error(result: dict[str, Any]) -> str | None:
+        if bool(result.get("isError")):
+            return "backend_result_is_error"
+        blocks = result.get("content")
+        if not isinstance(blocks, list):
+            return None
+        for block in blocks:
+            if not isinstance(block, dict) or block.get("type") != "text":
+                continue
+            text = str(block.get("text") or "").strip()
+            if text.lower().startswith("error:"):
+                return text[:1000]
+        return None
+
+    async def _browser_visual_fallback(
+        self,
+        machine: Any,
+        *,
+        context: dict[str, Any],
+        failed_tool: str | None,
+        reason: str,
+        automatic: bool,
+    ) -> dict[str, Any] | None:
+        provider = dict(machine.providers.get("computer_use") or {})
+        if not machine.local or str(provider.get("mode") or "").strip() != "local":
+            return None
+        managed_session_id = str(context.get("managed_session_id") or "").strip()
+        if not managed_session_id:
+            return None
+
+        # Automatic escalation must never upgrade a read/write browser call into
+        # an execute side effect. If the original gateway decision was not
+        # execute, return a routing hint and require a separate explicit
+        # visual_fallback call, which passes policy/Reflex/JEV as execute.
+        permission_class = str(context.get("permission_class") or "").strip()
+        if automatic and permission_class != "execute":
+            payload = {
+                "ok": True,
+                "action_completed": False,
+                "fallback_required": True,
+                "fallback_mode": "computer_use_vnc",
+                "routing_strategy": "dom_cdp_first_visual_fallback",
+                "automatic": True,
+                "failed_tool": failed_tool,
+                "reason": str(reason or "browser_dom_cdp_insufficient")[:1000],
+                "managed_session_id": managed_session_id,
+                "machine_id": machine.machine_id,
+                "visual_agent_action_required": True,
+                "fallback_tool": _BROWSER_VISUAL_FALLBACK_TOOL,
+                "fallback_permission_required": "execute",
+                "computer_use": None,
+            }
+            return {
+                "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))}],
+                "isError": True,
+            }
+
+        try:
+            descriptor = await self.computer.descriptor(managed_session_id)
+        except Exception:
+            return None
+
+        safe_descriptor = {
+            key: descriptor.get(key)
+            for key in (
+                "viewer_url",
+                "websocket_path",
+                "novnc_available",
+                "auth_required",
+                "cdp_port",
+                "desktop_display",
+                "runtime_mode",
+                "gpu_mode",
+                "gpu_hardware_available",
+                "gpu_presentation_mode",
+            )
+            if key in descriptor
+        }
+        payload = {
+            "ok": True,
+            "action_completed": False,
+            "fallback_required": True,
+            "fallback_mode": "computer_use_vnc",
+            "routing_strategy": "dom_cdp_first_visual_fallback",
+            "automatic": bool(automatic),
+            "failed_tool": failed_tool,
+            "reason": str(reason or "browser_dom_cdp_insufficient")[:1000],
+            "managed_session_id": managed_session_id,
+            "machine_id": machine.machine_id,
+            "visual_agent_action_required": True,
+            "computer_use": safe_descriptor,
+        }
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                }
+            ],
+            # Automatic escalation means the original browser action did not
+            # complete. Explicit escalation itself is a successful routing call.
+            "isError": bool(automatic),
+        }
 
     async def call_backend_tool(
         self,
@@ -41,10 +179,53 @@ class MachineCapabilityRouter:
     ) -> dict[str, Any]:
         machine_id = str(context.get("machine_id") or self.registry.local_machine_id)
         machine = self.registry.get(machine_id)
+
+        if exposed_name == _BROWSER_VISUAL_FALLBACK_TOOL:
+            fallback = await self._browser_visual_fallback(
+                machine,
+                context=context,
+                failed_tool=str(arguments.get("failed_tool") or "").strip() or None,
+                reason=str(arguments.get("reason") or "browser_dom_cdp_insufficient"),
+                automatic=False,
+            )
+            if fallback is None:
+                raise MachineRegistryError(
+                    f"Computer Use browser fallback is unavailable for machine {machine.machine_id}"
+                )
+            return fallback
+
         route = self.integrations.backend_route(exposed_name)
         if route is None:
             raise IntegrationError(f"unknown backend tool: {exposed_name}")
         integration_id, raw_name = route
+        if integration_id == "openbrowser":
+            try:
+                result = await self.integrations.call_backend_tool(
+                    exposed_name, arguments, context=context
+                )
+            except Exception as exc:
+                fallback = await self._browser_visual_fallback(
+                    machine,
+                    context=context,
+                    failed_tool=exposed_name,
+                    reason=f"{type(exc).__name__}: {exc}",
+                    automatic=True,
+                )
+                if fallback is not None:
+                    return fallback
+                raise
+            backend_error = self._backend_result_error(result)
+            if backend_error:
+                fallback = await self._browser_visual_fallback(
+                    machine,
+                    context=context,
+                    failed_tool=exposed_name,
+                    reason=backend_error,
+                    automatic=True,
+                )
+                if fallback is not None:
+                    return fallback
+            return result
         if integration_id != "desktop-commander":
             return await self.integrations.call_backend_tool(exposed_name, arguments, context=context)
         provider = dict(machine.providers.get("desktop_commander") or {})

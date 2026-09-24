@@ -2914,6 +2914,7 @@ class GatewaySessionManager:
                     "project_path": managed_session.get("project_path"),
                     "machine_id": metadata.get("machine_id"),
                     "policy": decision.policy,
+                    "permission_class": decision.category,
                 }
                 if self.machine_router is not None:
                     result = await self.machine_router.call_backend_tool(
