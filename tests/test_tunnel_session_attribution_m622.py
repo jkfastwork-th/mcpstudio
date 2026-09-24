@@ -110,7 +110,7 @@ async def test_v4_database_migrates_to_v5_without_preindex_failure(tmp_path: Pat
     db = Database(str(path))
     await db.init()
     status = await db.schema_status()
-    assert status["current_version"] == 9
+    assert status["current_version"] == 10
     with sqlite3.connect(path) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(gateway_sessions)")}
         indexes = {row[1] for row in conn.execute("PRAGMA index_list(gateway_sessions)")}

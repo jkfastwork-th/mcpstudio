@@ -124,13 +124,49 @@ class CapsuleService:
         self.handoff_ack_poll_seconds = max(0.1, float(handoff_ack_poll_seconds))
         self._handoff_lock = asyncio.Lock()
 
-    async def _ledger(self, limit: int = 500) -> list[dict[str, Any]]:
-        events = await self.db.recent_events(max(1, min(limit, 500)))
-        return [e for e in reversed(events) if str(e.get("kind", "")).startswith("capsule.")]
+    async def _ledger(
+        self,
+        limit: int = 500,
+        *,
+        capsule_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if hasattr(self.db, "list_events"):
+            if capsule_id:
+                return await self.db.list_events(
+                    stream_id=f"capsule:{capsule_id}",
+                    kind_prefix="capsule.",
+                    limit=None,
+                    ascending=True,
+                )
+            return await self.db.list_events(
+                stream_prefix="capsule:",
+                kind_prefix="capsule.",
+                limit=None,
+                ascending=True,
+            )
 
-    async def _projections(self, limit: int = 100) -> list[dict[str, Any]]:
+        events = await self.db.recent_events(max(1, min(limit, 500)))
+        ordered = [
+            e
+            for e in reversed(events)
+            if str(e.get("kind", "")).startswith("capsule.")
+        ]
+        if capsule_id:
+            ordered = [
+                e
+                for e in ordered
+                if str((e.get("data") or {}).get("capsule_id") or "") == capsule_id
+            ]
+        return ordered
+
+    async def _projections(
+        self,
+        limit: int = 100,
+        *,
+        capsule_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         by_id: dict[str, dict[str, Any]] = {}
-        for event in await self._ledger(500):
+        for event in await self._ledger(500, capsule_id=capsule_id):
             data = dict(event.get("data") or {})
             capsule_id = str(data.get("capsule_id") or "")
             if not capsule_id:
@@ -168,6 +204,11 @@ class CapsuleService:
             current["events"].append(
                 {
                     "id": event.get("id"),
+                    "event_id": event.get("event_id"),
+                    "stream_id": event.get("stream_id"),
+                    "stream_seq": event.get("stream_seq"),
+                    "correlation_id": event.get("correlation_id"),
+                    "event_hash": event.get("event_hash"),
                     "kind": kind,
                     "created_at": event.get("created_at"),
                     "message": event.get("message"),
@@ -388,7 +429,7 @@ class CapsuleService:
         }
 
     async def get(self, capsule_id: str) -> dict[str, Any]:
-        for item in await self._projections(100):
+        for item in await self._projections(1, capsule_id=capsule_id):
             if item.get("capsule_id") == capsule_id:
                 return item
         raise CapsuleNotFound(capsule_id)
