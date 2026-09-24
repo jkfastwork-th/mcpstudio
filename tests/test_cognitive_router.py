@@ -941,3 +941,35 @@ def test_normalize_requires_primary_target_for_fallback_target():
 def test_normalize_rejects_unknown_capability():
     with pytest.raises(CognitiveRouterError, match="cognitive_capability_invalid"):
         normalize_cognitive_request({"prompt": "x", "capability": "unknown"})
+
+
+@pytest.mark.asyncio
+async def test_auto_rollover_pane_is_excluded_from_default_cognitive_routing():
+    herdr = FakeHerdr()
+    herdr.snapshot["panes"]["panes"] = [
+        pane
+        for pane in herdr.snapshot["panes"]["panes"]
+        if pane["agent"] != "hermes"
+    ]
+    herdr.snapshot["panes"]["panes"].append(
+        {
+            "pane_id": "wH:pR",
+            "agent": "hermes",
+            "agent_status": "idle",
+            "name": "hirda-auto-rollover-hermes",
+        }
+    )
+    router = CognitiveRouter(studio(), herdr, FakeRuntimes())
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-ROLLOVER-RESERVED",
+            "prompt": "Return exactly OK.",
+            "capability": "fast_utility",
+            "preferred_depth": "fast",
+        }
+    )
+
+    assert plan["candidates"]
+    assert plan["candidates"][0]["runtime"] == "claude"
+    assert plan["candidates"][0]["pane_id"] == "wC:p1"

@@ -1133,3 +1133,53 @@ async def test_auto_rollover_never_selects_target_from_another_workspace():
     }
     assert evaluations[1]["agent"] == "codex"
     assert evaluations[1]["eligible"] is True
+
+
+@pytest.mark.asyncio
+async def test_auto_rollover_prefers_dedicated_rollover_pane():
+    service, _, herdr, capsule_id = await prepared_service()
+    panes = [
+        {
+            "pane_id": "pane-hermes-a",
+            "agent": "hermes",
+            "agent_status": "idle",
+            "cwd": "mcp-studio",
+            "foreground_cwd": "mcp-studio",
+        },
+        {
+            "pane_id": "pane-hermes-z",
+            "agent": "hermes",
+            "agent_status": "done",
+            "name": "hirda-auto-rollover-hermes",
+            "cwd": "mcp-studio",
+            "foreground_cwd": "mcp-studio",
+        },
+    ]
+    herdr.pane_list = lambda snapshot=None: panes
+    herdr.find_pane = lambda *, pane_id=None, workspace=None, agent=None: next(
+        (
+            pane
+            for pane in panes
+            if (not pane_id or pane["pane_id"] == pane_id)
+            and (not agent or pane["agent"] == agent)
+            and (
+                not workspace
+                or pane["foreground_cwd"] == workspace
+                or pane["cwd"] == workspace
+            )
+        ),
+        None,
+    )
+
+    await service.update_contract(capsule_id, capsule_contract("safe"))
+    result = await service.set_lane_state(
+        "claude",
+        "draining",
+        reason="dedicated_rollover_target",
+        actor="test",
+        auto_handoff=True,
+    )
+
+    selected = result["auto_handoff"][0]
+    assert selected["status"] == "dispatched"
+    assert selected["pending_handoff"]["target_pane"] == "pane-hermes-z"

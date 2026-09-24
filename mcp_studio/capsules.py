@@ -642,7 +642,21 @@ class CapsuleService:
             candidates.append(dict(pane))
         if not candidates:
             return None
-        return sorted(candidates, key=lambda item: str(item.get("pane_id") or ""))[0]
+
+        def rollover_rank(item: dict[str, Any]) -> tuple[int, int, str]:
+            name = str(item.get("name") or "").strip().casefold()
+            label = str(item.get("label") or "").strip().casefold()
+            dedicated = name.startswith("hirda-auto-rollover") or label.startswith(
+                "hirda-auto-rollover"
+            )
+            status = str(item.get("agent_status") or "").casefold()
+            return (
+                0 if dedicated else 1,
+                0 if status == "idle" else 1,
+                str(item.get("pane_id") or ""),
+            )
+
+        return sorted(candidates, key=rollover_rank)[0]
 
     async def auto_handoff_from_lane(
         self,

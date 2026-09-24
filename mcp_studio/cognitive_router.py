@@ -456,8 +456,12 @@ class CognitiveRouter:
 
     @staticmethod
     def _pane_reserved(pane: dict[str, Any]) -> bool:
-        """Keep dedicated certification panes out of ordinary production routing."""
-        prefixes = ("hirda-certification", "hirda-live-certification")
+        """Keep dedicated certification and rollover panes out of ordinary routing."""
+        prefixes = (
+            "hirda-certification",
+            "hirda-live-certification",
+            "hirda-auto-rollover",
+        )
         name = str(pane.get("name") or "").strip().casefold()
         label = str(pane.get("label") or "").strip().casefold()
         return name.startswith(prefixes) or label.startswith(prefixes)
