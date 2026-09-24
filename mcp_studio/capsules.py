@@ -218,6 +218,7 @@ class CapsuleService:
                     "target_pane": data.get("target_pane"),
                     "a2a_task_id": data.get("a2a_task_id"),
                     "context_fit": dict(data.get("context_fit") or {}),
+                    "correlation": dict(data.get("correlation") or {}),
                     "created_at": event.get("created_at"),
                     "metadata": dict(data.get("metadata") or {}),
                 }
@@ -228,6 +229,9 @@ class CapsuleService:
                     pending["state"] = "dispatched"
                     pending["target_pane"] = data.get("target_pane") or pending.get("target_pane")
                     pending["a2a"] = dict(data.get("a2a") or {})
+                    pending["correlation"] = dict(
+                        data.get("correlation") or pending.get("correlation") or {}
+                    )
                     pending["dispatched_at"] = event.get("created_at")
             elif kind == "capsule.handoff_dispatch_uncertain":
                 pending = current.get("pending_handoff")
@@ -286,6 +290,7 @@ class CapsuleService:
                     "target_pane": data.get("target_pane"),
                     "a2a": dict(data.get("a2a") or {}),
                     "context_fit": dict(data.get("context_fit") or {}),
+                    "correlation": dict(data.get("correlation") or {}),
                     "created_at": event.get("created_at"),
                     "metadata": dict(data.get("metadata") or {}),
                     "receipt": dict(data.get("receipt") or {}),
@@ -302,6 +307,18 @@ class CapsuleService:
                 if handoff["to_agent"] in AGENTS:
                     current["current_agent"] = handoff["to_agent"]
                 current["current_stage"] = handoff["to_stage"]
+            elif kind == "capsule.handoff_completed":
+                for handoff in reversed(current["handoffs"]):
+                    if handoff.get("handoff_id") != data.get("handoff_id"):
+                        continue
+                    handoff["completion"] = {
+                        "state": "completed",
+                        "sentinel_verified": bool(data.get("sentinel_verified")),
+                        "correlation": dict(data.get("correlation") or {}),
+                        "receipt": dict(data.get("receipt") or {}),
+                    }
+                    handoff["completed_at"] = event.get("created_at")
+                    break
             elif kind == "capsule.handoff_failed":
                 failed = {
                     "handoff_id": data.get("handoff_id"),
@@ -714,8 +731,32 @@ class CapsuleService:
 
             handoff_id = f"H-{uuid4().hex[:8].upper()}"
             a2a_task_id = f"A2A-{uuid4().hex[:8].upper()}"
+            turn_id = str(metadata.get("turn_id") or f"T-{uuid4().hex[:12].upper()}")
+            source_session = str(
+                metadata.get("source_session")
+                or current.get("source_pane")
+                or f"{capsule_id}:{from_agent}"
+            )
+            correlation = {
+                "schema": "hirda-handoff-correlation-v1",
+                "handoff_id": handoff_id,
+                "capsule_id": capsule_id,
+                "turn_id": turn_id,
+                "source_session": source_session,
+                "target_session": None,
+                "generation": f"G-{uuid4().hex[:12].upper()}",
+                "from_agent": from_agent,
+                "to_agent": to_agent,
+            }
             delivery_token = secrets.token_urlsafe(32)
             delivery_token_sha256 = hashlib.sha256(delivery_token.encode("utf-8")).hexdigest()
+            completion_nonce = secrets.token_urlsafe(18)
+            completion_sentinel = (
+                f"HIRDA_END:{handoff_id}:{turn_id}:{completion_nonce}"
+            )
+            completion_sentinel_sha256 = hashlib.sha256(
+                completion_sentinel.encode("utf-8")
+            ).hexdigest()
 
             profile_data = current.get("context_profile") or (current.get("metadata") or {}).get("context_profile")
             capability_data = metadata.get("model_capability")
@@ -777,6 +818,7 @@ class CapsuleService:
                         "context_fit": fit,
                         "a2a_task_id": a2a_task_id,
                         "a2a": a2a_blocked,
+                        "correlation": correlation,
                         "metadata": metadata,
                     },
                 )
@@ -797,6 +839,8 @@ class CapsuleService:
                     "context_fit": fit,
                     "a2a_task_id": a2a_task_id,
                     "delivery_token_sha256": delivery_token_sha256,
+                    "completion_sentinel_sha256": completion_sentinel_sha256,
+                    "correlation": correlation,
                     "metadata": metadata,
                 },
             )
@@ -850,6 +894,11 @@ class CapsuleService:
             await fail_delivery("herdr_prompt_agent_missing")
             raise CapsuleDeliveryError("herdr_prompt_agent_missing")
 
+        dispatch_correlation = {
+            **correlation,
+            "target_session": str(pane.get("pane_id") or ""),
+        }
+
         ack_url = (
             f"{self.local_api_base}/api/capsules/{capsule_id}"
             f"/handoff/{handoff_id}/ack"
@@ -862,6 +911,7 @@ class CapsuleService:
                     "transport": "herdr",
                     "pane_id": pane.get("pane_id"),
                     "a2a_task_id": a2a_task_id,
+                    "correlation": dispatch_correlation,
                 },
             },
             ensure_ascii=False,
@@ -878,6 +928,7 @@ class CapsuleService:
                 "to_stage": to_stage,
                 "reason": reason,
                 "a2a_task_id": a2a_task_id,
+                "handoff_correlation": dispatch_correlation,
                 "context_profile": current.get("context_profile"),
                 "contract": metadata.get("contract") or current.get("contract"),
                 "handoff_policy": {
@@ -893,6 +944,25 @@ class CapsuleService:
         validation_url = (
             f"{self.local_api_base}/api/capsules/{capsule_id}"
             f"/handoff/{handoff_id}/validate"
+        )
+        completion_url = (
+            f"{self.local_api_base}/api/capsules/{capsule_id}"
+            f"/handoff/{handoff_id}/complete"
+        )
+        completion_body = json.dumps(
+            {
+                "agent": to_agent,
+                "delivery_token": delivery_token,
+                "sentinel": completion_sentinel,
+                "receipt": {
+                    "transport": "herdr",
+                    "pane_id": pane.get("pane_id"),
+                    "a2a_task_id": a2a_task_id,
+                    "correlation": dispatch_correlation,
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
         validation_note = ""
         if metadata.get("requires_validation"):
@@ -915,6 +985,10 @@ class CapsuleService:
             "If ACK fails, do not claim ownership. "
             "A validation-gated handoff is NOT committed by ACK alone.\n"
             f"{validation_note}\n"
+            "Do not use silence or an idle timeout as proof that this turn is complete. "
+            "When all work for this handoff turn is fully complete, report the explicit "
+            "per-turn completion sentinel by running EXACTLY this local command:\n\n"
+            f"curl -fsS -X POST '{completion_url}' -H 'Content-Type: application/json' --data '{completion_body}'\n\n"
             "Capsule payload:\n"
             f"{capsule_payload}\n"
         )
@@ -967,6 +1041,7 @@ class CapsuleService:
                 "from_agent": from_agent,
                 "to_agent": to_agent,
                 "target_pane": pane.get("pane_id"),
+                "correlation": dispatch_correlation,
                 "a2a": a2a,
             },
         )
@@ -993,6 +1068,50 @@ class CapsuleService:
         if not expected_hash or not secrets.compare_digest(expected_hash, actual_hash):
             raise ValueError("invalid handoff delivery token")
 
+    @staticmethod
+    def _verify_handoff_correlation(
+        expected: dict[str, Any],
+        receipt: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not expected:
+            return {}
+        actual = receipt.get("correlation")
+        if not isinstance(actual, dict):
+            raise ValueError("handoff ACK correlation missing")
+        fields = (
+            "schema",
+            "handoff_id",
+            "capsule_id",
+            "turn_id",
+            "source_session",
+            "target_session",
+            "generation",
+            "from_agent",
+            "to_agent",
+        )
+        mismatched = [
+            field
+            for field in fields
+            if actual.get(field) != expected.get(field)
+        ]
+        if mismatched:
+            raise ValueError(
+                "handoff ACK correlation mismatch: " + ",".join(mismatched)
+            )
+        return {field: actual.get(field) for field in fields}
+
+    @staticmethod
+    def _verify_completion_sentinel(
+        requested: dict[str, Any],
+        sentinel: str,
+    ) -> None:
+        if not sentinel:
+            raise ValueError("completion sentinel is required")
+        expected_hash = str(requested.get("completion_sentinel_sha256") or "")
+        actual_hash = hashlib.sha256(sentinel.encode("utf-8")).hexdigest()
+        if not expected_hash or not secrets.compare_digest(expected_hash, actual_hash):
+            raise ValueError("invalid handoff completion sentinel")
+
     async def _commit_handoff(
         self,
         capsule_id: str,
@@ -1016,6 +1135,11 @@ class CapsuleService:
             "context_fit": dict(requested.get("context_fit") or {}),
             "metadata": dict(requested.get("metadata") or {}),
             "target_pane": receipt.get("pane_id"),
+            "correlation": dict(
+                receipt.get("correlation")
+                or requested.get("correlation")
+                or {}
+            ),
             "receipt": receipt,
             "validation": dict(validation or {}),
             "approved_by": approved_by,
@@ -1060,6 +1184,24 @@ class CapsuleService:
                 raise ValueError("handoff ACK agent mismatch")
             self._verify_delivery_token(requested, delivery_token)
 
+            receipt = dict(receipt or {})
+            dispatched = self._handoff_event(
+                current,
+                handoff_id,
+                "capsule.handoff_dispatched",
+            )
+            expected_correlation = dict(
+                (dispatched or {}).get("correlation")
+                or requested.get("correlation")
+                or {}
+            )
+            verified_correlation = self._verify_handoff_correlation(
+                expected_correlation,
+                receipt,
+            )
+            if verified_correlation:
+                receipt["correlation"] = verified_correlation
+
             if self._handoff_event(current, handoff_id, "capsule.handoff_committed") is not None:
                 return current
             if self._handoff_event(current, handoff_id, "capsule.handoff_failed") is not None:
@@ -1067,7 +1209,6 @@ class CapsuleService:
             if current.get("current_agent") != requested.get("from_agent"):
                 raise ValueError("handoff source no longer owns capsule")
 
-            receipt = dict(receipt or {})
             common = {
                 "capsule_id": capsule_id,
                 "handoff_id": handoff_id,
@@ -1080,6 +1221,7 @@ class CapsuleService:
                 "context_fit": dict(requested.get("context_fit") or {}),
                 "metadata": dict(requested.get("metadata") or {}),
                 "target_pane": receipt.get("pane_id"),
+                "correlation": verified_correlation,
                 "receipt": receipt,
             }
             if self._handoff_event(current, handoff_id, "capsule.handoff_acknowledged") is None:
@@ -1195,6 +1337,79 @@ class CapsuleService:
                 requested=requested,
                 receipt=dict(pending.get("receipt") or {}),
                 validation=validation,
+            )
+            return await self.get(capsule_id)
+
+    async def complete_handoff(
+        self,
+        capsule_id: str,
+        handoff_id: str,
+        *,
+        agent: str,
+        delivery_token: str,
+        sentinel: str,
+        receipt: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if agent not in AGENTS:
+            raise ValueError("unsupported handoff agent")
+
+        async with self._handoff_lock:
+            current = await self.get(capsule_id)
+            requested = self._handoff_event(
+                current,
+                handoff_id,
+                "capsule.handoff_requested",
+            )
+            if requested is None:
+                raise ValueError("handoff request not found")
+            if agent != requested.get("to_agent"):
+                raise ValueError("handoff completion agent mismatch")
+
+            self._verify_delivery_token(requested, delivery_token)
+            self._verify_completion_sentinel(requested, sentinel)
+
+            committed = self._handoff_event(
+                current,
+                handoff_id,
+                "capsule.handoff_committed",
+            )
+            if committed is None:
+                raise ValueError("handoff must be committed before completion")
+            if current.get("current_agent") != agent:
+                raise ValueError("handoff completion agent does not own capsule")
+
+            receipt = dict(receipt or {})
+            expected_correlation = dict(
+                committed.get("correlation")
+                or requested.get("correlation")
+                or {}
+            )
+            verified_correlation = self._verify_handoff_correlation(
+                expected_correlation,
+                receipt,
+            )
+            if verified_correlation:
+                receipt["correlation"] = verified_correlation
+
+            if self._handoff_event(
+                current,
+                handoff_id,
+                "capsule.handoff_completed",
+            ) is not None:
+                return current
+
+            await self.db.add_event(
+                "capsule.handoff_completed",
+                f"{capsule_id} handoff turn completed by {agent}",
+                data={
+                    "capsule_id": capsule_id,
+                    "handoff_id": handoff_id,
+                    "from_agent": requested.get("from_agent"),
+                    "to_agent": requested.get("to_agent"),
+                    "correlation": verified_correlation,
+                    "receipt": receipt,
+                    "sentinel_verified": True,
+                },
             )
             return await self.get(capsule_id)
 

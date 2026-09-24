@@ -30,7 +30,7 @@ from .models import (
     SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate,
     GraftConfigureRequest, GraftQueryRequest, GraftRollbackRequest, ComputerRepairRequest, ManagedGatewayAttach, GatewayContextUsageReport, SessionHandoffPrepareRequest,
     CapsuleCreate, CapsuleStageUpdate, CapsuleHandoff, CapsuleHandoffAck, CapsuleContractUpdate,
-    CapsuleHandoffValidation, CapsuleHandoffApproval, LaneStateUpdate, CapsuleComplete,
+    CapsuleHandoffValidation, CapsuleHandoffApproval, CapsuleHandoffCompletion, LaneStateUpdate, CapsuleComplete,
 )
 from .settings import Settings, load_settings
 from .workers import WorkerManager
@@ -563,7 +563,7 @@ async def world_authoring_preview_api(request: Request, payload: dict[str, Any])
             workspace=str(payload.get("workspace") or ""),
             proposal=proposal,
             providers=[dict(item) for item in providers],
-            actor="nova/http",
+            actor="hirda/http",
         )
     except WorldAuthoringError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -586,7 +586,7 @@ async def world_authoring_promote_api(request: Request, payload: dict[str, Any])
             commands=[dict(item) for item in commands],
             validation_id=str(payload.get("validationId") or ""),
             rationale=str(payload.get("rationale") or ""),
-            actor="nova/http",
+            actor="hirda/http",
         )
     except WorldAuthoringError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -682,6 +682,23 @@ async def capsule_handoff_ack(capsule_id: str, handoff_id: str, body: CapsuleHan
             handoff_id,
             agent=body.agent,
             delivery_token=body.delivery_token,
+            receipt=body.receipt,
+        )
+    except CapsuleNotFound:
+        raise HTTPException(status_code=404, detail="capsule not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/capsules/{capsule_id}/handoff/{handoff_id}/complete")
+async def capsule_handoff_complete(capsule_id: str, handoff_id: str, body: CapsuleHandoffCompletion):
+    try:
+        return await capsules.complete_handoff(
+            capsule_id,
+            handoff_id,
+            agent=body.agent,
+            delivery_token=body.delivery_token,
+            sentinel=body.sentinel,
             receipt=body.receipt,
         )
     except CapsuleNotFound:

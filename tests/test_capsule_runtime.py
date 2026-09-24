@@ -137,7 +137,11 @@ async def test_capsule_handoff_uses_capsule_id_as_visual_connector():
         handed["pending_handoff"]["handoff_id"],
         agent="hermes",
         delivery_token=token_match.group(1),
-        receipt={"transport": "herdr", "pane_id": "w1:p7"},
+        receipt={
+            "transport": "herdr",
+            "pane_id": "w1:p7",
+            "correlation": dict(handed["pending_handoff"]["correlation"]),
+        },
     )
 
     assert committed["current_agent"] == "hermes"

@@ -194,6 +194,23 @@ def delivery_token_from_call(herdr: FakeHerdr) -> str:
     return match.group(1)
 
 
+def correlated_receipt(state: dict) -> dict:
+    pending = state["pending_handoff"]
+    return {
+        "transport": "herdr",
+        "pane_id": "pane-hermes",
+        "correlation": dict(pending["correlation"]),
+    }
+
+
+def completion_sentinel_from_call(herdr: FakeHerdr) -> str:
+    assert herdr.client_instance.calls
+    prompt = herdr.client_instance.calls[-1]["args"]["message"]
+    match = re.search(r'"sentinel":"([^"]+)"', prompt)
+    assert match, prompt
+    return match.group(1)
+
+
 @pytest.mark.asyncio
 async def test_handoff_dispatch_does_not_transfer_ownership_before_ack():
     service, _, herdr, capsule_id = await prepared_service()
@@ -247,7 +264,7 @@ async def test_valid_target_ack_commits_transfer_and_is_idempotent():
         handoff_id,
         agent="hermes",
         delivery_token=token,
-        receipt={"transport": "herdr", "pane_id": "pane-hermes"},
+        receipt=correlated_receipt(pending),
     )
 
     assert committed["current_agent"] == "hermes"
@@ -262,7 +279,7 @@ async def test_valid_target_ack_commits_transfer_and_is_idempotent():
         handoff_id,
         agent="hermes",
         delivery_token=token,
-        receipt={"transport": "herdr", "pane_id": "pane-hermes"},
+        receipt=correlated_receipt(pending),
     )
     assert again["current_agent"] == "hermes"
     assert len(again["handoffs"]) == 1
@@ -392,7 +409,7 @@ async def test_safe_emergency_lane_handoff_requires_validation_before_commit():
         handoff_id,
         agent="hermes",
         delivery_token=token,
-        receipt={"transport": "herdr", "pane_id": "pane-hermes"},
+        receipt=correlated_receipt(pending),
     )
     assert acknowledged["current_agent"] == "claude"
     assert acknowledged["pending_handoff"]["state"] == "acknowledged"
@@ -436,7 +453,7 @@ async def test_guarded_emergency_handoff_waits_for_explicit_approval():
         handoff_id,
         agent="hermes",
         delivery_token=token,
-        receipt={"transport": "herdr", "pane_id": "pane-hermes"},
+        receipt=correlated_receipt(pending),
     )
     validated = await service.validate_handoff(
         capsule_id,
@@ -498,3 +515,266 @@ async def test_guarded_contract_without_handoff_checks_is_rejected():
     contract["handoff_checks"] = []
     with pytest.raises(ValueError, match="requires at least one handoff_check"):
         await service.update_contract(capsule_id, contract)
+
+@pytest.mark.asyncio
+async def test_handoff_ack_requires_correlation_echo():
+    service, _, herdr, capsule_id = await prepared_service()
+    pending = await service.handoff(
+        capsule_id,
+        from_agent="claude",
+        to_agent="hermes",
+        metadata=handoff_metadata(),
+    )
+    handoff_id = pending["pending_handoff"]["handoff_id"]
+    token = delivery_token_from_call(herdr)
+
+    with pytest.raises(ValueError, match="correlation missing"):
+        await service.acknowledge_handoff(
+            capsule_id,
+            handoff_id,
+            agent="hermes",
+            delivery_token=token,
+            receipt={"transport": "herdr", "pane_id": "pane-hermes"},
+        )
+
+    state = await service.get(capsule_id)
+    assert state["current_agent"] == "claude"
+    assert state["pending_handoff"]["handoff_id"] == handoff_id
+
+
+@pytest.mark.asyncio
+async def test_handoff_ack_rejects_wrong_turn_and_generation():
+    service, _, herdr, capsule_id = await prepared_service()
+    pending = await service.handoff(
+        capsule_id,
+        from_agent="claude",
+        to_agent="hermes",
+        metadata=handoff_metadata(),
+    )
+    handoff_id = pending["pending_handoff"]["handoff_id"]
+    token = delivery_token_from_call(herdr)
+
+    wrong_turn = correlated_receipt(pending)
+    wrong_turn["correlation"]["turn_id"] = "T-WRONG"
+    with pytest.raises(ValueError, match="turn_id"):
+        await service.acknowledge_handoff(
+            capsule_id,
+            handoff_id,
+            agent="hermes",
+            delivery_token=token,
+            receipt=wrong_turn,
+        )
+
+    wrong_generation = correlated_receipt(pending)
+    wrong_generation["correlation"]["generation"] = "G-STALE"
+    with pytest.raises(ValueError, match="generation"):
+        await service.acknowledge_handoff(
+            capsule_id,
+            handoff_id,
+            agent="hermes",
+            delivery_token=token,
+            receipt=wrong_generation,
+        )
+
+    state = await service.get(capsule_id)
+    assert state["current_agent"] == "claude"
+    assert state["pending_handoff"]["state"] == "dispatched"
+
+
+@pytest.mark.asyncio
+async def test_handoff_correlation_is_bound_to_target_session():
+    service, _, herdr, capsule_id = await prepared_service()
+    pending = await service.handoff(
+        capsule_id,
+        from_agent="claude",
+        to_agent="hermes",
+        metadata=handoff_metadata(),
+    )
+    handoff_id = pending["pending_handoff"]["handoff_id"]
+    token = delivery_token_from_call(herdr)
+
+    assert pending["pending_handoff"]["correlation"]["target_session"] == "pane-hermes"
+    assert pending["pending_handoff"]["correlation"]["generation"].startswith("G-")
+
+    committed = await service.acknowledge_handoff(
+        capsule_id,
+        handoff_id,
+        agent="hermes",
+        delivery_token=token,
+        receipt=correlated_receipt(pending),
+    )
+    correlation = committed["last_handoff"]["correlation"]
+    assert correlation["handoff_id"] == handoff_id
+    assert correlation["target_session"] == "pane-hermes"
+    assert correlation["to_agent"] == "hermes"
+
+@pytest.mark.asyncio
+async def test_completion_requires_exact_per_turn_sentinel():
+    service, _, herdr, capsule_id = await prepared_service()
+    pending = await service.handoff(
+        capsule_id,
+        from_agent="claude",
+        to_agent="hermes",
+        metadata=handoff_metadata(),
+    )
+    handoff_id = pending["pending_handoff"]["handoff_id"]
+    token = delivery_token_from_call(herdr)
+    sentinel = completion_sentinel_from_call(herdr)
+
+    committed = await service.acknowledge_handoff(
+        capsule_id,
+        handoff_id,
+        agent="hermes",
+        delivery_token=token,
+        receipt=correlated_receipt(pending),
+    )
+    completion_receipt = {
+        "transport": "herdr",
+        "pane_id": "pane-hermes",
+        "correlation": dict(committed["last_handoff"]["correlation"]),
+    }
+
+    with pytest.raises(ValueError, match="invalid handoff completion sentinel"):
+        await service.complete_handoff(
+            capsule_id,
+            handoff_id,
+            agent="hermes",
+            delivery_token=token,
+            sentinel=sentinel + "-WRONG",
+            receipt=completion_receipt,
+        )
+
+    state = await service.get(capsule_id)
+    assert "completion" not in state["last_handoff"]
+
+
+@pytest.mark.asyncio
+async def test_valid_completion_sentinel_marks_exact_handoff_complete_idempotently():
+    service, _, herdr, capsule_id = await prepared_service()
+    pending = await service.handoff(
+        capsule_id,
+        from_agent="claude",
+        to_agent="hermes",
+        metadata=handoff_metadata(),
+    )
+    handoff_id = pending["pending_handoff"]["handoff_id"]
+    token = delivery_token_from_call(herdr)
+    sentinel = completion_sentinel_from_call(herdr)
+
+    committed = await service.acknowledge_handoff(
+        capsule_id,
+        handoff_id,
+        agent="hermes",
+        delivery_token=token,
+        receipt=correlated_receipt(pending),
+    )
+    completion_receipt = {
+        "transport": "herdr",
+        "pane_id": "pane-hermes",
+        "correlation": dict(committed["last_handoff"]["correlation"]),
+    }
+
+    completed = await service.complete_handoff(
+        capsule_id,
+        handoff_id,
+        agent="hermes",
+        delivery_token=token,
+        sentinel=sentinel,
+        receipt=completion_receipt,
+    )
+    assert completed["last_handoff"]["completion"]["state"] == "completed"
+    assert completed["last_handoff"]["completion"]["sentinel_verified"] is True
+    assert completed["last_handoff"]["completed_at"]
+
+    again = await service.complete_handoff(
+        capsule_id,
+        handoff_id,
+        agent="hermes",
+        delivery_token=token,
+        sentinel=sentinel,
+        receipt=completion_receipt,
+    )
+    completion_events = [
+        event
+        for event in again["events"]
+        if event["kind"] == "capsule.handoff_completed"
+    ]
+    assert len(completion_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_completion_rejects_wrong_turn_correlation():
+    service, _, herdr, capsule_id = await prepared_service()
+    pending = await service.handoff(
+        capsule_id,
+        from_agent="claude",
+        to_agent="hermes",
+        metadata=handoff_metadata(),
+    )
+    handoff_id = pending["pending_handoff"]["handoff_id"]
+    token = delivery_token_from_call(herdr)
+    sentinel = completion_sentinel_from_call(herdr)
+
+    committed = await service.acknowledge_handoff(
+        capsule_id,
+        handoff_id,
+        agent="hermes",
+        delivery_token=token,
+        receipt=correlated_receipt(pending),
+    )
+    receipt = {
+        "transport": "herdr",
+        "pane_id": "pane-hermes",
+        "correlation": dict(committed["last_handoff"]["correlation"]),
+    }
+    receipt["correlation"]["turn_id"] = "T-NEIGHBOUR"
+
+    with pytest.raises(ValueError, match="turn_id"):
+        await service.complete_handoff(
+            capsule_id,
+            handoff_id,
+            agent="hermes",
+            delivery_token=token,
+            sentinel=sentinel,
+            receipt=receipt,
+        )
+
+
+@pytest.mark.asyncio
+async def test_completion_cannot_precede_validation_gated_commit():
+    service, _, herdr, capsule_id = await prepared_service()
+    metadata = handoff_metadata()
+    metadata.update(
+        {
+            "requires_validation": True,
+            "contract": capsule_contract("safe"),
+        }
+    )
+    pending = await service.handoff(
+        capsule_id,
+        from_agent="claude",
+        to_agent="hermes",
+        metadata=metadata,
+    )
+    handoff_id = pending["pending_handoff"]["handoff_id"]
+    token = delivery_token_from_call(herdr)
+    sentinel = completion_sentinel_from_call(herdr)
+
+    acknowledged = await service.acknowledge_handoff(
+        capsule_id,
+        handoff_id,
+        agent="hermes",
+        delivery_token=token,
+        receipt=correlated_receipt(pending),
+    )
+    assert acknowledged["current_agent"] == "claude"
+
+    with pytest.raises(ValueError, match="must be committed before completion"):
+        await service.complete_handoff(
+            capsule_id,
+            handoff_id,
+            agent="hermes",
+            delivery_token=token,
+            sentinel=sentinel,
+            receipt=correlated_receipt(acknowledged),
+        )

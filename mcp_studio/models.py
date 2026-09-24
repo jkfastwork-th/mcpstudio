@@ -262,6 +262,13 @@ class CapsuleHandoffAck(BaseModel):
     receipt: dict[str, Any] = Field(default_factory=dict)
 
 
+class CapsuleHandoffCompletion(BaseModel):
+    agent: AgentId
+    delivery_token: str = Field(min_length=16, max_length=512)
+    sentinel: str = Field(min_length=16, max_length=2048)
+    receipt: dict[str, Any] = Field(default_factory=dict)
+
+
 class CapsuleContractUpdate(BaseModel):
     contract: dict[str, Any]
 
