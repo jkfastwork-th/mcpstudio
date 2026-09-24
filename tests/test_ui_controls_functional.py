@@ -202,6 +202,6 @@ def test_theme_switching_uses_authoritative_tokens_and_synced_controls():
 
 
 def test_only_runtime_safety_guards_disable_dynamic_session_actions():
-    disabled_fragments = re.findall(r'<button[^>]*disabled[^>]*>', JS)
+    disabled_fragments = re.findall(r'<button[^>]*(?<!aria-)disabled[^>]*>', JS)
     assert disabled_fragments
     assert all("data-managed-restart" in item or "data-managed-stop" in item for item in disabled_fragments)

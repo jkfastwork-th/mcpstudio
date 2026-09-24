@@ -90,7 +90,10 @@ def test_computer_ui_surfaces_permissions_and_isolated_transport() -> None:
     js = (ROOT / "static" / "app.js").read_text()
     css = (ROOT / "static" / "styles.css").read_text()
     assert "computer-session-permissions" in js
-    assert "permissionBadge('write','W')" in js
+    assert "effectiveMachinePermissions(s,machine)" in js
+    assert "machinePermissionBadges(permissions,'computer-session-permissions')" in js
+    assert "getJson('/api/machines')" in js
+    assert "data-gui-available" in js
     assert "status.runtime_mode==='session-isolated'?status.transport_ready" in js
     assert ".computer-permission-badge.allowed" in css
     assert ".computer-permission-badge.blocked" in css
