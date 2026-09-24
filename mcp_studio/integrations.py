@@ -15,6 +15,7 @@ from .desktop_commander import (
     DesktopCommanderBackend,
 )
 from .graft import ALLOWED_GRAFT_TOOLS, GraftManager
+from .pixel_art_studio import PixelArtStudioProvider
 from .plugin_folder import (
     DEFAULT_PLUGIN_DIRECTORY,
     DEFAULT_PLUGIN_MANIFEST_NAME,
@@ -1111,14 +1112,106 @@ class GraftIntegrationAdapter:
         }
 
 
+class PixelArtStudioIntegrationAdapter:
+    """Expose deterministic pixel-art candidate generation through HIRDA lifecycle."""
+
+    def __init__(self, provider: PixelArtStudioProvider) -> None:
+        self.provider = provider
+        self.manifest = IntegrationManifest.from_mapping(
+            {
+                "id": "pixel_art_studio",
+                "name": "Pixel Art Studio",
+                "capabilities": [
+                    "pixel_art_sprite",
+                    "pixel_art_prop",
+                    "pixel_art_icon",
+                    "deterministic_asset_compiler",
+                ],
+                "runtime": {
+                    "type": "local-python-library",
+                    "authority": "candidate-only",
+                },
+                "tools": ["pixel_art_generate"],
+                "permissions": {"pixel_art_generate": "execute"},
+                "health": {"type": "adapter_probe"},
+                "routing": {
+                    "mode": "visual-provider",
+                    "preferred_lanes": ["claude", "codex", "hermes"],
+                },
+                "metadata": {
+                    "provider": "Gamezxz/pixel-art-studio",
+                    "nova_arbitrary_code": False,
+                    "earth_world_authority": False,
+                    "candidate_only": True,
+                    "deterministic": True,
+                },
+            }
+        )
+
+    async def validate(self) -> dict[str, Any]:
+        state = self.provider.status()
+        reason = None
+        if not state["enabled"]:
+            reason = "pixel_art_studio_disabled"
+        elif not state["required_files_ok"]:
+            reason = "pixel_art_studio_files_missing"
+        elif not state["pin_ok"]:
+            reason = "pixel_art_studio_commit_mismatch"
+        return {
+            "ok": bool(state["ready"]),
+            "reason": reason,
+            **state,
+        }
+
+    async def certify(self) -> dict[str, Any]:
+        metadata = self.manifest.metadata
+        runtime = self.manifest.runtime
+        permissions = self.manifest.permissions
+        authority_ok = bool(
+            runtime.get("authority") == "candidate-only"
+            and metadata.get("candidate_only") is True
+            and metadata.get("earth_world_authority") is False
+            and metadata.get("nova_arbitrary_code") is False
+        )
+        permission_ok = permissions == {"pixel_art_generate": "execute"}
+        ok = bool(authority_ok and permission_ok)
+        return {
+            "ok": ok,
+            "reason": None if ok else "pixel_art_studio_authority_contract_mismatch",
+            "authority_contract_ok": authority_ok,
+            "permission_contract_ok": permission_ok,
+            "candidate_only": True,
+            "earth_world_authority": False,
+            "arbitrary_code_from_nova": False,
+        }
+
+    async def status(self) -> dict[str, Any]:
+        state = self.provider.status()
+        return {
+            "ok": bool(state["ready"]),
+            **state,
+            "authority": {
+                "candidate_only": True,
+                "earth_world_authority": False,
+                "arbitrary_code_from_nova": False,
+            },
+        }
+
+
 def build_integration_manager(
     graft: GraftManager,
     studio: Any | None = None,
     *,
     base_dir: Path | None = None,
+    pixel_art_studio: PixelArtStudioProvider | None = None,
 ) -> IntegrationManager:
     manager = IntegrationManager()
     manager.register(GraftIntegrationAdapter(graft), source="builtin:graft")
+    if pixel_art_studio is not None:
+        manager.register(
+            PixelArtStudioIntegrationAdapter(pixel_art_studio),
+            source="builtin:pixel-art-studio",
+        )
     if studio is not None:
         manager.register(JevIntegrationAdapter(studio), source="builtin:jev")
         if bool(getattr(studio, "desktop_commander_backend_enabled", False)):

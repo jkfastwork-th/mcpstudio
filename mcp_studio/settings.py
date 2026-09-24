@@ -200,6 +200,13 @@ class StudioConfig:
         }
     )
 
+    # P8 deterministic pixel-art provider. HIRDA imports only a pinned local
+    # Gamezxz/pixel-art-studio checkout and exposes bounded candidate generation.
+    pixel_art_studio_enabled: bool = False
+    pixel_art_studio_root: str = ".hirda-cache/pixel-art-studio"
+    pixel_art_studio_output_root: str = "./data/visual-candidates/pixel-art-studio"
+    pixel_art_studio_expected_commit: str = "f8c246635c4621a6c2b427833149afdc3dc3c719"
+
     # HCR cognitive fabric. Routing can be exposed in shadow/plan mode without
     # permitting HIRDA to dispatch prompts. Execution is a separate opt-in gate
     # so consumers can canary route decisions before any runtime authority changes.

@@ -50,6 +50,11 @@ from .reflex_metrics import ReflexMetrics
 from .action_adapter import evaluate_action_envelope
 from .action_registry import ActionProviderRegistryError, build_action_provider_registry
 from .cognitive_router import CognitiveRouter, CognitiveRouterError
+from .pixel_art_studio import (
+    PixelArtStudioError,
+    PixelArtStudioProvider,
+    VisualAssetOrchestrator,
+)
 from .world_authoring import WorldAuthoringError, WorldAuthoringManager
 
 
@@ -72,14 +77,24 @@ connectivity = ConnectivityManager(settings, db)
 oauth = OAuthManager(settings, db)
 managed_sessions = ManagedSessionManager(settings, db)
 graft = GraftManager(settings, db)
+earth_world_validator_url = os.environ.get("HIRDA_EARTH_WORLD_VALIDATOR_URL")
+pixel_art_studio = PixelArtStudioProvider.from_settings(
+    settings.studio,
+    base_dir=settings.config_path.parent,
+)
 integration_manager = build_integration_manager(
     graft,
     settings.studio,
     base_dir=settings.config_path.parent,
+    pixel_art_studio=pixel_art_studio,
+)
+visual_assets = VisualAssetOrchestrator(
+    pixel_art_studio,
+    earth_validator_url=earth_world_validator_url,
 )
 world_authoring = WorldAuthoringManager(
     managed_sessions,
-    validator_url=os.environ.get("HIRDA_EARTH_WORLD_VALIDATOR_URL"),
+    validator_url=earth_world_validator_url,
 )
 computer = ComputerUseManager(settings.studio, db)
 machine_registry = MachineRegistry(settings.studio, base_dir=settings.config_path.parent)
@@ -602,6 +617,48 @@ async def world_authoring_promote_api(request: Request, payload: dict[str, Any])
         )
     except WorldAuthoringError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/visual-assets/generate")
+async def visual_asset_generate_api(request: Request, payload: dict[str, Any]):
+    if not _loopback_request(request):
+        raise HTTPException(status_code=403, detail="Visual asset API is loopback-only")
+    proposal = payload.get("proposal")
+    commands = payload.get("commands")
+    if not isinstance(proposal, dict):
+        raise HTTPException(status_code=400, detail="proposal must be an object")
+    if not isinstance(commands, list) or any(not isinstance(item, dict) for item in commands):
+        raise HTTPException(status_code=400, detail="commands must be an array of objects")
+    try:
+        result = await visual_assets.generate_and_promote(
+            proposal=proposal,
+            commands=[dict(item) for item in commands],
+            validation_id=str(payload.get("validationId") or ""),
+            rationale=str(payload.get("rationale") or ""),
+        )
+    except PixelArtStudioError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    candidate = result.get("candidate", {})
+    promotion = result.get("earthPromotion", {})
+    await db.add_audit(
+        "visual_asset.promote",
+        actor="nova/http",
+        target_type="visual_asset",
+        target_id=str(candidate.get("logicalId") or ""),
+        data={
+            "provider": "pixel_art_studio",
+            "proposal_id": proposal.get("proposalId"),
+            "candidate_id": candidate.get("candidateId"),
+            "logical_id": candidate.get("logicalId"),
+            "sha256": candidate.get("sha256"),
+            "provider_commit": candidate.get("providerCommit"),
+            "promoted_by": result.get("promotedBy"),
+            "hirda_world_authority": result.get("hirdaWorldAuthority"),
+            "earth_validation_id": promotion.get("validationId"),
+            "canonical_url": promotion.get("canonicalUrl"),
+        },
+    )
+    return result
 
 
 @app.post("/api/health/poll")

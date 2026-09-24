@@ -173,6 +173,13 @@ studio:
   #  destructive: false
   #  fail_closed_unknown: true
 
+  # P8 deterministic pixel-art candidate provider.
+  # Install/pin upstream with: uv run python scripts/bootstrap-pixel-art-studio.py
+  #pixel_art_studio_enabled: false
+  #pixel_art_studio_root: ./.hirda-cache/pixel-art-studio
+  #pixel_art_studio_output_root: ./data/visual-candidates/pixel-art-studio
+  #pixel_art_studio_expected_commit: f8c246635c4621a6c2b427833149afdc3dc3c719
+
   # HCR cognitive fabric. Plan/shadow mode and execution are separate gates.
   #cognitive_router_enabled: false
   #cognitive_router_execute_enabled: false
