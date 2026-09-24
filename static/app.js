@@ -680,6 +680,17 @@ function renderCapsuleContextBar(capsule,{compact=false}={}){
   </div>`;
 }
 
+function agentBrandIcon(agent){
+  const key=String(agent||'').toLowerCase();
+  const assets={
+    claude:{src:'/static/brand/claude.svg',alt:'Claude'},
+    codex:{src:'/static/brand/openai.svg',alt:'OpenAI'},
+    hermes:{src:'/static/brand/hermes.jpg',alt:'Hermes / Nous Research'}
+  };
+  const brand=assets[key]||assets.hermes;
+  return `<img class="agent-brand-image brand-${esc(key)}" src="${brand.src}" alt="${esc(brand.alt)} logo" loading="lazy">`;
+}
+
 function laneStatusVisual(state){
   const value=String(state||'').toLowerCase();
   if(value.includes('emergency'))return {key:'emergency',symbol:'!',label:'Emergency'};
@@ -699,7 +710,7 @@ function renderCapsuleLane({agent,sub,colorClass,active=false,activeStage='',cap
   const visual=laneStatusVisual(state);
   return `<div class="capsule-lane ${colorClass} ${active?'lane-active':''} ${muted?'lane-muted':''}">
     <div class="lane-agent">
-      <span class="lane-agent-icon">${agent==='Claude'?'✦':agent==='Codex'?'⌁':'◆'}</span>
+      <span class="lane-agent-icon">${agentBrandIcon(colorClass)}</span>
       <div><strong>${esc(agent)}</strong><small>${esc(sub||'')}</small></div>
     </div>
     <div class="lane-track">${capsuleStageNodes(activeStage)}</div>
@@ -793,7 +804,6 @@ function renderAgentLanes(data){
     const id=String(r.id||'').toLowerCase();
     const laneState=String(laneStateById[id]?.state||'normal').toLowerCase();
     const laneReason=laneStateById[id]?.reason||'';
-    const icon=id==='claude'?'✷':id==='codex'?'◎':'⬡';
     const state=String(r.status||'unknown').toLowerCase();
     const version=r.version||tr('Not reported');
     const model=r.model||r.last_used_model||tr('Not reported');
@@ -807,7 +817,7 @@ function renderAgentLanes(data){
     const limitHealth=r.limit_health||{status:'unknown'};
     return `<article class="agent-runtime-card ${esc(id)}">
       <div class="agent-runtime-top">
-        <span class="agent-runtime-icon">${icon}</span>
+        <span class="agent-runtime-icon">${agentBrandIcon(id)}</span>
         <div class="agent-runtime-title"><h3>${esc(r.name||id)}</h3><small>${esc(provider)}</small></div>
         <span class="runtime-pill ${presence.className}"><i></i>${esc(tr(presence.label))}</span>
       </div>

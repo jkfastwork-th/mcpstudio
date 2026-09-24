@@ -795,8 +795,12 @@ html,body{max-width:100%;overflow-x:hidden}
 .capsule-lane{position:relative;z-index:2;display:grid;grid-template-columns:155px minmax(0,1fr) 92px;gap:14px;align-items:center;min-height:104px;padding:14px 18px;border-radius:15px;border:1px solid;overflow:visible}
 .capsule-lane.claude{background:linear-gradient(90deg,var(--capsule-claude-soft),#fffaf7);border-color:#ffd1ba}.capsule-lane.codex{background:linear-gradient(90deg,var(--capsule-codex-soft),#f8fffb);border-color:#bcebd7}.capsule-lane.hermes{background:linear-gradient(90deg,var(--capsule-hermes-soft),#fbf9ff);border-color:#d9c8ff}
 .lane-agent{display:flex;gap:10px;align-items:center}
-.lane-agent-icon,.agent-runtime-icon{width:40px;height:40px;border-radius:11px;display:grid;place-items:center;color:#fff;font-size:20px;font-weight:700;box-shadow:0 7px 18px rgba(16,24,40,.12)}
-.claude .lane-agent-icon,.agent-runtime-card.claude .agent-runtime-icon{background:var(--capsule-claude)}.codex .lane-agent-icon,.agent-runtime-card.codex .agent-runtime-icon{background:var(--capsule-codex)}.hermes .lane-agent-icon,.agent-runtime-card.hermes .agent-runtime-icon{background:var(--capsule-hermes)}
+.lane-agent-icon,.agent-runtime-icon{width:40px;height:40px;border-radius:11px;display:grid;place-items:center;overflow:hidden;background:#fff;border:1px solid #d0d5dd;box-shadow:0 5px 14px rgba(16,24,40,.10)}
+.agent-brand-image{display:block;width:25px;height:25px;object-fit:contain}
+.codex .lane-agent-icon,.agent-runtime-card.codex .agent-runtime-icon{background:#000;border-color:#000}
+.codex .agent-brand-image{width:27px;height:27px}
+.hermes .lane-agent-icon,.agent-runtime-card.hermes .agent-runtime-icon{background:#fff}
+.hermes .agent-brand-image{width:100%;height:100%;object-fit:cover}
 .lane-agent strong{display:block;font-size:15px}.lane-agent small{color:#667085}
 .lane-track{display:grid;grid-template-columns:repeat(5,1fr);align-items:start;position:relative}.lane-track:before{content:"";position:absolute;left:9%;right:9%;top:13px;height:2px;background:currentColor;opacity:.35}
 .capsule-stage{position:relative;display:grid;justify-items:center;gap:6px;color:#667085;z-index:1}.capsule-stage .stage-node{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;background:#fff;border:2px solid currentColor;font-size:10px;font-weight:700;box-shadow:0 0 0 4px rgba(255,255,255,.72)}
@@ -1435,20 +1439,18 @@ html[data-theme="light"] .focus-dashboard{background:#f4f7fb}
   margin-bottom:3px;
 }
 .lane-status-symbol{
-  width:27px;
-  height:27px;
+  width:29px;
+  height:29px;
   display:grid!important;
   place-items:center;
-  border-radius:999px;
+  border-radius:50%;
   font-size:12px!important;
   line-height:1;
   font-weight:900;
-  color:#fff;
-  border:2px solid rgba(255,255,255,.9);
-  box-shadow:
-    0 0 0 1px rgba(16,24,40,.14),
-    0 4px 10px rgba(16,24,40,.14);
-  text-shadow:0 1px 1px rgba(0,0,0,.16);
+  background:#fff;
+  border:2px solid currentColor;
+  box-shadow:0 0 0 4px rgba(255,255,255,.72);
+  text-shadow:none;
 }
 .lane-status-text{
   display:block!important;
@@ -1458,37 +1460,15 @@ html[data-theme="light"] .focus-dashboard{background:#f4f7fb}
 }
 .lane-status-state.running .lane-status-symbol,
 .lane-status-state.ready .lane-status-symbol,
-.lane-status-state.received .lane-status-symbol{
-  background:#12b76a;
-  box-shadow:0 0 0 1px #079455,0 0 10px rgba(18,183,106,.34);
-}
+.lane-status-state.received .lane-status-symbol{color:#12b76a}
 .lane-status-state.draining .lane-status-symbol,
-.lane-status-state.standby .lane-status-symbol{
-  background:#f79009;
-  box-shadow:0 0 0 1px #dc6803,0 0 10px rgba(247,144,9,.28);
-}
-.lane-status-state.disabled .lane-status-symbol{
-  background:#d92d20;
-  box-shadow:0 0 0 1px #b42318,0 0 10px rgba(217,45,32,.25);
-}
+.lane-status-state.standby .lane-status-symbol{color:#f79009}
+.lane-status-state.disabled .lane-status-symbol,
+.lane-status-state.emergency .lane-status-symbol{color:#d92d20}
 .lane-status-state.awaiting-ack .lane-status-symbol,
-.lane-status-state.handoff .lane-status-symbol{
-  background:#1570ef;
-  box-shadow:0 0 0 1px #175cd3,0 0 10px rgba(21,112,239,.28);
-}
-.lane-status-state.emergency .lane-status-symbol{
-  width:30px;
-  height:30px;
-  border-radius:0;
-  clip-path:polygon(30% 0,70% 0,100% 30%,100% 70%,70% 100%,30% 100%,0 70%,0 30%);
-  background:#d92d20;
-  box-shadow:none;
-  animation:lane-status-pulse 1.15s ease-in-out infinite;
-}
-.lane-status-state.unknown .lane-status-symbol{
-  background:#667085;
-  box-shadow:0 0 0 1px #475467;
-}
+.lane-status-state.handoff .lane-status-symbol{color:#1570ef}
+.lane-status-state.unknown .lane-status-symbol{color:#667085}
+.lane-status-state.emergency .lane-status-symbol{animation:lane-status-pulse 1.15s ease-in-out infinite}
 .lane-status-state.running .lane-status-text,
 .lane-status-state.ready .lane-status-text,
 .lane-status-state.received .lane-status-text{color:#067647}
@@ -1499,9 +1479,10 @@ html[data-theme="light"] .focus-dashboard{background:#f4f7fb}
 .lane-status-state.awaiting-ack .lane-status-text,
 .lane-status-state.handoff .lane-status-text{color:#175cd3}
 @keyframes lane-status-pulse{
-  0%,100%{transform:scale(1);filter:drop-shadow(0 0 0 rgba(217,45,32,0))}
-  50%{transform:scale(1.08);filter:drop-shadow(0 0 6px rgba(217,45,32,.5))}
+  0%,100%{transform:scale(1);box-shadow:0 0 0 4px rgba(255,255,255,.72)}
+  50%{transform:scale(1.08);box-shadow:0 0 0 4px rgba(255,255,255,.72),0 0 0 7px rgba(217,45,32,.12)}
 }
+[data-theme="dark"] .lane-status-symbol{background:#fff;box-shadow:0 0 0 4px rgba(31,41,55,.82)}
 [data-theme="dark"] .lane-status-text{color:#d0d5dd}
 [data-theme="dark"] .lane-status-state.running .lane-status-text,
 [data-theme="dark"] .lane-status-state.ready .lane-status-text,
