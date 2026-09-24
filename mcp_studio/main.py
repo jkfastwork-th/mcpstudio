@@ -642,7 +642,7 @@ async def visual_asset_generate_api(request: Request, payload: dict[str, Any]):
     promotion = result.get("earthPromotion", {})
     await db.add_audit(
         "visual_asset.promote",
-        actor="nova/http",
+        actor="hirda/http",
         target_type="visual_asset",
         target_id=str(candidate.get("logicalId") or ""),
         data={
