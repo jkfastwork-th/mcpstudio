@@ -257,6 +257,50 @@ async def test_world_authoring_validator_fails_closed_on_authority_violation(
         )
 
 
+@pytest.mark.asyncio
+async def test_world_authoring_promote_forwards_only_to_loopback_earth(tmp_path: Path):
+    seen = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["payload"] = json.loads(request.content.decode())
+        return httpx.Response(
+            200,
+            json={
+                "schema": "earth616-world-authoring-promotion-v1",
+                "status": "promoted",
+                "proposalId": "p-promote-1",
+                "kind": "decorate_area",
+                "validationId": "earth-validation-1",
+                "mutationAuthorized": True,
+                "worldAuthority": "earth-616",
+                "authoredBy": "nova",
+            },
+        )
+
+    manager = WorldAuthoringManager(
+        FakeWorkspacePool(tmp_path),
+        validator_url="http://127.0.0.1:8816/api/world-authoring/validate",
+        validator_transport=httpx.MockTransport(handler),
+    )
+    result = await manager.promote(
+        proposal={
+            "proposalId": "p-promote-1",
+            "kind": "decorate_area",
+            "intent": "lantern corner",
+            "targetArea": {"x": 1, "y": 2, "width": 3, "height": 4},
+        },
+        commands=[{"type": "map.decorate"}],
+        validation_id="earth-validation-1",
+        rationale="Nova chose a small non-topology decoration.",
+    )
+
+    assert seen["url"] == "http://127.0.0.1:8816/api/world-authoring/promote"
+    assert seen["payload"]["authoredBy"] == "nova"
+    assert result["mutationAuthorized"] is True
+    assert result["worldAuthority"] == "earth-616"
+
+
 class GatewayPool:
     enabled = True
 
@@ -267,7 +311,27 @@ class FakeWorldAuthoring:
             "preview_only": True,
             "world_authority_changed": False,
             "asset_promoted": False,
+            "earth_validation": {
+                "configured": True,
+                "valid": True,
+                "requiresApproval": False,
+                "validationId": "earth-validation-fake",
+                "mutationAuthorized": False,
+                "worldAuthority": "earth-616",
+            },
             "echo": kwargs,
+        }
+
+    async def promote(self, **kwargs):
+        return {
+            "schema": "earth616-world-authoring-promotion-v1",
+            "status": "promoted",
+            "proposalId": kwargs["proposal"]["proposalId"],
+            "kind": kwargs["proposal"]["kind"],
+            "validationId": kwargs["validation_id"],
+            "mutationAuthorized": True,
+            "worldAuthority": "earth-616",
+            "authoredBy": kwargs["authored_by"],
         }
 
     async def resolve_workspace(self, selector):
@@ -351,6 +415,43 @@ async def test_gateway_world_authoring_handler_is_preview_only():
     assert db.audits[0][0] == "world_authoring.preview"
     assert db.audits[0][1]["data"]["preview_only"] is True
     assert db.audits[0][1]["data"]["world_authority_changed"] is False
+
+
+@pytest.mark.asyncio
+async def test_gateway_world_authoring_promote_keeps_earth_authority():
+    class FakeDb:
+        def __init__(self):
+            self.audits = []
+
+        async def add_audit(self, action, **kwargs):
+            self.audits.append((action, kwargs))
+
+    db = FakeDb()
+    gateway = GatewaySessionManager(
+        SimpleNamespace(),
+        db,
+        managed_sessions=GatewayPool(),
+        world_authoring=FakeWorldAuthoring(),
+    )
+    result = await gateway.world_authoring_promote(
+        workspace="earth-pixi",
+        proposal={
+            "proposalId": "p-promote-2",
+            "kind": "decorate_area",
+            "intent": "lantern corner",
+        },
+        commands=[{"type": "map.decorate"}],
+        validation_id="earth-validation-2",
+        rationale="Nova chose this bounded decoration.",
+        actor="nova/http",
+    )
+
+    assert result["promoted_by"] == "earth-616"
+    assert result["hirda_world_authority"] is False
+    assert result["earth"]["mutationAuthorized"] is True
+    assert db.audits[0][0] == "world_authoring.promote"
+    assert db.audits[0][1]["data"]["authored_by"] == "nova"
+    assert db.audits[0][1]["data"]["hirda_world_authority"] is False
 
 
 def test_world_authoring_tool_is_execute_class():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import ipaddress
 import os
 from typing import Any
 
@@ -46,7 +47,7 @@ from .reflex_metrics import ReflexMetrics
 from .action_adapter import evaluate_action_envelope
 from .action_registry import ActionProviderRegistryError, build_action_provider_registry
 from .cognitive_router import CognitiveRouter, CognitiveRouterError
-from .world_authoring import WorldAuthoringManager
+from .world_authoring import WorldAuthoringError, WorldAuthoringManager
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -532,6 +533,60 @@ async def cognitive_router_execute(payload: dict[str, Any]):
     try:
         return (await cognitive_router.execute(payload)).as_dict()
     except CognitiveRouterError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _loopback_request(request: Request) -> bool:
+    host = request.client.host if request.client is not None else ""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+@app.post("/api/world-authoring/preview")
+async def world_authoring_preview_api(request: Request, payload: dict[str, Any]):
+    if not _loopback_request(request):
+        raise HTTPException(status_code=403, detail="World authoring API is loopback-only")
+    proposal = payload.get("proposal")
+    providers = payload.get("providers") or []
+    if not isinstance(proposal, dict):
+        raise HTTPException(status_code=400, detail="proposal must be an object")
+    if not isinstance(providers, list) or any(not isinstance(item, dict) for item in providers):
+        raise HTTPException(status_code=400, detail="providers must be an array of objects")
+    try:
+        return await gateway_sessions.world_authoring_preview(
+            workspace=str(payload.get("workspace") or ""),
+            proposal=proposal,
+            providers=[dict(item) for item in providers],
+            actor="nova/http",
+        )
+    except WorldAuthoringError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/world-authoring/promote")
+async def world_authoring_promote_api(request: Request, payload: dict[str, Any]):
+    if not _loopback_request(request):
+        raise HTTPException(status_code=403, detail="World authoring API is loopback-only")
+    proposal = payload.get("proposal")
+    commands = payload.get("commands")
+    if not isinstance(proposal, dict):
+        raise HTTPException(status_code=400, detail="proposal must be an object")
+    if not isinstance(commands, list) or any(not isinstance(item, dict) for item in commands):
+        raise HTTPException(status_code=400, detail="commands must be an array of objects")
+    try:
+        return await gateway_sessions.world_authoring_promote(
+            workspace=str(payload.get("workspace") or ""),
+            proposal=proposal,
+            commands=[dict(item) for item in commands],
+            validation_id=str(payload.get("validationId") or ""),
+            rationale=str(payload.get("rationale") or ""),
+            actor="nova/http",
+        )
+    except WorldAuthoringError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 

@@ -1661,6 +1661,145 @@ class GatewaySessionManager:
                 raise
             raise ManagedSessionError(f"session handoff claim failed: {exc}") from exc
 
+    async def world_authoring_audit(
+        self,
+        *,
+        workspace: str,
+        events: list[dict[str, Any]],
+        actor: str,
+    ) -> dict[str, Any]:
+        if not self.world_authoring:
+            raise WorldAuthoringError("HIRDA Earth world authoring integration is unavailable")
+        workspace_selector = str(workspace or "")
+        target = await self.world_authoring.resolve_workspace(workspace_selector)
+        normalized = self.world_authoring.validate_audit_events(events)
+        for event in normalized:
+            await self.db.add_audit(
+                f"world_authoring.{event['kind']}",
+                actor=actor,
+                target_type="managed_workspace",
+                target_id=str(target.get("key") or workspace_selector),
+                data={
+                    **event,
+                    "preview_only": True,
+                    "world_authority_changed": False,
+                },
+            )
+        return {
+            "workspace": {
+                "key": target.get("key"),
+                "name": target.get("name"),
+                "project_path": target.get("project_path"),
+            },
+            "accepted": len(normalized),
+            "audit_only": True,
+            "world_authority_changed": False,
+            "asset_promoted_by_hirda": False,
+        }
+
+    async def world_authoring_preview(
+        self,
+        *,
+        workspace: str,
+        proposal: dict[str, Any],
+        providers: list[dict[str, Any]] | None = None,
+        actor: str,
+    ) -> dict[str, Any]:
+        if not self.world_authoring:
+            raise WorldAuthoringError("HIRDA Earth world authoring integration is unavailable")
+        if not isinstance(proposal, dict):
+            raise WorldAuthoringError("proposal must be an object")
+        raw_providers = providers or []
+        if any(not isinstance(provider, dict) for provider in raw_providers):
+            raise WorldAuthoringError("providers must be an array of objects")
+        result = await self.world_authoring.preview(
+            workspace=str(workspace or ""),
+            proposal=proposal,
+            providers=[dict(provider) for provider in raw_providers],
+        )
+        proposal_fingerprint = hashlib.sha256(
+            json.dumps(
+                proposal,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        validation = (
+            result.get("earth_validation", {})
+            if isinstance(result.get("earth_validation"), dict)
+            else {}
+        )
+        await self.db.add_audit(
+            "world_authoring.preview",
+            actor=actor,
+            target_type="managed_workspace",
+            target_id=str(workspace or ""),
+            outcome="success" if validation.get("valid") is not False else "rejected",
+            data={
+                "proposal_id": proposal.get("proposalId"),
+                "proposal_kind": proposal.get("kind"),
+                "proposal_fingerprint": proposal_fingerprint,
+                "validation_id": validation.get("validationId"),
+                "requires_approval": validation.get("requiresApproval"),
+                "valid": validation.get("valid"),
+                "preview_only": True,
+                "world_authority_changed": False,
+                "asset_promoted": False,
+            },
+        )
+        return {
+            **result,
+            "proposal_fingerprint": proposal_fingerprint,
+        }
+
+    async def world_authoring_promote(
+        self,
+        *,
+        workspace: str,
+        proposal: dict[str, Any],
+        commands: list[dict[str, Any]],
+        validation_id: str,
+        rationale: str,
+        actor: str,
+    ) -> dict[str, Any]:
+        if not self.world_authoring:
+            raise WorldAuthoringError("HIRDA Earth world authoring integration is unavailable")
+        target = await self.world_authoring.resolve_workspace(str(workspace or ""))
+        result = await self.world_authoring.promote(
+            proposal=proposal,
+            commands=commands,
+            validation_id=validation_id,
+            rationale=rationale,
+            authored_by="nova",
+        )
+        await self.db.add_audit(
+            "world_authoring.promote",
+            actor=actor,
+            target_type="managed_workspace",
+            target_id=str(target.get("key") or workspace or ""),
+            outcome="success",
+            data={
+                "proposal_id": proposal.get("proposalId"),
+                "proposal_kind": proposal.get("kind"),
+                "validation_id": validation_id,
+                "authored_by": "nova",
+                "earth_mutation_authorized": True,
+                "world_authority": "earth-616",
+                "hirda_world_authority": False,
+            },
+        )
+        return {
+            "workspace": {
+                "key": target.get("key"),
+                "name": target.get("name"),
+                "project_path": target.get("project_path"),
+            },
+            "earth": result,
+            "promoted_by": "earth-616",
+            "hirda_world_authority": False,
+        }
+
     async def _handle_management_tool(self, gateway_session_id: str, name: str, args: dict[str, Any]) -> Any:
         if not self.managed_sessions:
             raise ManagedSessionError("managed sessions are unavailable")
@@ -1738,42 +1877,18 @@ class GatewaySessionManager:
                 except CapsuleNotFound as exc:
                     raise ManagedSessionError("capsule not found") from exc
         if name == "mcpstudio_world_authoring_audit":
-            if not self.world_authoring:
-                raise WorldAuthoringError("HIRDA Earth world authoring integration is unavailable")
-            workspace_selector = str(args.get("workspace") or "")
-            target = await self.world_authoring.resolve_workspace(workspace_selector)
             raw_events = args.get("events")
             if not isinstance(raw_events, list):
                 raise WorldAuthoringError("events must be an array")
-            events = self.world_authoring.validate_audit_events(
-                [dict(event) if isinstance(event, dict) else event for event in raw_events]
+            return await self.world_authoring_audit(
+                workspace=str(args.get("workspace") or ""),
+                events=[
+                    dict(event) if isinstance(event, dict) else event
+                    for event in raw_events
+                ],
+                actor="chatgpt/mcp",
             )
-            for event in events:
-                await self.db.add_audit(
-                    f"world_authoring.{event['kind']}",
-                    actor="chatgpt/mcp",
-                    target_type="managed_workspace",
-                    target_id=str(target.get("key") or workspace_selector),
-                    data={
-                        **event,
-                        "preview_only": True,
-                        "world_authority_changed": False,
-                    },
-                )
-            return {
-                "workspace": {
-                    "key": target.get("key"),
-                    "name": target.get("name"),
-                    "project_path": target.get("project_path"),
-                },
-                "accepted": len(events),
-                "audit_only": True,
-                "world_authority_changed": False,
-                "asset_promoted_by_hirda": False,
-            }
         if name == "mcpstudio_world_authoring_preview":
-            if not self.world_authoring:
-                raise WorldAuthoringError("HIRDA Earth world authoring integration is unavailable")
             raw_providers = args.get("providers") or []
             if not isinstance(raw_providers, list) or any(
                 not isinstance(provider, dict) for provider in raw_providers
@@ -1782,45 +1897,12 @@ class GatewaySessionManager:
             proposal = args.get("proposal")
             if not isinstance(proposal, dict):
                 raise WorldAuthoringError("proposal must be an object")
-            result = await self.world_authoring.preview(
+            return await self.world_authoring_preview(
                 workspace=str(args.get("workspace") or ""),
                 proposal=proposal,
                 providers=[dict(provider) for provider in raw_providers],
-            )
-            proposal_fingerprint = hashlib.sha256(
-                json.dumps(
-                    proposal,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest()
-            validation = (
-                result.get("result", {}).get("validation", {})
-                if isinstance(result.get("result"), dict)
-                else {}
-            )
-            await self.db.add_audit(
-                "world_authoring.preview",
                 actor="chatgpt/mcp",
-                target_type="managed_workspace",
-                target_id=str(args.get("workspace") or ""),
-                outcome="success" if validation.get("valid") is not False else "rejected",
-                data={
-                    "proposal_id": proposal.get("proposalId"),
-                    "proposal_kind": proposal.get("kind"),
-                    "proposal_fingerprint": proposal_fingerprint,
-                    "requires_approval": validation.get("requiresApproval"),
-                    "valid": validation.get("valid"),
-                    "preview_only": True,
-                    "world_authority_changed": False,
-                    "asset_promoted": False,
-                },
             )
-            return {
-                **result,
-                "proposal_fingerprint": proposal_fingerprint,
-            }
         if name.startswith("mcpstudio_graft_"):
             if not self.graft:
                 raise GraftError("HIRDA Graft integration is unavailable")

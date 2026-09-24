@@ -151,6 +151,77 @@ class WorldAuthoringManager:
             **result,
         }
 
+    async def promote(
+        self,
+        *,
+        proposal: dict[str, Any],
+        commands: list[dict[str, Any]],
+        validation_id: str,
+        rationale: str,
+        authored_by: str = "nova",
+    ) -> dict[str, Any]:
+        if not self.validator_url:
+            raise WorldAuthoringError("Earth world-authoring validator is not configured")
+        if not isinstance(proposal, dict) or not proposal:
+            raise WorldAuthoringError("proposal must be a non-empty object")
+        if not isinstance(commands, list) or any(not isinstance(item, dict) for item in commands):
+            raise WorldAuthoringError("commands must be an array of objects")
+        validation_id = str(validation_id or "").strip()
+        rationale = " ".join(str(rationale or "").split())
+        if not validation_id:
+            raise WorldAuthoringError("validationId required")
+        if authored_by != "nova":
+            raise WorldAuthoringError("world authoring promotion requires authoredBy=nova")
+        if not rationale:
+            raise WorldAuthoringError("promotion rationale required")
+
+        promote_url = self.validator_url.rsplit("/", 1)[0] + "/promote"
+        payload = {
+            "proposal": proposal,
+            "commands": commands,
+            "validationId": validation_id,
+            "authoredBy": authored_by,
+            "rationale": rationale,
+        }
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.timeout_seconds,
+                transport=self.validator_transport,
+            ) as client:
+                response = await client.post(promote_url, json=payload)
+        except httpx.HTTPError as exc:
+            raise WorldAuthoringError(
+                f"Earth world-authoring promoter unavailable: {exc}"
+            ) from exc
+
+        if response.status_code >= 400:
+            detail = response.text.strip()
+            raise WorldAuthoringError(
+                f"Earth world-authoring promoter returned HTTP "
+                f"{response.status_code}: {detail[:2000]}"
+            )
+
+        try:
+            result = response.json()
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise WorldAuthoringError(
+                "Earth world-authoring promoter returned invalid JSON"
+            ) from exc
+        if not isinstance(result, dict):
+            raise WorldAuthoringError(
+                "Earth world-authoring promoter returned a non-object response"
+            )
+        if (
+            result.get("mutationAuthorized") is not True
+            or result.get("worldAuthority") != "earth-616"
+            or result.get("authoredBy") != "nova"
+            or result.get("validationId") != validation_id
+        ):
+            raise WorldAuthoringError(
+                "Earth world-authoring promoter violated authority contract"
+            )
+        return result
+
     async def resolve_workspace(self, selector: str) -> dict[str, Any]:
         return await self._resolve_workspace(selector)
 
