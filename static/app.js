@@ -683,15 +683,15 @@ function renderCapsuleContextBar(capsule,{compact=false}={}){
 function laneStatusVisual(state){
   const value=String(state||'').toLowerCase();
   if(value.includes('emergency'))return {key:'emergency',symbol:'!',label:'Emergency'};
-  if(value.includes('disabled'))return {key:'disabled',symbol:'×',label:'Disabled'};
-  if(value.includes('draining'))return {key:'draining',symbol:'◔',label:'Draining'};
+  if(value.includes('disabled'))return {key:'disabled',symbol:'—',label:'Disabled'};
+  if(value.includes('draining'))return {key:'draining',symbol:'!',label:'Draining'};
   if(value.includes('awaiting ack'))return {key:'awaiting-ack',symbol:'↗',label:'Awaiting ACK'};
   if(value.includes('handoff'))return {key:'handoff',symbol:'⇄',label:'Handoff'};
   if(value.includes('received'))return {key:'received',symbol:'✓',label:'Received'};
-  if(value.includes('running'))return {key:'running',symbol:'●',label:'Running'};
-  if(value.includes('ready'))return {key:'ready',symbol:'✓',label:'Ready'};
-  if(value.includes('standby'))return {key:'standby',symbol:'○',label:'Standby'};
-  return {key:'unknown',symbol:'•',label:state||'Unknown'};
+  if(value.includes('running'))return {key:'running',symbol:'↑',label:'Running'};
+  if(value.includes('ready'))return {key:'ready',symbol:'●',label:'Ready'};
+  if(value.includes('standby'))return {key:'standby',symbol:'Ⅱ',label:'Standby'};
+  return {key:'unknown',symbol:'?',label:state||'Unknown'};
 }
 
 function renderCapsuleLane({agent,sub,colorClass,active=false,activeStage='',capsuleId='',muted=false,statusText='',capsule=null}){
