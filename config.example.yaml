@@ -179,6 +179,7 @@ studio:
   #pixel_art_studio_root: ./.hirda-cache/pixel-art-studio
   #pixel_art_studio_output_root: ./data/visual-candidates/pixel-art-studio
   #pixel_art_studio_expected_commit: f8c246635c4621a6c2b427833149afdc3dc3c719
+  #earth_world_validator_url: http://127.0.0.1:8816/api/world-authoring/validate
 
   # HCR cognitive fabric. Plan/shadow mode and execution are separate gates.
   #cognitive_router_enabled: false

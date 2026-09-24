@@ -77,7 +77,11 @@ connectivity = ConnectivityManager(settings, db)
 oauth = OAuthManager(settings, db)
 managed_sessions = ManagedSessionManager(settings, db)
 graft = GraftManager(settings, db)
-earth_world_validator_url = os.environ.get("HIRDA_EARTH_WORLD_VALIDATOR_URL")
+earth_world_validator_url = (
+    os.environ.get("HIRDA_EARTH_WORLD_VALIDATOR_URL")
+    or str(getattr(settings.studio, "earth_world_validator_url", "") or "").strip()
+    or None
+)
 pixel_art_studio = PixelArtStudioProvider.from_settings(
     settings.studio,
     base_dir=settings.config_path.parent,
