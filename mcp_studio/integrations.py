@@ -3,16 +3,25 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from importlib import metadata
 import os
+from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 from urllib.parse import urlparse
 
 from .graft import ALLOWED_GRAFT_TOOLS, GraftManager
+from .plugin_folder import (
+    DEFAULT_PLUGIN_DIRECTORY,
+    DEFAULT_PLUGIN_MANIFEST_NAME,
+    DEFAULT_PLUGIN_MAX_COUNT,
+    PluginFolderCandidate,
+    PluginFolderDiscovery,
+)
 
 
 INTEGRATION_MANIFEST_SCHEMA = "hirda-integration-manifest-v1"
 INTEGRATION_REGISTRY_SCHEMA = "hirda-integration-registry-v1"
 INTEGRATION_STAGES = (
     "discovered",
+    "quarantined",
     "validating",
     "registered",
     "certifying",
@@ -179,13 +188,17 @@ class RegisteredIntegration:
 class IntegrationManager:
     """One lifecycle for HIRDA subsystem integrations.
 
-    Adapters keep subsystem-specific logic; this manager owns only discovery,
+    Adapters keep subsystem-specific logic; this manager owns discovery,
     validation, registration, certification, and readiness reporting.
+
+    Local plugin-folder discovery is manifest-only in P1/P2. Folder plugins
+    remain quarantined and no adapter code is imported or executed.
     """
 
     def __init__(self) -> None:
         self._integrations: dict[str, RegisteredIntegration] = {}
         self._discovery_errors: list[dict[str, str]] = []
+        self._plugin_discovery: PluginFolderDiscovery | None = None
 
     def register(
         self,
@@ -216,6 +229,59 @@ class IntegrationManager:
         except KeyError:
             raise KeyError(key) from None
 
+    def configure_plugin_folder(
+        self,
+        root: Path,
+        *,
+        manifest_name: str = "hirda-plugin.yaml",
+        max_plugins: int = 128,
+    ) -> dict[str, Any]:
+        self._plugin_discovery = PluginFolderDiscovery(
+            root,
+            manifest_name=manifest_name,
+            max_plugins=max_plugins,
+        )
+        return self.discover_plugin_folders()
+
+    def discover_plugin_folders(self) -> dict[str, Any]:
+        if self._plugin_discovery is None:
+            return {
+                "enabled": False,
+                "plugin_count": 0,
+                "preflight_ok_count": 0,
+                "quarantined_count": 0,
+                "code_loaded_count": 0,
+                "errors": [],
+                "plugins": [],
+            }
+        return self._plugin_discovery.scan(
+            reserved_ids=set(self._integrations)
+        )
+
+    def plugin_folder_snapshot(self) -> dict[str, Any]:
+        if self._plugin_discovery is None:
+            return {
+                "enabled": False,
+                "plugin_count": 0,
+                "preflight_ok_count": 0,
+                "quarantined_count": 0,
+                "code_loaded_count": 0,
+                "errors": [],
+                "plugins": [],
+            }
+        return self._plugin_discovery.snapshot()
+
+    def _folder_candidate(self, integration_id: str) -> PluginFolderCandidate | None:
+        if self._plugin_discovery is None:
+            return None
+        return self._plugin_discovery.candidates.get(integration_id)
+
+    @staticmethod
+    def _folder_detail(candidate: PluginFolderCandidate) -> dict[str, Any]:
+        item = candidate.as_registry_item()
+        item["schema"] = INTEGRATION_REGISTRY_SCHEMA
+        return item
+
     @staticmethod
     def _probe_ok(result: object, *, phase: str) -> dict[str, Any]:
         if not isinstance(result, dict):
@@ -226,7 +292,16 @@ class IntegrationManager:
         return normalized
 
     async def reconcile(self, integration_id: str) -> dict[str, Any]:
-        registration = self.get(integration_id)
+        key = str(integration_id or "").strip()
+        registration = self._integrations.get(key)
+        if registration is None:
+            if self._plugin_discovery is not None:
+                self.discover_plugin_folders()
+                candidate = self._folder_candidate(key)
+                if candidate is not None:
+                    return self._folder_detail(candidate)
+            raise KeyError(key)
+
         registration.blocked = False
         registration.failed_stage = None
         registration.error = None
@@ -299,9 +374,18 @@ class IntegrationManager:
     async def detail(
         self, integration_id: str, *, reconcile: bool = False
     ) -> dict[str, Any]:
-        if reconcile:
-            return await self.reconcile(integration_id)
-        return await self._detail(self.get(integration_id))
+        key = str(integration_id or "").strip()
+        if key in self._integrations:
+            if reconcile:
+                return await self.reconcile(key)
+            return await self._detail(self._integrations[key])
+
+        if reconcile and self._plugin_discovery is not None:
+            self.discover_plugin_folders()
+        candidate = self._folder_candidate(key)
+        if candidate is not None:
+            return self._folder_detail(candidate)
+        raise KeyError(key)
 
     def discover_entry_points(
         self,
@@ -362,21 +446,35 @@ class IntegrationManager:
         return {"loaded": loaded_ids, "errors": errors}
 
     async def snapshot(self, *, reconcile: bool = False) -> dict[str, Any]:
+        if reconcile and self._plugin_discovery is not None:
+            self.discover_plugin_folders()
+
         items: list[dict[str, Any]] = []
         for integration_id in sorted(self._integrations):
             if reconcile:
                 item = await self.reconcile(integration_id)
             else:
-                item = await self.detail(integration_id)
+                item = await self._detail(self._integrations[integration_id])
             items.append(item)
+
+        plugin_folder = self.plugin_folder_snapshot()
+        items.extend(plugin_folder["plugins"])
+        items.sort(key=lambda item: (str(item.get("id") or ""), str(item.get("source") or "")))
+
         return {
             "schema": INTEGRATION_REGISTRY_SCHEMA,
             "lifecycle": list(INTEGRATION_STAGES),
             "integration_count": len(items),
-            "ready_count": sum(item["stage"] == "ready" and not item["blocked"] for item in items),
+            "ready_count": sum(
+                item["stage"] == "ready" and not item["blocked"] for item in items
+            ),
             "blocked_count": sum(bool(item["blocked"]) for item in items),
+            "quarantined_count": sum(
+                item["stage"] == "quarantined" for item in items
+            ),
             "entrypoint_group": DEFAULT_INTEGRATION_ENTRYPOINT_GROUP,
             "discovery_errors": list(self._discovery_errors),
+            "plugin_folder": plugin_folder,
             "integrations": items,
         }
 
@@ -635,11 +733,55 @@ class GraftIntegrationAdapter:
         }
 
 
-def build_integration_manager(graft: GraftManager, studio: Any | None = None) -> IntegrationManager:
+def build_integration_manager(
+    graft: GraftManager,
+    studio: Any | None = None,
+    *,
+    base_dir: Path | None = None,
+) -> IntegrationManager:
     manager = IntegrationManager()
     manager.register(GraftIntegrationAdapter(graft), source="builtin:graft")
     if studio is not None:
         manager.register(JevIntegrationAdapter(studio), source="builtin:jev")
+
+        if bool(getattr(studio, "integration_plugin_folder_enabled", True)):
+            configured_root = Path(
+                str(
+                    getattr(
+                        studio,
+                        "integration_plugin_folder_path",
+                        DEFAULT_PLUGIN_DIRECTORY,
+                    )
+                    or DEFAULT_PLUGIN_DIRECTORY
+                )
+            ).expanduser()
+            if not configured_root.is_absolute() and base_dir is not None:
+                configured_root = base_dir / configured_root
+            manifest_name = str(
+                getattr(
+                    studio,
+                    "integration_plugin_manifest_name",
+                    DEFAULT_PLUGIN_MANIFEST_NAME,
+                )
+                or DEFAULT_PLUGIN_MANIFEST_NAME
+            ).strip()
+            max_plugins = max(
+                1,
+                int(
+                    getattr(
+                        studio,
+                        "integration_plugin_max_count",
+                        DEFAULT_PLUGIN_MAX_COUNT,
+                    )
+                    or DEFAULT_PLUGIN_MAX_COUNT
+                ),
+            )
+            manager.configure_plugin_folder(
+                configured_root,
+                manifest_name=manifest_name,
+                max_plugins=max_plugins,
+            )
+
     if studio is not None and bool(
         getattr(studio, "integration_entrypoints_enabled", False)
     ):

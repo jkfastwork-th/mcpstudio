@@ -68,7 +68,11 @@ connectivity = ConnectivityManager(settings, db)
 oauth = OAuthManager(settings, db)
 managed_sessions = ManagedSessionManager(settings, db)
 graft = GraftManager(settings, db)
-integration_manager = build_integration_manager(graft, settings.studio)
+integration_manager = build_integration_manager(
+    graft,
+    settings.studio,
+    base_dir=settings.config_path.parent,
+)
 world_authoring = WorldAuthoringManager(
     managed_sessions,
     validator_url=os.environ.get("HIRDA_EARTH_WORLD_VALIDATOR_URL"),

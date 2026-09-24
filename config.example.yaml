@@ -107,6 +107,13 @@ studio:
   #integration_entrypoints_enabled: false
   #integration_entrypoint_group: hirda.integrations
 
+  # Local plugin-folder discovery. P1/P2 reads manifests only; adapter code is
+  # never imported or executed until a later trust/runtime phase approves it.
+  #integration_plugin_folder_enabled: true
+  #integration_plugin_folder_path: ./plugins
+  #integration_plugin_manifest_name: hirda-plugin.yaml
+  #integration_plugin_max_count: 128
+
   # HCR cognitive fabric. Plan/shadow mode and execution are separate gates.
   #cognitive_router_enabled: false
   #cognitive_router_execute_enabled: false

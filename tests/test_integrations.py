@@ -284,8 +284,15 @@ def test_builder_registers_jev_as_builtin_without_main_wiring(tmp_path: Path):
     db = Database(str(tmp_path / "studio.sqlite3"))
     graft = GraftManager(settings, db)
 
-    manager = build_integration_manager(graft, settings.studio)
+    manager = build_integration_manager(
+        graft,
+        settings.studio,
+        base_dir=settings.config_path.parent,
+    )
 
     registration = manager.get("jev")
     assert registration.source == "builtin:jev"
     assert registration.adapter.manifest.integration_id == "jev"
+    assert manager.plugin_folder_snapshot()["root"] == str(
+        (tmp_path / "plugins").absolute()
+    )

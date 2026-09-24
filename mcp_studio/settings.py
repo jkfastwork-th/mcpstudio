@@ -157,6 +157,13 @@ class StudioConfig:
     integration_entrypoints_enabled: bool = False
     integration_entrypoint_group: str = "hirda.integrations"
 
+    # Local plugin-folder discovery is manifest-only in P1/P2. HIRDA scans
+    # manifests automatically but never imports or executes adapter code here.
+    integration_plugin_folder_enabled: bool = True
+    integration_plugin_folder_path: str = "./plugins"
+    integration_plugin_manifest_name: str = "hirda-plugin.yaml"
+    integration_plugin_max_count: int = 128
+
     # HCR cognitive fabric. Routing can be exposed in shadow/plan mode without
     # permitting HIRDA to dispatch prompts. Execution is a separate opt-in gate
     # so consumers can canary route decisions before any runtime authority changes.

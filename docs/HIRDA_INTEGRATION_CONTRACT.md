@@ -171,6 +171,57 @@ The JEV migration demonstrates the intended steady state: adding a built-in inte
 required an adapter plus tests/documentation, not another parallel set of startup,
 permission, routing, or status wiring.
 
+## Local plugin-folder discovery (P1/P2)
+
+HIRDA can discover local integrations from a configured plugin directory without
+executing plugin code. The default layout is:
+
+```text
+plugins/
+└── <plugin-id>/
+    ├── hirda-plugin.yaml
+    └── adapter.py
+```
+
+P1/P2 is intentionally manifest-only. Discovery parses `hirda-plugin.yaml`, validates
+the contract, computes a manifest digest, and exposes the candidate through the common
+integration registry with `stage=quarantined`.
+
+Even a valid manifest remains quarantined with:
+
+```text
+trust_not_established
+code_loaded=false
+trust_established=false
+```
+
+The preflight rejects malformed or unsafe candidates before any adapter import,
+including:
+
+- invalid schema, id, version, health, tool, or permission contracts;
+- duplicate ids that conflict with built-in integrations;
+- plugin-root, manifest, or adapter symlink paths;
+- adapter path traversal or absolute paths;
+- invalid manifest filenames containing path traversal/separators;
+- inline secret values (environment-variable references such as `*_env` are allowed);
+- destructive permission requests, which require an explicit later approval phase;
+- plugin directories beyond the configured deterministic scan limit.
+
+The plugin directory is resolved relative to the HIRDA configuration file directory,
+not the process current working directory.
+
+Configuration:
+
+```yaml
+integration_plugin_folder_enabled: true
+integration_plugin_folder_path: ./plugins
+integration_plugin_manifest_name: hirda-plugin.yaml
+integration_plugin_max_count: 128
+```
+
+P1/P2 does not establish trust, import `adapter.py`, start plugin processes, or grant
+runtime authority. Those actions belong to the later trust/runtime phases.
+
 ## Design rule
 
 Adding an integration must not create another parallel control plane.
