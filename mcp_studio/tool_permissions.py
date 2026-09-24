@@ -4,7 +4,7 @@ import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from .git_worktrees import is_registered_git_worktree_path
 
@@ -41,7 +41,7 @@ _EXECUTE_TOOLS = {
     "mcpstudio_set_lane_state", "mcpstudio_approve_capsule_handoff",
     "fern_inbox_claim", "fern_reply_submit", "fern_interjection_decide",
 }
-_SHELL_TOOLS = {"execute_shell_command", "shell", "run_command"}
+_SHELL_TOOLS = {"execute_shell_command", "shell", "run_command", "start_process"}
 
 _DESTRUCTIVE_SHELL = re.compile(
     r"(?:^|[;&|]\s*)(?:sudo\s+)?(?:rm|unlink|rmdir)\b"
@@ -71,7 +71,9 @@ _EXECUTE_COMMANDS = {
 _PATH_ARGUMENT_KEYS = {
     "relative_path", "path", "file_path", "directory", "cwd", "workdir",
     "source_path", "destination_path", "target_path",
+    "source", "destination", "outputPath",
 }
+_PATH_LIST_ARGUMENT_KEYS = {"paths"}
 _ALLOWED_EXTERNAL_PATHS = {Path("/dev/null")}
 
 
@@ -233,7 +235,12 @@ def classify_shell_command(command: str) -> ToolClass:
     return "read" if classes else "unknown"
 
 
-def classify_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> ToolClass:
+def classify_tool(
+    tool_name: str,
+    arguments: dict[str, Any] | None = None,
+    *,
+    declared_category: str | None = None,
+) -> ToolClass:
     name = _base_tool_name(tool_name)
     args = arguments or {}
     if name == "replace_in_files":
@@ -248,6 +255,8 @@ def classify_tool(tool_name: str, arguments: dict[str, Any] | None = None) -> To
         return "read"
     if name in _SHELL_TOOLS:
         return classify_shell_command(str(args.get("command") or ""))
+    if declared_category in {"read", "write", "execute", "destructive"}:
+        return cast(ToolClass, declared_category)
     return "unknown"
 
 
@@ -301,10 +310,11 @@ def _argument_scope_violation(
     *,
     allow_git_worktree_siblings: bool = False,
 ) -> str | None:
-    for key in _PATH_ARGUMENT_KEYS:
-        value = arguments.get(key)
+    def check_value(key: str, value: object) -> str | None:
         if not isinstance(value, str) or not value.strip():
-            continue
+            return None
+        if "://" in value:
+            return f"argument {key} is a URL outside workspace scope: {value}"
         raw = Path(value).expanduser()
         candidate = raw if raw.is_absolute() else workspace_root / raw
         if not _within_scope(
@@ -313,6 +323,20 @@ def _argument_scope_violation(
             allow_git_worktree_siblings=allow_git_worktree_siblings,
         ):
             return f"argument {key} escapes workspace: {value}"
+        return None
+
+    for key in _PATH_ARGUMENT_KEYS:
+        violation = check_value(key, arguments.get(key))
+        if violation:
+            return violation
+    for key in _PATH_LIST_ARGUMENT_KEYS:
+        values = arguments.get(key)
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            violation = check_value(key, value)
+            if violation:
+                return violation
     return None
 
 
@@ -353,10 +377,19 @@ def _shell_scope_violation(
     return None
 
 
-def decide_tool_call(studio: Any, session: dict[str, Any], tool_name: str, arguments: dict[str, Any] | None = None) -> PermissionDecision:
+def decide_tool_call(
+    studio: Any,
+    session: dict[str, Any],
+    tool_name: str,
+    arguments: dict[str, Any] | None = None,
+    *,
+    declared_category: str | None = None,
+) -> PermissionDecision:
     args = arguments or {}
     policy = effective_policy(studio, session)
-    category = classify_tool(tool_name, args)
+    category = classify_tool(
+        tool_name, args, declared_category=declared_category
+    )
     if category == "unknown":
         if policy["fail_closed_unknown"]:
             return PermissionDecision(False, category, "TOOL_PERMISSION_UNCLASSIFIED", f"Tool {tool_name} is not classified; permission policy is fail-closed.", policy)

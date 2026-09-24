@@ -157,12 +157,24 @@ class StudioConfig:
     integration_entrypoints_enabled: bool = False
     integration_entrypoint_group: str = "hirda.integrations"
 
-    # Local plugin-folder discovery is manifest-only in P1/P2. HIRDA scans
-    # manifests automatically but never imports or executes adapter code here.
+    # Local plugin-folder discovery is manifest-only until the separate P3
+    # runtime gate and exact adapter fingerprint trust are both enabled.
     integration_plugin_folder_enabled: bool = True
     integration_plugin_folder_path: str = "./plugins"
     integration_plugin_manifest_name: str = "hirda-plugin.yaml"
     integration_plugin_max_count: int = 128
+    # P3 runtime activation remains fail-closed: code loads only when both this
+    # gate is enabled and the manifest+adapter fingerprint is explicitly trusted.
+    integration_plugin_runtime_enabled: bool = False
+    integration_plugin_trusted_fingerprints: list[str] = field(default_factory=list)
+
+    # Desktop Commander is a HIRDA-gated machine-control backend. Its raw MCP
+    # server is never exposed directly to lanes; tools flow through session
+    # permission, Reflex, JEV evidence, workspace scope, and backend ownership.
+    desktop_commander_backend_enabled: bool = False
+    desktop_commander_backend_binary: str = "desktop-commander"
+    desktop_commander_backend_timeout_seconds: float = 15.0
+    desktop_commander_backend_cwd: str = ""
 
     # HCR cognitive fabric. Routing can be exposed in shadow/plan mode without
     # permitting HIRDA to dispatch prompts. Execution is a separate opt-in gate

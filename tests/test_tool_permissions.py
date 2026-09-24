@@ -163,3 +163,53 @@ def test_unknown_tool_fails_closed(tmp_path):
     decision = decide_tool_call(studio(), session(tmp_path), "future_mutator", {})
     assert decision.allowed is False
     assert decision.code == "TOOL_PERMISSION_UNCLASSIFIED"
+
+
+def test_backend_declared_permission_classifies_unknown_tool(tmp_path):
+    decision = decide_tool_call(
+        studio(),
+        session(tmp_path),
+        "hirda__desktop_commander__list_directory",
+        {"path": "."},
+        declared_category="read",
+    )
+    assert decision.allowed is True
+    assert decision.category == "read"
+
+
+def test_backend_start_process_uses_command_risk_not_declared_execute(tmp_path):
+    decision = decide_tool_call(
+        studio(),
+        session(tmp_path),
+        "hirda__desktop_commander__start_process",
+        {"command": "rm -rf ./build"},
+        declared_category="execute",
+    )
+    assert decision.allowed is False
+    assert decision.category == "destructive"
+    assert decision.code == "TOOL_PERMISSION_DENIED"
+
+
+def test_backend_paths_list_and_urls_are_workspace_scoped(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+    paths = decide_tool_call(
+        studio(),
+        session(root),
+        "hirda__desktop_commander__read_multiple_files",
+        {"paths": ["inside.txt", str(outside)]},
+        declared_category="read",
+    )
+    assert paths.allowed is False
+    assert paths.code == "TOOL_SCOPE_VIOLATION"
+
+    url = decide_tool_call(
+        studio(),
+        session(root),
+        "hirda__desktop_commander__read_file",
+        {"path": "https://example.test/file"},
+        declared_category="read",
+    )
+    assert url.allowed is False
+    assert url.code == "TOOL_SCOPE_VIOLATION"

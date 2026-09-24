@@ -86,6 +86,7 @@ gateway_sessions = GatewaySessionManager(
     graft,
     capsules,
     world_authoring,
+    integration_manager,
 )
 operations = OperationsManager(settings, db)
 observability = ObservabilityManager(settings, db)
@@ -114,6 +115,7 @@ async def lifespan(app: FastAPI):
     await db.add_audit("studio.start", actor="system", data={"version": "0.9.10-m6.2.5", "production_mode": settings.studio.production_mode})
     yield
     await db.add_audit("studio.stop", actor="system", data={"version": "0.9.10-m6.2.5"})
+    await integration_manager.close()
     await connectivity.stop()
     await execution.stop()
     await scheduler.stop()

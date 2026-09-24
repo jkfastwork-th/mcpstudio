@@ -30,6 +30,7 @@ from .reflex import (
 from .graft import GraftManager, GraftError
 from .capsules import CapsuleService, CapsuleNotFound
 from .world_authoring import WorldAuthoringManager, WorldAuthoringError
+from .integrations import IntegrationManager, IntegrationError
 
 
 CONTROL_TOOL_NAMES = (
@@ -77,6 +78,7 @@ class GatewaySessionManager:
         graft: GraftManager | None = None,
         capsules: CapsuleService | None = None,
         world_authoring: WorldAuthoringManager | None = None,
+        integrations: IntegrationManager | None = None,
     ):
         self.settings = settings
         self.db = db
@@ -85,6 +87,7 @@ class GatewaySessionManager:
         self.graft = graft
         self.capsules = capsules
         self.world_authoring = world_authoring
+        self.integrations = integrations
 
     def authenticate(self, request: Request) -> tuple[str, str, str, str, str]:
         """Authenticate and derive a stable client identity.
@@ -664,6 +667,21 @@ class GatewaySessionManager:
             headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
         )
 
+    @staticmethod
+    def _jsonrpc_raw_tool_response(
+        request_id: Any, result: dict[str, Any], *, is_error: bool = False
+    ) -> Response:
+        payload = dict(result or {})
+        if is_error:
+            payload["isError"] = True
+        body = {"jsonrpc": "2.0", "id": request_id, "result": payload}
+        return Response(
+            content=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            status_code=200,
+            media_type="application/json",
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
+
     def _ordered_management_tools(self) -> list[dict[str, Any]]:
         """Return Studio tools with project-selection controls first.
 
@@ -678,13 +696,21 @@ class GatewaySessionManager:
             key=lambda tool: (priority.get(str(tool.get("name")), len(priority)), str(tool.get("name"))),
         )
 
+    def _ordered_backend_tools(self) -> list[dict[str, Any]]:
+        if self.integrations is None:
+            return []
+        return self.integrations.backend_tools()
+
+    def _all_local_tools(self) -> list[dict[str, Any]]:
+        return self._ordered_management_tools() + self._ordered_backend_tools()
+
     def _augment_tools_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         result = payload.get("result") if isinstance(payload, dict) else None
         tools = result.get("tools") if isinstance(result, dict) else None
         if not isinstance(tools, list):
             return payload
 
-        studio_tools = self._ordered_management_tools()
+        studio_tools = self._all_local_tools()
         studio_names = {str(t.get("name")) for t in studio_tools if isinstance(t, dict)}
         # Studio control tools are intentionally prepended.  Besides making the
         # control plane discoverable on an unbound transport, this protects the
@@ -697,7 +723,7 @@ class GatewaySessionManager:
         return payload
 
     def _augment_tools_content(self, content: bytes, content_type: str) -> bytes:
-        if not self._management_tools():
+        if not self._all_local_tools():
             return content
         try:
             if "text/event-stream" in content_type:
@@ -807,7 +833,7 @@ class GatewaySessionManager:
         return {
             "jsonrpc": "2.0",
             "id": request_id,
-            "result": {"tools": self._ordered_management_tools()},
+            "result": {"tools": self._all_local_tools()},
         }
 
     async def _resolve_managed_session(self, value: str) -> dict[str, Any]:
@@ -2383,6 +2409,27 @@ class GatewaySessionManager:
                 )
             )
 
+        def local_backend_tool_response(result: dict[str, Any]) -> Response:
+            visible_result = dict(result or {})
+            if context_notice:
+                blocks = visible_result.get("content")
+                if isinstance(blocks, list):
+                    blocks.append(
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {"HIRDA_CONTEXT_WARNING": context_notice},
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        }
+                    )
+            return _decorate_local_response(
+                self._jsonrpc_raw_tool_response(
+                    jsonrpc.get("id") if jsonrpc else None, visible_result
+                )
+            )
+
         def local_tools_list_response() -> Response:
             payload = self._control_tools_payload(jsonrpc.get("id") if jsonrpc else None)
             return _decorate_local_response(
@@ -2482,7 +2529,13 @@ class GatewaySessionManager:
                     },
                     is_error=True,
                 )
-            if session.get("managed_session_id") and self.settings.studio.managed_session_tool_permissions_enabled:
+            backend_tool = bool(
+                self.integrations is not None
+                and self.integrations.is_backend_tool(tool_name)
+            )
+            if session.get("managed_session_id") and (
+                self.settings.studio.managed_session_tool_permissions_enabled or backend_tool
+            ):
                 try:
                     if managed_session is None:
                         managed_session = await self.db.get_managed_session(str(session["managed_session_id"]))
@@ -2495,7 +2548,18 @@ class GatewaySessionManager:
                         is_error=True,
                     )
                 policy_started = time.perf_counter()
-                decision = decide_tool_call(self.settings.studio, managed_session, tool_name, tool_args)
+                declared_category = (
+                    self.integrations.backend_permission(tool_name)
+                    if self.integrations is not None
+                    else None
+                )
+                decision = decide_tool_call(
+                    self.settings.studio,
+                    managed_session,
+                    tool_name,
+                    tool_args,
+                    declared_category=declared_category,
+                )
                 policy_ms = round((time.perf_counter() - policy_started) * 1000.0, 3)
                 if not decision.allowed:
                     return local_tool_response(
@@ -2610,6 +2674,72 @@ class GatewaySessionManager:
                         },
                         is_error=True,
                     )
+
+        if (
+            request.method == "POST"
+            and rpc_method == "tools/call"
+            and self.integrations is not None
+            and self.integrations.is_backend_tool(tool_name)
+        ):
+            if not session.get("managed_session_id"):
+                return local_tool_response(
+                    {
+                        "error": "NO_MANAGED_SESSION_BOUND",
+                        "message": "HIRDA backend tools require a managed workspace session.",
+                    },
+                    is_error=True,
+                )
+            try:
+                if managed_session is None:
+                    managed_session = await self.db.get_managed_session(
+                        str(session["managed_session_id"])
+                    )
+                declared_category = self.integrations.backend_permission(tool_name)
+                decision = decide_tool_call(
+                    self.settings.studio,
+                    managed_session,
+                    tool_name,
+                    tool_args,
+                    declared_category=declared_category,
+                )
+                if not decision.allowed:
+                    return local_tool_response(
+                        {
+                            "error": decision.code,
+                            "message": decision.message,
+                            "tool": tool_name,
+                            "permission_class": decision.category,
+                            "workspace_key": managed_session.get("workspace_key"),
+                            "policy": decision.policy,
+                        },
+                        is_error=True,
+                    )
+                result = await self.integrations.call_backend_tool(
+                    tool_name,
+                    tool_args,
+                    context={
+                        "managed_session_id": managed_session.get("id"),
+                        "workspace_key": managed_session.get("workspace_key"),
+                        "project_path": managed_session.get("project_path"),
+                        "policy": decision.policy,
+                    },
+                )
+                await record_reflex_outcome(200, "integration-backend")
+                return local_backend_tool_response(result)
+            except (IntegrationError, KeyError) as exc:
+                return local_tool_response(
+                    {"error": type(exc).__name__, "message": str(exc), "tool": tool_name},
+                    is_error=True,
+                )
+            except Exception as exc:
+                return local_tool_response(
+                    {
+                        "error": "BACKEND_TOOL_FAILED",
+                        "message": f"{type(exc).__name__}: {exc}",
+                        "tool": tool_name,
+                    },
+                    is_error=True,
+                )
 
         target_url = session.get("upstream_url") or server.url
         if (

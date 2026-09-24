@@ -172,3 +172,128 @@ def test_plugin_count_limit_is_deterministic(tmp_path: Path):
             "error": "plugin_count_limit_exceeded",
         }
     ]
+
+
+def _runtime_adapter_source(plugin_id: str = "demo") -> str:
+    return f'''from mcp_studio.integrations import IntegrationManifest\n\nclass DemoIntegration:\n    def __init__(self):\n        self.manifest = IntegrationManifest.from_mapping({{\n            "id": "{plugin_id}",\n            "name": "Demo Plugin",\n            "capabilities": ["demo_read"],\n            "runtime": {{"type": "local-python"}},\n            "tools": ["demo_read"],\n            "permissions": {{"demo_read": "read"}},\n            "health": {{"type": "adapter_probe"}},\n            "routing": {{"preferred_lanes": ["hermes"]}},\n        }})\n\n    async def validate(self):\n        return {{"ok": True}}\n\n    async def certify(self):\n        return {{"ok": True}}\n\n    async def status(self):\n        return {{"ok": True}}\n'''
+
+
+def test_plugin_fingerprint_covers_adapter_code(tmp_path: Path):
+    plugin = _plugin(tmp_path, adapter_source=_runtime_adapter_source())
+    first = inspect_plugin_folder(plugin)
+    assert first.preflight_ok is True
+    assert first.adapter_sha256
+    assert first.fingerprint
+
+    (plugin / "adapter.py").write_text(
+        _runtime_adapter_source() + "\n# changed\n", encoding="utf-8"
+    )
+    second = inspect_plugin_folder(plugin)
+    assert second.preflight_ok is True
+    assert second.manifest_sha256 == first.manifest_sha256
+    assert second.adapter_sha256 != first.adapter_sha256
+    assert second.fingerprint != first.fingerprint
+
+
+def test_p3_untrusted_plugin_never_imports_code(tmp_path: Path):
+    marker = tmp_path / "runtime-imported"
+    source = (
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('loaded')\n"
+        + _runtime_adapter_source()
+    )
+    plugin = _plugin(tmp_path, adapter_source=source)
+    candidate = inspect_plugin_folder(plugin)
+    assert candidate.fingerprint
+
+    manager = IntegrationManager()
+    manager.configure_plugin_folder(
+        tmp_path,
+        runtime_enabled=True,
+        trusted_fingerprints=[],
+    )
+    result = manager.activate_trusted_plugins()
+
+    assert result["activated"] == []
+    assert result["quarantined"] == ["demo"]
+    assert not marker.exists()
+    detail = manager.plugin_folder_snapshot()["plugins"][0]
+    assert detail["status"]["code_loaded"] is False
+    assert detail["status"]["trust_established"] is False
+
+
+@pytest.mark.asyncio
+async def test_p3_trusted_fingerprint_loads_then_reconciles(tmp_path: Path):
+    marker = tmp_path / "runtime-imported"
+    source = (
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('loaded')\n"
+        + _runtime_adapter_source()
+    )
+    plugin = _plugin(tmp_path, adapter_source=source)
+    candidate = inspect_plugin_folder(plugin)
+    assert candidate.fingerprint
+
+    manager = IntegrationManager()
+    manager.configure_plugin_folder(
+        tmp_path,
+        runtime_enabled=True,
+        trusted_fingerprints=[candidate.fingerprint],
+    )
+    result = manager.activate_trusted_plugins()
+
+    assert result["activated"] == ["demo"]
+    assert result["errors"] == []
+    assert marker.read_text() == "loaded"
+    detail = await manager.reconcile("demo")
+    assert detail["stage"] == "ready"
+    assert detail["source"].startswith("folder:")
+    snapshot = manager.plugin_folder_snapshot()
+    assert snapshot["code_loaded_count"] == 1
+    assert snapshot["quarantined_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_p3_rescan_revokes_plugin_when_adapter_fingerprint_changes(tmp_path: Path):
+    plugin = _plugin(tmp_path, adapter_source=_runtime_adapter_source())
+    candidate = inspect_plugin_folder(plugin)
+    assert candidate.fingerprint
+
+    manager = IntegrationManager()
+    manager.configure_plugin_folder(
+        tmp_path,
+        runtime_enabled=True,
+        trusted_fingerprints=[candidate.fingerprint],
+    )
+    first = manager.activate_trusted_plugins()
+    assert first["activated"] == ["demo"]
+    assert (await manager.reconcile("demo"))["stage"] == "ready"
+
+    (plugin / "adapter.py").write_text(
+        _runtime_adapter_source() + "\n# fingerprint changed\n", encoding="utf-8"
+    )
+    manager.discover_plugin_folders()
+
+    with pytest.raises(KeyError):
+        manager.get("demo")
+    detail = await manager.detail("demo")
+    assert detail["stage"] == "quarantined"
+    assert detail["status"]["code_loaded"] is False
+    assert detail["status"]["trust_established"] is False
+
+
+def test_p3_activation_is_idempotent_for_same_fingerprint(tmp_path: Path):
+    plugin = _plugin(tmp_path, adapter_source=_runtime_adapter_source())
+    candidate = inspect_plugin_folder(plugin)
+    assert candidate.fingerprint
+    manager = IntegrationManager()
+    manager.configure_plugin_folder(
+        tmp_path,
+        runtime_enabled=True,
+        trusted_fingerprints=[candidate.fingerprint],
+    )
+    first = manager.activate_trusted_plugins()
+    second = manager.activate_trusted_plugins()
+    assert first["activated"] == ["demo"]
+    assert second["activated"] == ["demo"]
+    assert second["errors"] == []
