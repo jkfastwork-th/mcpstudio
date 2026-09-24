@@ -616,6 +616,8 @@ class CapsuleService:
         self,
         target_agent: str,
         snapshot: dict[str, Any],
+        *,
+        workspace: str | None = None,
     ) -> dict[str, Any] | None:
         if self.herdr is None:
             return None
@@ -631,6 +633,12 @@ class CapsuleService:
                 continue
             if str(pane.get("agent_status") or "").casefold() not in {"idle", "done"}:
                 continue
+            if workspace:
+                pane_workspace = str(
+                    pane.get("foreground_cwd") or pane.get("cwd") or ""
+                ).strip()
+                if not pane_workspace or pane_workspace != str(workspace).strip():
+                    continue
             candidates.append(dict(pane))
         if not candidates:
             return None
@@ -740,13 +748,17 @@ class CapsuleService:
                         }
                     )
                     continue
-                pane = self._available_target_pane(target, snapshot)
+                pane = self._available_target_pane(
+                    target,
+                    snapshot,
+                    workspace=str(capsule.get("workspace") or "").strip() or None,
+                )
                 if pane is None:
                     candidate_evaluations.append(
                         {
                             "agent": target,
                             "eligible": False,
-                            "reason": "idle_target_pane_required",
+                            "reason": "idle_target_pane_in_workspace_required",
                         }
                     )
                     continue

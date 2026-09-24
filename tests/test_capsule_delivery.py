@@ -100,6 +100,8 @@ class FakeHerdr:
             "agent": "hermes",
             "agent_status": "idle",
             "revision": 1,
+            "cwd": "mcp-studio",
+            "foreground_cwd": "mcp-studio",
         }
         if pane_id and pane_id != pane["pane_id"]:
             return None
@@ -116,6 +118,8 @@ class FakeHerdr:
                 "agent": "hermes",
                 "agent_status": "idle",
                 "revision": 1,
+                "cwd": "mcp-studio",
+                "foreground_cwd": "mcp-studio",
             }
         ]
 
@@ -889,12 +893,16 @@ async def test_auto_rollover_skips_context_incompatible_target_and_uses_next():
                     "agent": "hermes",
                     "agent_status": "idle",
                     "revision": 1,
+                    "cwd": "mcp-studio",
+                    "foreground_cwd": "mcp-studio",
                 },
                 {
                     "pane_id": "pane-codex",
                     "agent": "codex",
                     "agent_status": "idle",
                     "revision": 1,
+                    "cwd": "mcp-studio",
+                    "foreground_cwd": "mcp-studio",
                 },
             ]
 
@@ -1032,3 +1040,96 @@ async def test_guarded_auto_rollover_resumes_target_after_approval():
     kinds = [event["kind"] for event in committed["events"]]
     assert "capsule.auto_handoff_committed" in kinds
     assert "capsule.auto_handoff_resumed" in kinds
+
+
+@pytest.mark.asyncio
+async def test_auto_rollover_never_selects_target_from_another_workspace():
+    class CrossWorkspaceHerdr(FakeHerdr):
+        def __init__(self):
+            super().__init__(pane=True)
+            self.panes = [
+                {
+                    "pane_id": "pane-hermes-airapari",
+                    "agent": "hermes",
+                    "agent_status": "idle",
+                    "revision": 1,
+                    "cwd": "/home/alfred/airapari",
+                    "foreground_cwd": "/home/alfred/airapari",
+                },
+                {
+                    "pane_id": "pane-codex-mcp-studio",
+                    "agent": "codex",
+                    "agent_status": "idle",
+                    "revision": 1,
+                    "cwd": "/home/alfred/mcp-studio",
+                    "foreground_cwd": "/home/alfred/mcp-studio",
+                },
+            ]
+
+        def pane_list(self, snapshot=None):
+            return [dict(item) for item in self.panes]
+
+        def find_pane(self, *, pane_id=None, workspace=None, agent=None):
+            candidates = self.panes
+            if pane_id:
+                candidates = [
+                    item for item in candidates if item["pane_id"] == pane_id
+                ]
+            if workspace:
+                candidates = [
+                    item
+                    for item in candidates
+                    if item["cwd"] == workspace
+                    or item["foreground_cwd"] == workspace
+                ]
+            if agent:
+                candidates = [
+                    item for item in candidates if item["agent"] == agent
+                ]
+            return dict(candidates[0]) if candidates else None
+
+    db = FakeDB()
+    herdr = CrossWorkspaceHerdr()
+    service = CapsuleService(db, herdr)
+    capsule = await service.create(
+        title="Workspace isolation rollover",
+        workspace="/home/alfred/mcp-studio",
+        source_pane="pane-claude",
+        agent="claude",
+        metadata={
+            "context_profile": {
+                "source_tokens": 3000,
+                "retained_tokens": 2500,
+            }
+        },
+    )
+    capsule_id = capsule["capsule_id"]
+    capability = handoff_metadata()["model_capability"]
+    contract = capsule_contract("safe")
+    contract["target_capabilities"] = {
+        "hermes": dict(capability),
+        "codex": {**capability, "model_id": "codex-test"},
+    }
+    await service.update_contract(capsule_id, contract)
+
+    result = await service.set_lane_state(
+        "claude",
+        "draining",
+        reason="workspace_isolation_cert",
+        actor="test",
+        auto_handoff=True,
+    )
+
+    selected = result["auto_handoff"][0]
+    assert selected["status"] == "dispatched"
+    assert selected["to_agent"] == "codex"
+    pending = selected["pending_handoff"]
+    assert pending["target_pane"] == "pane-codex-mcp-studio"
+    evaluations = pending["metadata"]["auto_failover"]["candidate_evaluations"]
+    assert evaluations[0] == {
+        "agent": "hermes",
+        "eligible": False,
+        "reason": "idle_target_pane_in_workspace_required",
+    }
+    assert evaluations[1]["agent"] == "codex"
+    assert evaluations[1]["eligible"] is True
