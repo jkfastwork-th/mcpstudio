@@ -394,7 +394,10 @@ async def test_gateway_world_authoring_audit_persists_bounded_lifecycle_evidence
                     "eventId": "visual-audit-2",
                     "kind": "asset_promoted",
                     "recordedAt": "2026-09-24T00:01:00Z",
+                    "jobId": "job-1",
+                    "requestId": "proposal-1",
                     "logicalId": "prop.lantern",
+                    "details": {"validationId": "earth-validation-1"},
                 },
             ],
         },
@@ -412,6 +415,54 @@ async def test_gateway_world_authoring_audit_persists_bounded_lifecycle_evidence
         row["data"]["world_authority_changed"] is False
         for _, row in db.audits
     )
+
+
+
+def test_world_authoring_audit_validator_builds_traceable_validation_chain():
+    manager = WorldAuthoringManager(SimpleNamespace())
+    events = manager.validate_audit_events([
+        {
+            "eventId": "visual-audit-validation",
+            "kind": "earth_validation_attached",
+            "recordedAt": "2026-09-24T00:00:30Z",
+            "jobId": "job-1",
+            "requestId": "proposal-1",
+            "logicalId": "prop.lantern",
+            "details": {
+                "validationId": "earth-validation-1",
+                "valid": True,
+                "mutationAuthorized": False,
+                "worldAuthority": "earth-616",
+            },
+        },
+        {
+            "eventId": "visual-audit-promote",
+            "kind": "asset_promoted",
+            "recordedAt": "2026-09-24T00:01:00Z",
+            "jobId": "job-1",
+            "requestId": "proposal-1",
+            "logicalId": "prop.lantern",
+            "details": {"validationId": "earth-validation-1"},
+        },
+    ])
+    assert events[0]["trace_id"] == "proposal-1:job-1:prop.lantern"
+    assert events[1]["trace_id"] == "proposal-1:job-1:prop.lantern"
+    assert events[0]["details"]["validationId"] == events[1]["details"]["validationId"]
+
+
+def test_world_authoring_audit_validator_rejects_unvalidated_promotion():
+    manager = WorldAuthoringManager(SimpleNamespace())
+    with pytest.raises(WorldAuthoringError, match="validationId"):
+        manager.validate_audit_events([
+            {
+                "eventId": "visual-audit-promote-bad",
+                "kind": "asset_promoted",
+                "jobId": "job-1",
+                "requestId": "proposal-1",
+                "logicalId": "prop.lantern",
+                "details": {},
+            }
+        ])
 
 
 def test_world_authoring_audit_validator_rejects_unknown_event_kind():

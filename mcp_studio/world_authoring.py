@@ -163,6 +163,7 @@ class WorldAuthoringManager:
             "asset_approved",
             "asset_rejected",
             "asset_promoted",
+            "earth_validation_attached",
             "placeholder_pack_imported",
         }
         if not isinstance(events, list) or not events:
@@ -199,16 +200,56 @@ class WorldAuthoringManager:
                     )
                 safe_details[key] = value
 
+            provider_id = str(raw.get("providerId") or "")[:160] or None
+            job_id = str(raw.get("jobId") or "")[:160] or None
+            request_id = str(raw.get("requestId") or "")[:160] or None
+            logical_id = str(raw.get("logicalId") or "")[:240] or None
+            pack_id = str(raw.get("packId") or "")[:160] or None
+
+            if kind in {"job_created", "job_updated", "asset_intake", "asset_approved", "asset_promoted", "earth_validation_attached"}:
+                if not request_id or not logical_id:
+                    raise WorldAuthoringError(
+                        f"audit event {index} kind {kind} requires requestId and logicalId"
+                    )
+            if kind in {"job_created", "job_updated", "asset_intake"} and not job_id:
+                raise WorldAuthoringError(
+                    f"audit event {index} kind {kind} requires jobId"
+                )
+            if kind in {"asset_approved", "asset_promoted", "earth_validation_attached"}:
+                validation_id = str(safe_details.get("validationId") or "").strip()
+                if not validation_id:
+                    raise WorldAuthoringError(
+                        f"audit event {index} kind {kind} requires details.validationId"
+                    )
+            if kind == "earth_validation_attached":
+                if safe_details.get("valid") is not True:
+                    raise WorldAuthoringError(
+                        f"audit event {index} Earth validation must be valid"
+                    )
+                if safe_details.get("mutationAuthorized") is not False:
+                    raise WorldAuthoringError(
+                        f"audit event {index} Earth validation must deny mutation authority"
+                    )
+                if safe_details.get("worldAuthority") != "earth-616":
+                    raise WorldAuthoringError(
+                        f"audit event {index} Earth validation worldAuthority must be earth-616"
+                    )
+
+            trace_id = ":".join(
+                value for value in (request_id, job_id, logical_id) if value
+            )
+
             normalized.append(
                 {
                     "event_id": event_id,
                     "kind": kind,
                     "recorded_at": str(raw.get("recordedAt") or "")[:80],
-                    "provider_id": str(raw.get("providerId") or "")[:160] or None,
-                    "job_id": str(raw.get("jobId") or "")[:160] or None,
-                    "request_id": str(raw.get("requestId") or "")[:160] or None,
-                    "logical_id": str(raw.get("logicalId") or "")[:240] or None,
-                    "pack_id": str(raw.get("packId") or "")[:160] or None,
+                    "provider_id": provider_id,
+                    "job_id": job_id,
+                    "request_id": request_id,
+                    "logical_id": logical_id,
+                    "pack_id": pack_id,
+                    "trace_id": trace_id or None,
                     "details": safe_details,
                 }
             )
