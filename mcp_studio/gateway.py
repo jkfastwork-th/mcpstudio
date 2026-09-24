@@ -29,6 +29,7 @@ from .reflex import (
 )
 from .graft import GraftManager, GraftError
 from .capsules import CapsuleService, CapsuleNotFound
+from .world_authoring import WorldAuthoringManager, WorldAuthoringError
 
 
 CONTROL_TOOL_NAMES = (
@@ -75,6 +76,7 @@ class GatewaySessionManager:
         managed_sessions: ManagedSessionManager | None = None,
         graft: GraftManager | None = None,
         capsules: CapsuleService | None = None,
+        world_authoring: WorldAuthoringManager | None = None,
     ):
         self.settings = settings
         self.db = db
@@ -82,6 +84,7 @@ class GatewaySessionManager:
         self.managed_sessions = managed_sessions
         self.graft = graft
         self.capsules = capsules
+        self.world_authoring = world_authoring
 
     def authenticate(self, request: Request) -> tuple[str, str, str, str, str]:
         """Authenticate and derive a stable client identity.
@@ -293,7 +296,7 @@ class GatewaySessionManager:
     def _management_tools(self) -> list[dict[str, Any]]:
         if not (self.managed_sessions and self.managed_sessions.enabled):
             return []
-        return [
+        tools = [
             {
                 "name": "mcpstudio_list_workspaces",
                 "description": "List project workspaces approved for isolated MCP Studio managed sessions.",
@@ -593,6 +596,55 @@ class GatewaySessionManager:
                 },
             },
         ]
+        if self.world_authoring is not None:
+            tools.append(
+                {
+                    "name": "mcpstudio_world_authoring_preview",
+                    "description": (
+                        "Validate a bounded Earth-616 NovaWorldProposal through a registered "
+                        "Pixi world-authoring workspace. Preview-only: does not mutate Earth state "
+                        "or promote assets."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "workspace": {"type": "string", "minLength": 1},
+                            "proposal": {"type": "object"},
+                            "providers": {
+                                "type": "array",
+                                "items": {"type": "object"},
+                                "default": [],
+                            },
+                        },
+                        "required": ["workspace", "proposal"],
+                        "additionalProperties": False,
+                    },
+                }
+            )
+            tools.append(
+                {
+                    "name": "mcpstudio_world_authoring_audit",
+                    "description": (
+                        "Persist bounded Earth-616 visual-authoring lifecycle evidence into the "
+                        "HIRDA audit log. Audit-only: does not mutate Earth state or promote assets."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "workspace": {"type": "string", "minLength": 1},
+                            "events": {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": 100,
+                                "items": {"type": "object"},
+                            },
+                        },
+                        "required": ["workspace", "events"],
+                        "additionalProperties": False,
+                    },
+                }
+            )
+        return tools
 
     @staticmethod
     def _jsonrpc_tool_response(request_id: Any, payload: Any, *, is_error: bool = False) -> Response:
@@ -1685,6 +1737,90 @@ class GatewaySessionManager:
                     }
                 except CapsuleNotFound as exc:
                     raise ManagedSessionError("capsule not found") from exc
+        if name == "mcpstudio_world_authoring_audit":
+            if not self.world_authoring:
+                raise WorldAuthoringError("HIRDA Earth world authoring integration is unavailable")
+            workspace_selector = str(args.get("workspace") or "")
+            target = await self.world_authoring.resolve_workspace(workspace_selector)
+            raw_events = args.get("events")
+            if not isinstance(raw_events, list):
+                raise WorldAuthoringError("events must be an array")
+            events = self.world_authoring.validate_audit_events(
+                [dict(event) if isinstance(event, dict) else event for event in raw_events]
+            )
+            for event in events:
+                await self.db.add_audit(
+                    f"world_authoring.{event['kind']}",
+                    actor="chatgpt/mcp",
+                    target_type="managed_workspace",
+                    target_id=str(target.get("key") or workspace_selector),
+                    data={
+                        **event,
+                        "preview_only": True,
+                        "world_authority_changed": False,
+                    },
+                )
+            return {
+                "workspace": {
+                    "key": target.get("key"),
+                    "name": target.get("name"),
+                    "project_path": target.get("project_path"),
+                },
+                "accepted": len(events),
+                "audit_only": True,
+                "world_authority_changed": False,
+                "asset_promoted_by_hirda": False,
+            }
+        if name == "mcpstudio_world_authoring_preview":
+            if not self.world_authoring:
+                raise WorldAuthoringError("HIRDA Earth world authoring integration is unavailable")
+            raw_providers = args.get("providers") or []
+            if not isinstance(raw_providers, list) or any(
+                not isinstance(provider, dict) for provider in raw_providers
+            ):
+                raise WorldAuthoringError("providers must be an array of objects")
+            proposal = args.get("proposal")
+            if not isinstance(proposal, dict):
+                raise WorldAuthoringError("proposal must be an object")
+            result = await self.world_authoring.preview(
+                workspace=str(args.get("workspace") or ""),
+                proposal=proposal,
+                providers=[dict(provider) for provider in raw_providers],
+            )
+            proposal_fingerprint = hashlib.sha256(
+                json.dumps(
+                    proposal,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            validation = (
+                result.get("result", {}).get("validation", {})
+                if isinstance(result.get("result"), dict)
+                else {}
+            )
+            await self.db.add_audit(
+                "world_authoring.preview",
+                actor="chatgpt/mcp",
+                target_type="managed_workspace",
+                target_id=str(args.get("workspace") or ""),
+                outcome="success" if validation.get("valid") is not False else "rejected",
+                data={
+                    "proposal_id": proposal.get("proposalId"),
+                    "proposal_kind": proposal.get("kind"),
+                    "proposal_fingerprint": proposal_fingerprint,
+                    "requires_approval": validation.get("requiresApproval"),
+                    "valid": validation.get("valid"),
+                    "preview_only": True,
+                    "world_authority_changed": False,
+                    "asset_promoted": False,
+                },
+            )
+            return {
+                **result,
+                "proposal_fingerprint": proposal_fingerprint,
+            }
         if name.startswith("mcpstudio_graft_"):
             if not self.graft:
                 raise GraftError("HIRDA Graft integration is unavailable")
@@ -2211,7 +2347,7 @@ class GatewaySessionManager:
                 result = await self._handle_management_tool(gateway_session_id, tool_name, tool_args)
                 session = await self.db.get_gateway_session(gateway_session_id)
                 return local_tool_response(result)
-            except (ManagedSessionError, ManagedSessionConflict, WorkspaceNotAllowed, GraftError, KeyError) as exc:
+            except (ManagedSessionError, ManagedSessionConflict, WorkspaceNotAllowed, GraftError, WorldAuthoringError, KeyError) as exc:
                 return local_tool_response({"error": str(exc)}, is_error=True)
 
         if request.method == "POST" and rpc_method == "tools/call" and self.managed_sessions and self.managed_sessions.enabled:

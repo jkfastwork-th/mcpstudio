@@ -36,6 +36,7 @@ _EXECUTE_TOOLS = {
     "activate_project", "herdr_prompt_agent",
     "mcpstudio_use_workspace", "mcpstudio_create_session", "mcpstudio_use_session",
     "mcpstudio_handoff_session", "mcpstudio_accept_handoff", "mcpstudio_report_context_usage",
+    "mcpstudio_world_authoring_preview", "mcpstudio_world_authoring_audit",
     "mcpstudio_close_session", "mcpstudio_detach_session",
     "mcpstudio_set_lane_state", "mcpstudio_approve_capsule_handoff",
     "fern_inbox_claim", "fern_reply_submit", "fern_interjection_decide",

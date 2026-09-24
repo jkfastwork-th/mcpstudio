@@ -45,6 +45,7 @@ from .reflex_metrics import ReflexMetrics
 from .action_adapter import evaluate_action_envelope
 from .action_registry import ActionProviderRegistryError, build_action_provider_registry
 from .cognitive_router import CognitiveRouter, CognitiveRouterError
+from .world_authoring import WorldAuthoringManager
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -66,7 +67,19 @@ connectivity = ConnectivityManager(settings, db)
 oauth = OAuthManager(settings, db)
 managed_sessions = ManagedSessionManager(settings, db)
 graft = GraftManager(settings, db)
-gateway_sessions = GatewaySessionManager(settings, db, oauth, managed_sessions, graft, capsules)
+world_authoring = WorldAuthoringManager(
+    managed_sessions,
+    validator_url=os.environ.get("HIRDA_EARTH_WORLD_VALIDATOR_URL"),
+)
+gateway_sessions = GatewaySessionManager(
+    settings,
+    db,
+    oauth,
+    managed_sessions,
+    graft,
+    capsules,
+    world_authoring,
+)
 operations = OperationsManager(settings, db)
 observability = ObservabilityManager(settings, db)
 computer = ComputerUseManager(settings.studio, db)
