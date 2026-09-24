@@ -795,12 +795,14 @@ html,body{max-width:100%;overflow-x:hidden}
 .capsule-lane{position:relative;z-index:2;display:grid;grid-template-columns:155px minmax(0,1fr) 92px;gap:14px;align-items:center;min-height:104px;padding:14px 18px;border-radius:15px;border:1px solid;overflow:visible}
 .capsule-lane.claude{background:linear-gradient(90deg,var(--capsule-claude-soft),#fffaf7);border-color:#ffd1ba}.capsule-lane.codex{background:linear-gradient(90deg,var(--capsule-codex-soft),#f8fffb);border-color:#bcebd7}.capsule-lane.hermes{background:linear-gradient(90deg,var(--capsule-hermes-soft),#fbf9ff);border-color:#d9c8ff}
 .lane-agent{display:flex;gap:10px;align-items:center}
-.lane-agent-icon,.agent-runtime-icon{width:40px;height:40px;border-radius:11px;display:grid;place-items:center;overflow:hidden;background:#fff;border:1px solid #d0d5dd;box-shadow:0 5px 14px rgba(16,24,40,.10)}
-.agent-brand-image{display:block;width:25px;height:25px;object-fit:contain}
+.lane-agent-icon,.agent-runtime-icon{width:40px;height:40px;border-radius:11px;display:grid;place-items:center;overflow:hidden;border:1px solid transparent;box-shadow:0 5px 14px rgba(16,24,40,.10)}
+.agent-brand-image{display:block;object-fit:contain}
+.claude .lane-agent-icon,.agent-runtime-card.claude .agent-runtime-icon{background:#d97757;border-color:#c86447}
+.claude .agent-brand-image{width:25px;height:25px}
 .codex .lane-agent-icon,.agent-runtime-card.codex .agent-runtime-icon{background:#000;border-color:#000}
 .codex .agent-brand-image{width:27px;height:27px}
-.hermes .lane-agent-icon,.agent-runtime-card.hermes .agent-runtime-icon{background:#fff}
-.hermes .agent-brand-image{width:100%;height:100%;object-fit:cover}
+.hermes .lane-agent-icon,.agent-runtime-card.hermes .agent-runtime-icon{background:#ffd700;border-color:#cd7f32;padding:4px}
+.hermes .agent-brand-image{width:100%;height:100%;object-fit:cover;border-radius:7px}
 .lane-agent strong{display:block;font-size:15px}.lane-agent small{color:#667085}
 .lane-track{display:grid;grid-template-columns:repeat(5,1fr);align-items:start;position:relative}.lane-track:before{content:"";position:absolute;left:9%;right:9%;top:13px;height:2px;background:currentColor;opacity:.35}
 .capsule-stage{position:relative;display:grid;justify-items:center;gap:6px;color:#667085;z-index:1}.capsule-stage .stage-node{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;background:#fff;border:2px solid currentColor;font-size:10px;font-weight:700;box-shadow:0 0 0 4px rgba(255,255,255,.72)}
