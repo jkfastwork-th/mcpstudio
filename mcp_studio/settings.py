@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ipaddress
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -180,6 +182,23 @@ class StudioConfig:
     # secrets are referenced through env/token files and never embedded here.
     machine_local_id: str = "openclaw"
     machine_registry: list[dict[str, Any]] = field(default_factory=list)
+    machine_enrollment_enabled: bool = False
+    machine_enrollment_state_path: str = "data/machine-enrollment.json"
+    machine_enrollment_agent_port: int = 8765
+    machine_enrollment_probe_timeout_seconds: float = 2.0
+    machine_enrollment_discovery_interval_seconds: float = 60.0
+    machine_enrollment_allowed_cidrs: list[str] = field(
+        default_factory=lambda: ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]
+    )
+    machine_enrollment_default_policy: dict[str, Any] = field(
+        default_factory=lambda: {
+            "read": True,
+            "write": False,
+            "execute": False,
+            "destructive": False,
+            "fail_closed_unknown": True,
+        }
+    )
 
     # HCR cognitive fabric. Routing can be exposed in shadow/plan mode without
     # permitting HIRDA to dispatch prompts. Execution is a separate opt-in gate
@@ -458,6 +477,27 @@ def load_settings(path: str | Path) -> Settings:
             raise ValueError("managed_session_cutover_enabled=true requires managed_session_require_binding_for_tools=true")
         if not studio.gateway_session_enabled:
             raise ValueError("managed_session_cutover_enabled=true requires gateway_session_enabled=true")
+    if studio.machine_enrollment_enabled:
+        if not (1024 <= int(studio.machine_enrollment_agent_port) <= 65535):
+            raise ValueError("studio.machine_enrollment_agent_port must be between 1024 and 65535")
+        if float(studio.machine_enrollment_probe_timeout_seconds) <= 0:
+            raise ValueError("studio.machine_enrollment_probe_timeout_seconds must be > 0")
+        if float(studio.machine_enrollment_discovery_interval_seconds) < 10:
+            raise ValueError("studio.machine_enrollment_discovery_interval_seconds must be >= 10")
+        if not studio.machine_enrollment_allowed_cidrs:
+            raise ValueError("studio.machine_enrollment_allowed_cidrs must not be empty")
+        for value in studio.machine_enrollment_allowed_cidrs:
+            try:
+                ipaddress.ip_network(str(value), strict=False)
+            except ValueError as exc:
+                raise ValueError(f"invalid machine enrollment CIDR: {value}") from exc
+        policy = studio.machine_enrollment_default_policy
+        if not isinstance(policy, dict):
+            raise ValueError("studio.machine_enrollment_default_policy must be an object")
+        for key in ("read", "write", "execute", "destructive", "fail_closed_unknown"):
+            if key in policy and not isinstance(policy[key], bool):
+                raise ValueError(f"studio.machine_enrollment_default_policy.{key} must be boolean")
+
     if studio.computer_use_enabled:
         for label, host in (
             ("computer_vnc_host", studio.computer_vnc_host),

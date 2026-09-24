@@ -33,6 +33,7 @@ from .world_authoring import WorldAuthoringManager, WorldAuthoringError
 from .integrations import IntegrationManager, IntegrationError
 from .machine_router import MachineCapabilityRouter
 from .machine_registry import MachineRegistryError
+from .machine_enrollment import MachineEnrollmentManager, MachineEnrollmentError
 
 
 CONTROL_TOOL_NAMES = (
@@ -82,6 +83,7 @@ class GatewaySessionManager:
         world_authoring: WorldAuthoringManager | None = None,
         integrations: IntegrationManager | None = None,
         machine_router: MachineCapabilityRouter | None = None,
+        machine_enrollment: MachineEnrollmentManager | None = None,
     ):
         self.settings = settings
         self.db = db
@@ -92,6 +94,7 @@ class GatewaySessionManager:
         self.world_authoring = world_authoring
         self.integrations = integrations
         self.machine_router = machine_router
+        self.machine_enrollment = machine_enrollment
 
     def authenticate(self, request: Request) -> tuple[str, str, str, str, str]:
         """Authenticate and derive a stable client identity.
@@ -313,6 +316,57 @@ class GatewaySessionManager:
                 "name": "mcpstudio_list_machines",
                 "description": "List HIRDA machines, their capabilities, providers, and live readiness.",
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            {
+                "name": "mcpstudio_list_machine_enrollments",
+                "description": "List pending, approved, and rejected HIRDA machine enrollment candidates.",
+                "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            {
+                "name": "mcpstudio_discover_machines",
+                "description": "Scan online Tailscale peers for HIRDA Machine Agents. Unknown nodes remain pending and receive no authority.",
+                "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            {
+                "name": "mcpstudio_approve_machine",
+                "description": "Explicitly approve one pending machine with workspace mappings and a restrictive per-machine policy.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "machine": {"type": "string", "minLength": 1},
+                        "name": {"type": "string"},
+                        "workspace_map": {
+                            "type": "object",
+                            "additionalProperties": {"type": "string"},
+                        },
+                        "policy": {
+                            "type": "object",
+                            "properties": {
+                                "read": {"type": "boolean"},
+                                "write": {"type": "boolean"},
+                                "execute": {"type": "boolean"},
+                                "destructive": {"type": "boolean"},
+                                "fail_closed_unknown": {"type": "boolean"},
+                            },
+                            "additionalProperties": False,
+                        },
+                    },
+                    "required": ["machine"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "mcpstudio_reject_machine",
+                "description": "Reject one pending machine enrollment candidate without granting any capability.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "machine": {"type": "string", "minLength": 1},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["machine"],
+                    "additionalProperties": False,
+                },
             },
             {
                 "name": "mcpstudio_bind_machine",
@@ -1860,6 +1914,41 @@ class GatewaySessionManager:
             if self.machine_router is None:
                 raise ManagedSessionError("machine capability router is unavailable")
             return await self.machine_router.machine_snapshot()
+        if name == "mcpstudio_list_machine_enrollments":
+            if self.machine_enrollment is None:
+                raise ManagedSessionError("machine enrollment is unavailable")
+            return self.machine_enrollment.snapshot()
+        if name == "mcpstudio_discover_machines":
+            if self.machine_enrollment is None:
+                raise ManagedSessionError("machine enrollment is unavailable")
+            try:
+                return await self.machine_enrollment.discover()
+            except MachineEnrollmentError as exc:
+                raise ManagedSessionError(str(exc)) from exc
+        if name == "mcpstudio_approve_machine":
+            if self.machine_enrollment is None:
+                raise ManagedSessionError("machine enrollment is unavailable")
+            try:
+                return self.machine_enrollment.approve(
+                    str(args.get("machine") or ""),
+                    name=(str(args.get("name")) if args.get("name") is not None else None),
+                    workspace_map=(dict(args.get("workspace_map")) if isinstance(args.get("workspace_map"), dict) else {}),
+                    policy=(dict(args.get("policy")) if isinstance(args.get("policy"), dict) else {}),
+                    actor="chatgpt/mcp",
+                )
+            except (KeyError, MachineEnrollmentError, MachineRegistryError) as exc:
+                raise ManagedSessionError(str(exc)) from exc
+        if name == "mcpstudio_reject_machine":
+            if self.machine_enrollment is None:
+                raise ManagedSessionError("machine enrollment is unavailable")
+            try:
+                return self.machine_enrollment.reject(
+                    str(args.get("machine") or ""),
+                    reason=str(args.get("reason") or "operator-rejected"),
+                    actor="chatgpt/mcp",
+                )
+            except KeyError as exc:
+                raise ManagedSessionError(str(exc)) from exc
         if name == "mcpstudio_bind_machine":
             if self.machine_router is None:
                 raise ManagedSessionError("machine capability router is unavailable")

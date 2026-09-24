@@ -158,6 +158,21 @@ studio:
   #    workspace_map:
   #      example: C:\Users\me\HIRDA\workspaces\example
 
+  # Safe auto-onboarding: HIRDA scans online Tailnet peers for a machine agent,
+  # records unknown nodes as pending, and requires explicit approval.
+  #machine_enrollment_enabled: false
+  #machine_enrollment_state_path: data/machine-enrollment.json
+  #machine_enrollment_agent_port: 8765
+  #machine_enrollment_probe_timeout_seconds: 2.0
+  #machine_enrollment_discovery_interval_seconds: 60.0
+  #machine_enrollment_allowed_cidrs: [100.64.0.0/10, "fd7a:115c:a1e0::/48"]
+  #machine_enrollment_default_policy:
+  #  read: true
+  #  write: false
+  #  execute: false
+  #  destructive: false
+  #  fail_closed_unknown: true
+
   # HCR cognitive fabric. Plan/shadow mode and execution are separate gates.
   #cognitive_router_enabled: false
   #cognitive_router_execute_enabled: false

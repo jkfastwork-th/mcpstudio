@@ -27,7 +27,7 @@ from .agent_runtimes import AgentRuntimeInventory
 from .models import (
     SessionCreate, SessionHeartbeat, WorkerBind, WorkerHeartbeat, WorkerStatePatch,
     WorkSubmit, WorkFinish, WorkFail, WorkDetach, AlertAcknowledge, RetryDispatch, FaultInject, BatchDispatch,
-    SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate, ManagedSessionMachineUpdate,
+    SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate, ManagedSessionMachineUpdate, MachineEnrollmentApprove, MachineEnrollmentReject,
     GraftConfigureRequest, GraftQueryRequest, GraftRollbackRequest, ComputerRepairRequest, ManagedGatewayAttach, GatewayContextUsageReport, SessionHandoffPrepareRequest,
     CapsuleCreate, CapsuleStageUpdate, CapsuleHandoff, CapsuleHandoffAck, CapsuleContractUpdate,
     CapsuleHandoffValidation, CapsuleHandoffApproval, CapsuleHandoffCompletion, LaneStateUpdate, CapsuleComplete,
@@ -44,6 +44,7 @@ from .computer import ComputerUseManager
 from .graft import GraftManager, GraftError
 from .integrations import build_integration_manager
 from .machine_registry import MachineRegistry, MachineRegistryError
+from .machine_enrollment import MachineEnrollmentManager, MachineEnrollmentError
 from .machine_router import MachineCapabilityRouter
 from .reflex_metrics import ReflexMetrics
 from .action_adapter import evaluate_action_envelope
@@ -82,6 +83,9 @@ world_authoring = WorldAuthoringManager(
 )
 computer = ComputerUseManager(settings.studio, db)
 machine_registry = MachineRegistry(settings.studio, base_dir=settings.config_path.parent)
+machine_enrollment = MachineEnrollmentManager(
+    settings.studio, machine_registry, base_dir=settings.config_path.parent
+)
 machine_router = MachineCapabilityRouter(machine_registry, integration_manager, computer)
 gateway_sessions = GatewaySessionManager(
     settings,
@@ -93,6 +97,7 @@ gateway_sessions = GatewaySessionManager(
     world_authoring,
     integration_manager,
     machine_router,
+    machine_enrollment,
 )
 operations = OperationsManager(settings, db)
 observability = ObservabilityManager(settings, db)
@@ -108,6 +113,7 @@ async def lifespan(app: FastAPI):
     # Integrations self-validate and self-certify at startup. Failures are
     # recorded in lifecycle state and never prevent the HIRDA control plane from starting.
     await integration_manager.snapshot(reconcile=True)
+    await machine_enrollment.start()
     await workers.start()
     await health.start()
     await herdr.start()
@@ -120,6 +126,7 @@ async def lifespan(app: FastAPI):
     await db.add_audit("studio.start", actor="system", data={"version": "0.9.10-m6.2.5", "production_mode": settings.studio.production_mode})
     yield
     await db.add_audit("studio.stop", actor="system", data={"version": "0.9.10-m6.2.5"})
+    await machine_enrollment.stop()
     await integration_manager.close()
     await connectivity.stop()
     await execution.stop()
@@ -942,6 +949,43 @@ async def managed_session_resume(session_id: str):
 @app.get("/api/machines")
 async def machine_registry_status():
     return await machine_router.machine_snapshot()
+
+
+@app.get("/api/machines/enrollments")
+async def machine_enrollment_status():
+    return machine_enrollment.snapshot()
+
+
+@app.post("/api/machines/discover")
+async def machine_enrollment_discover():
+    try:
+        return await machine_enrollment.discover()
+    except MachineEnrollmentError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.post("/api/machines/enrollments/{machine_id}/approve")
+async def machine_enrollment_approve(machine_id: str, payload: MachineEnrollmentApprove):
+    try:
+        return machine_enrollment.approve(
+            machine_id,
+            name=payload.name,
+            workspace_map=payload.workspace_map,
+            policy=payload.policy,
+            actor="ui/api",
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown pending machine")
+    except (MachineEnrollmentError, MachineRegistryError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.post("/api/machines/enrollments/{machine_id}/reject")
+async def machine_enrollment_reject(machine_id: str, payload: MachineEnrollmentReject):
+    try:
+        return machine_enrollment.reject(machine_id, reason=payload.reason, actor="ui/api")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown pending machine")
 
 
 @app.get("/api/machines/{machine_id}/policy")

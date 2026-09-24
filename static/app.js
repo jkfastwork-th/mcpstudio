@@ -119,6 +119,12 @@ const I18N_TH={
   'Computer':'คอมพิวเตอร์',
   'Machine':'เครื่อง',
   'Machines':'เครื่อง',
+  'MACHINE ENROLLMENT':'การเพิ่มเครื่อง',
+  'Pending machines':'เครื่องที่รออนุมัติ',
+  'Discover now':'ค้นหาเดี๋ยวนี้',
+  'Tailnet discovery is automatic. Unknown agents stay pending until approved.':'ระบบค้นหา Tailnet อัตโนมัติ เครื่องใหม่จะรออนุมัติก่อนใช้งาน',
+  'Approve':'อนุมัติ',
+  'Reject':'ปฏิเสธ',
   'Capabilities':'ความสามารถ',
   'Machine policy':'นโยบายเครื่อง',
   'Effective permissions':'สิทธิ์ที่ใช้ได้จริง',
@@ -1429,6 +1435,116 @@ function machineCell(session,data){
     +'</div>';
 }
 
+function renderMachineEnrollment(data){
+  const payload=data.machineEnrollmentsData||{};
+  const panel=document.getElementById('machineEnrollmentPanel');
+  const summary=document.getElementById('machineEnrollmentSummary');
+  const discover=document.getElementById('machineDiscoverBtn');
+  if(!panel||!summary)return;
+  const pending=payload.pending||[];
+  const approved=payload.approved||[];
+  const rejected=payload.rejected||[];
+  const machines=data.machinesData||{};
+  summary.innerHTML='<span class="mini-stat '+(pending.length?'warning':'primary')+'">Pending <strong>'+pending.length+'</strong></span>'
+    +'<span class="mini-stat">Registered <strong>'+(machines.machine_count||0)+'</strong></span>'
+    +'<span class="mini-stat">Auto scan <strong>'+(payload.enabled?'ON':'OFF')+'</strong></span>'
+    +'<span class="mini-stat">Interval <strong>'+esc(payload.discovery_interval_seconds||'—')+'s</strong></span>';
+  if(discover)discover.disabled=!payload.enabled;
+  if(!payload.enabled){
+    panel.innerHTML='<div class="empty">Machine enrollment is disabled in HIRDA config.</div>';
+    return;
+  }
+  if(payload.last_error){
+    panel.innerHTML='<div class="machine-enrollment-error">'+esc(payload.last_error)+'</div>';
+    return;
+  }
+  if(!pending.length){
+    panel.innerHTML='<div class="empty good">No machines are waiting for approval.'+(payload.last_discovery_at?' Last scan '+esc(ago(payload.last_discovery_at))+'.':'')+'</div>';
+    return;
+  }
+  panel.innerHTML='<div class="machine-enrollment-list">'+pending.map(candidate=>{
+    const caps=(candidate.capabilities||[]).map(x=>'<span>'+esc(x)+'</span>').join('');
+    const fingerprint=String(candidate.fingerprint||'');
+    return '<div class="machine-enrollment-row">'
+      +'<div class="machine-enrollment-identity"><span class="machine-health online"><i></i>'+esc(candidate.hostname||candidate.machine_id)+'</span><small>'+esc(candidate.machine_id)+' · '+esc(candidate.platform||'unknown')+' · '+esc(candidate.architecture||'unknown')+'</small><code>'+esc(candidate.address||'—')+'</code></div>'
+      +'<div class="machine-enrollment-caps"><span class="machine-enrollment-label">Capabilities</span><div>'+caps+'</div><small>Agent '+esc(candidate.agent_version||'—')+' · '+esc(fingerprint?fingerprint.slice(0,12):'no fingerprint')+'</small></div>'
+      +'<div class="machine-enrollment-seen"><span>Last seen</span><strong>'+esc(ago(candidate.last_seen_at))+'</strong><small>'+esc(candidate.peer_hostname||'Tailnet peer')+'</small></div>'
+      +'<div class="machine-enrollment-actions"><button class="button small" data-machine-approve="'+esc(candidate.machine_id)+'" type="button">Approve</button><button class="button danger small" data-machine-reject="'+esc(candidate.machine_id)+'" type="button">Reject</button></div>'
+      +'</div>';
+  }).join('')+'</div>';
+}
+
+function parseWorkspaceMappings(raw){
+  const result={};
+  String(raw||'').split(/\r?\n/).map(line=>line.trim()).filter(Boolean).forEach(line=>{
+    const at=line.indexOf('=');
+    if(at<=0||at===line.length-1)throw new Error('Workspace mapping must use key=absolute-path, one per line.');
+    const key=line.slice(0,at).trim();
+    const path=line.slice(at+1).trim();
+    if(!key||!path)throw new Error('Workspace mapping must use key=absolute-path, one per line.');
+    result[key]=path;
+  });
+  return result;
+}
+
+async function approveMachineEnrollment(machineId){
+  const candidate=(latestData?.machineEnrollmentsData?.pending||[]).find(item=>item.machine_id===machineId);
+  if(!candidate)throw new Error('Pending machine is no longer available.');
+  const result=await openAppDialog({
+    title:'Approve machine',
+    message:'Approve '+(candidate.hostname||machineId)+' as a HIRDA node. New machines default to read-only. Workspace mappings are required before sessions can bind to that workspace.',
+    icon:'✓',
+    tone:'info',
+    confirmText:'Approve',
+    fields:[
+      {name:'name',label:'Display name',value:candidate.hostname||machineId,required:true},
+      {name:'policy_profile',label:'Permission profile',type:'select',value:'readonly',options:[
+        {value:'readonly',label:'Read only'},
+        {value:'readwrite',label:'Read + write'},
+        {value:'execute',label:'Read + write + execute'}
+      ]},
+      {name:'workspace_map',label:'Workspace mappings',type:'textarea',placeholder:'mcp-studio=/absolute/path/on/this/machine'}
+    ]
+  });
+  if(!result.confirmed)return;
+  const profiles={
+    readonly:{read:true,write:false,execute:false,destructive:false,fail_closed_unknown:true},
+    readwrite:{read:true,write:true,execute:false,destructive:false,fail_closed_unknown:true},
+    execute:{read:true,write:true,execute:true,destructive:false,fail_closed_unknown:true},
+  };
+  await sendJson('/api/machines/enrollments/'+encodeURIComponent(machineId)+'/approve',{
+    name:result.values.name,
+    workspace_map:parseWorkspaceMappings(result.values.workspace_map),
+    policy:profiles[result.values.policy_profile]||profiles.readonly,
+  });
+  await load();
+}
+
+async function rejectMachineEnrollment(machineId){
+  const result=await openAppDialog({
+    title:'Reject machine',
+    message:'This Tailnet machine will remain unable to receive HIRDA work.',
+    icon:'!',
+    tone:'danger',
+    confirmText:'Reject',
+    fields:[{name:'reason',label:'Reason',value:'operator-rejected'}]
+  });
+  if(!result.confirmed)return;
+  await sendJson('/api/machines/enrollments/'+encodeURIComponent(machineId)+'/reject',{reason:result.values.reason||'operator-rejected'});
+  await load();
+}
+
+async function discoverMachinesNow(){
+  const button=document.getElementById('machineDiscoverBtn');
+  if(button)button.disabled=true;
+  try{
+    await sendJson('/api/machines/discover');
+    await load();
+  }finally{
+    if(button)button.disabled=false;
+  }
+}
+
 function renderManagedSessions(data){
   const managed=data.managedSessions||{sessions:[],status:{}}, workspaces=data.managedWorkspaces||{workspaces:[]};
   const items=managed.sessions||[], ws=workspaces.workspaces||[], status=managed.status||{};
@@ -1566,13 +1682,13 @@ function renderDebug(data){
 
 async function load(){
   try{
-    const [status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,machinesData,openaiCompat,operationsData,observabilityData,alertsData,auditData,events,capsulesData,agentRuntimesData,laneStatesData,reflexMetricsData]=await Promise.all([
-      getJson('/api/status'),getJson('/api/workers'),getJson('/api/work?limit=100'),getJson('/api/sessions'),getJson('/api/gateway/sessions'),getJson('/api/managed/sessions'),getJson('/api/managed/workspaces'),getJson('/api/machines'),getJson('/api/openai/compatibility'),getJson('/api/operations'),getJson('/api/observability'),getJson('/api/alerts?status=open&limit=20'),getJson('/api/audit?limit=30'),getJson('/api/events?limit=40'),getJson('/api/capsules?limit=100'),getJson('/api/agents/runtimes'),getJson('/api/lanes'),getJson(`/api/reflex/metrics?window=${encodeURIComponent(reflexWindow)}&recent=20`).catch(()=>null)
+    const [status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,machinesData,machineEnrollmentsData,openaiCompat,operationsData,observabilityData,alertsData,auditData,events,capsulesData,agentRuntimesData,laneStatesData,reflexMetricsData]=await Promise.all([
+      getJson('/api/status'),getJson('/api/workers'),getJson('/api/work?limit=100'),getJson('/api/sessions'),getJson('/api/gateway/sessions'),getJson('/api/managed/sessions'),getJson('/api/managed/workspaces'),getJson('/api/machines'),getJson('/api/machines/enrollments').catch(()=>({enabled:false,pending:[],approved:[],rejected:[],pending_count:0})),getJson('/api/openai/compatibility'),getJson('/api/operations'),getJson('/api/observability'),getJson('/api/alerts?status=open&limit=20'),getJson('/api/audit?limit=30'),getJson('/api/events?limit=40'),getJson('/api/capsules?limit=100'),getJson('/api/agents/runtimes'),getJson('/api/lanes'),getJson(`/api/reflex/metrics?window=${encodeURIComponent(reflexWindow)}&recent=20`).catch(()=>null)
     ]);
-    latestData={status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,machinesData,openaiCompat,operationsData,observabilityData,alertsData,auditData,events,capsulesData,agentRuntimesData,laneStatesData,reflexMetricsData};
+    latestData={status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,machinesData,machineEnrollmentsData,openaiCompat,operationsData,observabilityData,alertsData,auditData,events,capsulesData,agentRuntimesData,laneStatesData,reflexMetricsData};
     const studio=document.getElementById('studioStatus'); studio.className=`pill ${status.studio.status}`; studio.textContent=String(status.studio.status||'unknown').toUpperCase();
     document.getElementById('lastUpdated').textContent=`Updated ${new Date().toLocaleTimeString()} · ${status.studio.version}`;
-    renderOverview(latestData); renderReflexMetrics(latestData); renderCapsuleLedger(latestData); renderManagedSessions(latestData); renderSessions(latestData); renderWorkspaces(latestData); renderWorkers(latestData); renderTunnels(latestData); renderReliability(latestData); renderActivity(latestData); renderDebug(latestData); captureAndTranslateText(document);
+    renderOverview(latestData); renderReflexMetrics(latestData); renderCapsuleLedger(latestData); renderMachineEnrollment(latestData); renderManagedSessions(latestData); renderSessions(latestData); renderWorkspaces(latestData); renderWorkers(latestData); renderTunnels(latestData); renderReliability(latestData); renderActivity(latestData); renderDebug(latestData); captureAndTranslateText(document);
   }catch(err){
     const studio=document.getElementById('studioStatus'); studio.className='pill down'; studio.textContent='UI ERROR';
     document.getElementById('lastUpdated').textContent=err.message;
@@ -2161,6 +2277,15 @@ document.addEventListener('click',function(event){
 
 window.addEventListener('hashchange',function(){if(location.hash==='#computer')refreshComputerView();});
 if((location.hash||'#home')==='#computer')setTimeout(refreshComputerView,0);
+
+document.addEventListener('click',function(event){
+  const discover=event.target.closest&&event.target.closest('#machineDiscoverBtn');
+  if(discover){uiAction(discoverMachinesNow);return;}
+  const approve=event.target.closest&&event.target.closest('[data-machine-approve]');
+  if(approve){uiAction(()=>approveMachineEnrollment(approve.dataset.machineApprove));return;}
+  const reject=event.target.closest&&event.target.closest('[data-machine-reject]');
+  if(reject){uiAction(()=>rejectMachineEnrollment(reject.dataset.machineReject));return;}
+});
 
 /* Reference settings proxies keep the compact topbar faithful without removing controls. */
 document.addEventListener('click',function(event){

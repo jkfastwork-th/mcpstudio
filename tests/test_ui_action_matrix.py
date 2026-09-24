@@ -37,6 +37,7 @@ STATIC_DIRECT_HANDLERS = {
     "computerReconnectBtn": "target.id==='computerReconnectBtn'",
     "computerDisconnectBtn": "target.id==='computerDisconnectBtn'",
     "computerFullscreenBtn": "target.id==='computerFullscreenBtn'",
+    "machineDiscoverBtn": "closest('#machineDiscoverBtn')",
 }
 
 STATIC_DATA_HANDLERS = {
@@ -64,6 +65,8 @@ DYNAMIC_ACTION_HANDLERS = {
     "data-gateway-detach": "closest('[data-gateway-detach]')",
     "data-tunnel-session": "closest('[data-tunnel-session]')",
     "data-computer-session": "closest('[data-computer-session]')",
+    "data-machine-approve": "closest('[data-machine-approve]')",
+    "data-machine-reject": "closest('[data-machine-reject]')",
 }
 
 

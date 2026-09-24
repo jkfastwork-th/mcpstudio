@@ -166,6 +166,21 @@ class MachineRegistry:
             raise MachineRegistryError(f"machine disabled: {key}")
         return machine
 
+    def contains(self, machine_id: str) -> bool:
+        return str(machine_id or "").strip() in self._machines
+
+    def register_machine(
+        self, raw: dict[str, Any], *, source: str = "runtime", replace: bool = False
+    ) -> MachineDescriptor:
+        machine = self._parse(raw)
+        if machine.machine_id in self._machines and not replace:
+            raise MachineRegistryError(f"machine already registered: {machine.machine_id}")
+        metadata = dict(machine.metadata)
+        metadata.setdefault("registry_source", source)
+        machine.metadata = metadata
+        self._machines[machine.machine_id] = machine
+        return machine
+
     def list(self) -> list[MachineDescriptor]:
         return [self._machines[key] for key in sorted(self._machines)]
 

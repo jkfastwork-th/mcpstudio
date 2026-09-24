@@ -3777,3 +3777,22 @@ html[data-theme="dark"] .machine-provider-badge.down,html[data-theme="dark"] .ma
   .session-machine-detail{grid-template-columns:1fr}
   .session-machine-detail>div:last-child{grid-column:auto}
 }
+
+/* Machine enrollment / Tailnet onboarding */
+.machine-enrollment-card{margin:14px 0}
+.machine-enrollment-head{align-items:flex-start}
+.machine-enrollment-head p{margin:4px 0 0;color:var(--ref-muted,var(--muted));font-size:var(--fs-8)}
+.machine-enrollment-list{display:grid;gap:8px}
+.machine-enrollment-row{display:grid;grid-template-columns:minmax(180px,1.25fr) minmax(210px,1.4fr) minmax(110px,.7fr) auto;gap:14px;align-items:center;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2)}
+.machine-enrollment-identity,.machine-enrollment-caps,.machine-enrollment-seen{display:flex;min-width:0;flex-direction:column;align-items:flex-start;gap:4px}
+.machine-enrollment-identity small,.machine-enrollment-caps small,.machine-enrollment-seen small{color:var(--ref-muted,var(--muted));font-size:var(--fs-75)}
+.machine-enrollment-identity code{max-width:100%;overflow:hidden;text-overflow:ellipsis;color:var(--ref-muted,var(--muted));font-size:var(--fs-75)}
+.machine-enrollment-caps>div{display:flex;gap:4px;flex-wrap:wrap}
+.machine-enrollment-caps>div>span{padding:3px 6px;border:1px solid rgba(26,115,232,.22);border-radius:999px;background:rgba(26,115,232,.07);color:#185abc;font-size:var(--fs-75);font-weight:700}
+.machine-enrollment-label,.machine-enrollment-seen>span{color:var(--ref-muted,var(--muted));font-size:var(--fs-75);font-weight:800;text-transform:uppercase;letter-spacing:.05em}
+.machine-enrollment-actions{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap}
+.machine-enrollment-error{padding:10px 12px;border:1px solid rgba(234,67,53,.28);border-radius:8px;background:rgba(234,67,53,.08);color:#b3261e;font-size:var(--fs-8)}
+html[data-theme="dark"] .machine-enrollment-caps>div>span{border-color:rgba(138,180,248,.28);background:rgba(138,180,248,.08);color:#8ab4f8}
+html[data-theme="dark"] .machine-enrollment-error{color:#f28b82;border-color:rgba(242,139,130,.28);background:rgba(242,139,130,.07)}
+@media(max-width:1000px){.machine-enrollment-row{grid-template-columns:1fr 1fr}.machine-enrollment-actions{justify-content:flex-start}}
+@media(max-width:620px){.machine-enrollment-row{grid-template-columns:1fr}.machine-enrollment-head{gap:10px;flex-direction:column}.machine-enrollment-head .button{width:100%}}

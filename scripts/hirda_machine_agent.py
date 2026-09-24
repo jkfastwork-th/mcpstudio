@@ -4,8 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import re
 import shlex
+import socket
 import subprocess
 import sys
 import threading
@@ -219,6 +221,7 @@ class DesktopCommanderRelay:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "HIRDAMachineAgent/1"
+    agent_version = "1"
 
     def _json(self, status: int, payload: dict[str, Any]) -> None:
         raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -243,12 +246,32 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._json(401, {"ok": False, "error": "unauthorized"})
             return
-        if self.path != "/health":
+        relay = self.server.relay  # type: ignore[attr-defined]
+        if self.path not in {"/health", "/identity"}:
             self._json(404, {"ok": False, "error": "not_found"})
             return
-        relay = self.server.relay  # type: ignore[attr-defined]
         try:
             tools = relay.refresh_tools()
+            if self.path == "/identity":
+                self._json(
+                    200,
+                    {
+                        "schema": "hirda-machine-agent-v1",
+                        "machine_id": relay.machine_id,
+                        "hostname": socket.gethostname(),
+                        "platform": sys.platform,
+                        "architecture": platform.machine() or "unknown",
+                        "agent_version": self.agent_version,
+                        "capabilities": ["filesystem", "process"],
+                        "providers": {
+                            "desktop_commander": {
+                                "available": True,
+                                "tool_count": len(tools),
+                            }
+                        },
+                    },
+                )
+                return
             self._json(
                 200,
                 {

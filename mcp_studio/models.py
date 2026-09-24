@@ -182,6 +182,16 @@ class ManagedSessionMachineUpdate(BaseModel):
     machine_id: str = Field(min_length=1, max_length=120)
 
 
+class MachineEnrollmentApprove(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    workspace_map: dict[str, str] = Field(default_factory=dict)
+    policy: dict[str, bool] = Field(default_factory=dict)
+
+
+class MachineEnrollmentReject(BaseModel):
+    reason: str = Field(default="operator-rejected", min_length=1, max_length=500)
+
+
 class ManagedSessionPermissionsUpdate(BaseModel):
     read: bool | None = None
     write: bool | None = None
