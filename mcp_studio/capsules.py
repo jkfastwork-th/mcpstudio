@@ -548,7 +548,7 @@ class CapsuleService:
         )
 
         handoff_results: list[dict[str, Any]] = []
-        if auto_handoff and state in {"disabled", "emergency"}:
+        if auto_handoff and state in {"draining", "disabled", "emergency"}:
             handoff_results = await self.auto_handoff_from_lane(agent, reason=reason or state)
         return {
             "lane": current,
@@ -563,6 +563,54 @@ class CapsuleService:
         if source_agent == "hermes":
             return ("claude", "codex")
         return ("claude", "hermes")
+
+    @staticmethod
+    def _auto_target_context_fit(
+        capsule: dict[str, Any],
+        capability_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        profile_data = capsule.get("context_profile") or (
+            capsule.get("metadata") or {}
+        ).get("context_profile")
+        if not isinstance(profile_data, dict):
+            return {
+                "fit": False,
+                "reason": "capsule_context_profile_required",
+                "context_fit": {},
+            }
+        try:
+            profile = ContextProfile(
+                source_tokens=int(profile_data.get("source_tokens") or 0),
+                retained_tokens=int(profile_data.get("retained_tokens") or 0),
+            )
+            capability = ModelCapability(
+                provider=str(capability_data.get("provider") or ""),
+                model_id=str(capability_data.get("model_id") or ""),
+                context_window=int(capability_data.get("context_window") or 0),
+                max_output_tokens=int(capability_data.get("max_output_tokens") or 0),
+                system_prompt_tokens=int(
+                    capability_data.get("system_prompt_tokens") or 0
+                ),
+                tool_schema_tokens=int(
+                    capability_data.get("tool_schema_tokens") or 0
+                ),
+                safety_reserve_tokens=int(
+                    capability_data.get("safety_reserve_tokens") or 4096
+                ),
+                last_verified_at=capability_data.get("last_verified_at"),
+            )
+            fit = evaluate_context_fit(profile, capability)
+        except (TypeError, ValueError) as exc:
+            return {
+                "fit": False,
+                "reason": f"context_fit_invalid: {exc}",
+                "context_fit": {},
+            }
+        return {
+            "fit": bool(fit.get("fit")),
+            "reason": None if fit.get("fit") else "capsule_context_too_large",
+            "context_fit": fit,
+        }
 
     def _available_target_pane(
         self,
@@ -641,22 +689,83 @@ class CapsuleService:
                 results.append({"capsule_id": capsule_id, "status": "blocked", "reason": "capsule_pinned"})
                 continue
 
+            source_lane_state = str(
+                (lane_states.get(source_agent) or {}).get("state") or "normal"
+            )
+            current_stage = str(capsule.get("current_stage") or "agent_runtime")
+            await self.db.add_event(
+                "capsule.auto_handoff_started",
+                f"{capsule_id} automatic lane rollover started from {source_agent}",
+                severity="warning" if source_lane_state in {"disabled", "emergency"} else "info",
+                data={
+                    "capsule_id": capsule_id,
+                    "from_agent": source_agent,
+                    "source_lane_state": source_lane_state,
+                    "stage": current_stage,
+                    "portability": portability,
+                    "reason": reason,
+                },
+            )
+
             selected_agent = None
             selected_pane = None
             selected_capability = None
+            selected_fit: dict[str, Any] | None = None
+            candidate_evaluations: list[dict[str, Any]] = []
             capabilities = contract.get("target_capabilities") or {}
             for target in self._candidate_order(source_agent):
-                if str((lane_states.get(target) or {}).get("state") or "normal") != "normal":
+                target_state = str(
+                    (lane_states.get(target) or {}).get("state") or "normal"
+                )
+                if target_state != "normal":
+                    candidate_evaluations.append(
+                        {
+                            "agent": target,
+                            "eligible": False,
+                            "reason": f"lane_{target_state}",
+                        }
+                    )
                     continue
-                capability = capabilities.get(target) if isinstance(capabilities, dict) else None
+                capability = (
+                    capabilities.get(target)
+                    if isinstance(capabilities, dict)
+                    else None
+                )
                 if not isinstance(capability, dict):
+                    candidate_evaluations.append(
+                        {
+                            "agent": target,
+                            "eligible": False,
+                            "reason": "verified_target_capability_required",
+                        }
+                    )
                     continue
                 pane = self._available_target_pane(target, snapshot)
                 if pane is None:
+                    candidate_evaluations.append(
+                        {
+                            "agent": target,
+                            "eligible": False,
+                            "reason": "idle_target_pane_required",
+                        }
+                    )
+                    continue
+                fit_result = self._auto_target_context_fit(capsule, capability)
+                candidate_evaluations.append(
+                    {
+                        "agent": target,
+                        "pane_id": pane.get("pane_id"),
+                        "eligible": bool(fit_result.get("fit")),
+                        "reason": fit_result.get("reason"),
+                        "context_fit": fit_result.get("context_fit") or {},
+                    }
+                )
+                if not fit_result.get("fit"):
                     continue
                 selected_agent = target
                 selected_pane = pane
                 selected_capability = capability
+                selected_fit = dict(fit_result.get("context_fit") or {})
                 break
 
             if selected_agent is None or selected_pane is None or selected_capability is None:
@@ -667,10 +776,19 @@ class CapsuleService:
                     data={
                         "capsule_id": capsule_id,
                         "from_agent": source_agent,
+                        "source_lane_state": source_lane_state,
                         "reason": "no_compatible_target",
+                        "candidates": candidate_evaluations,
                     },
                 )
-                results.append({"capsule_id": capsule_id, "status": "blocked", "reason": "no_compatible_target"})
+                results.append(
+                    {
+                        "capsule_id": capsule_id,
+                        "status": "blocked",
+                        "reason": "no_compatible_target",
+                        "candidates": candidate_evaluations,
+                    }
+                )
                 continue
 
             handoff_metadata = {
@@ -680,13 +798,23 @@ class CapsuleService:
                 "approval_required": portability == "guarded",
                 "handoff_mode": f"{portability}_auto",
                 "contract": contract,
+                "auto_failover": {
+                    "source_lane_state": source_lane_state,
+                    "trigger_reason": reason,
+                    "source_stage": current_stage,
+                    "selected_target": selected_agent,
+                    "selected_pane": selected_pane.get("pane_id"),
+                    "candidate_evaluations": candidate_evaluations,
+                },
             }
             try:
                 state = await self.handoff(
                     capsule_id,
                     from_agent=source_agent,
                     to_agent=selected_agent,
-                    reason=f"lane_{reason}",
+                    reason=f"lane_{source_lane_state}:{reason}",
+                    from_stage=current_stage,
+                    to_stage=current_stage,
                     metadata=handoff_metadata,
                 )
             except (ValueError, CapsuleDeliveryError) as exc:
@@ -698,19 +826,49 @@ class CapsuleService:
                         "capsule_id": capsule_id,
                         "from_agent": source_agent,
                         "to_agent": selected_agent,
+                        "source_lane_state": source_lane_state,
                         "reason": str(exc),
+                        "candidates": candidate_evaluations,
                     },
                 )
-                results.append({"capsule_id": capsule_id, "status": "blocked", "reason": str(exc)})
+                results.append(
+                    {
+                        "capsule_id": capsule_id,
+                        "status": "blocked",
+                        "reason": str(exc),
+                        "candidates": candidate_evaluations,
+                    }
+                )
                 continue
 
+            pending = state.get("pending_handoff") or {}
+            await self.db.add_event(
+                "capsule.auto_handoff_dispatched",
+                f"{capsule_id} automatic lane rollover dispatched to {selected_agent}",
+                data={
+                    "capsule_id": capsule_id,
+                    "handoff_id": pending.get("handoff_id"),
+                    "from_agent": source_agent,
+                    "to_agent": selected_agent,
+                    "source_lane_state": source_lane_state,
+                    "from_stage": current_stage,
+                    "to_stage": current_stage,
+                    "target_pane": selected_pane.get("pane_id"),
+                    "portability": portability,
+                    "context_fit": selected_fit or {},
+                    "candidates": candidate_evaluations,
+                },
+            )
             results.append(
                 {
                     "capsule_id": capsule_id,
                     "status": "dispatched",
                     "to_agent": selected_agent,
                     "portability": portability,
-                    "pending_handoff": state.get("pending_handoff"),
+                    "source_lane_state": source_lane_state,
+                    "stage": current_stage,
+                    "context_fit": selected_fit or {},
+                    "pending_handoff": pending,
                 }
             )
         return results
@@ -1037,6 +1195,25 @@ class CapsuleService:
                 "records validation and, when required, operator approval.\n"
                 f"Use this delivery_token only for ACK/validation: {delivery_token}\n"
             )
+
+        handoff_mode = str(metadata.get("handoff_mode") or "manual")
+        auto_rollover_note = ""
+        if handoff_mode.endswith("_auto"):
+            if metadata.get("approval_required"):
+                auto_rollover_note = (
+                    "\nThis is an AUTOMATIC LANE ROLLOVER with guarded portability. "
+                    "After ACK and validation, STOP and wait for HIRDA approval. Do not continue capsule work, "
+                    "change locked decisions, or send the completion callback until HIRDA tells you approval "
+                    "was granted and ownership is committed. After the resume notice, continue from the delivered "
+                    "context_projection without restarting completed work.\n"
+                )
+            else:
+                auto_rollover_note = (
+                    "\nThis is an AUTOMATIC LANE ROLLOVER. After ACK and required validation succeed and "
+                    "HIRDA commits ownership to you, continue exactly from context_projection.context.runtime.current_stage "
+                    "and context_projection.context.next_actions. Preserve objective, locked_decisions, constraints, "
+                    "artifacts, and checkpoint. Do not restart work that the source lane already completed.\n"
+                )
         prompt = (
             "HIRDA CAPSULE DELIVERY — physical handoff\n\n"
             f"You are the target agent for capsule {capsule_id}.\n"
@@ -1044,7 +1221,8 @@ class CapsuleService:
             f"curl -fsS -X POST '{ack_url}' -H 'Content-Type: application/json' --data '{ack_body}'\n\n"
             "If ACK fails, do not claim ownership. "
             "A validation-gated handoff is NOT committed by ACK alone.\n"
-            f"{validation_note}\n"
+            f"{validation_note}"
+            f"{auto_rollover_note}\n"
             "Do not use silence or an idle timeout as proof that this turn is complete. "
             "When all work for this handoff turn is fully complete, report the explicit "
             "per-turn completion sentinel by running EXACTLY this local command:\n\n"
@@ -1225,6 +1403,23 @@ class CapsuleService:
             f"{capsule_id} ownership committed to {requested.get('to_agent')}",
             data={**common, "a2a": a2a},
         )
+        handoff_mode = str((requested.get("metadata") or {}).get("handoff_mode") or "")
+        if handoff_mode.endswith("_auto"):
+            await self.db.add_event(
+                "capsule.auto_handoff_committed",
+                f"{capsule_id} automatic lane rollover committed to {requested.get('to_agent')}",
+                data={
+                    "capsule_id": capsule_id,
+                    "handoff_id": handoff_id,
+                    "from_agent": requested.get("from_agent"),
+                    "to_agent": requested.get("to_agent"),
+                    "from_stage": requested.get("from_stage"),
+                    "to_stage": requested.get("to_stage"),
+                    "handoff_mode": handoff_mode,
+                    "target_pane": receipt.get("pane_id"),
+                    "correlation": dict(common.get("correlation") or {}),
+                },
+            )
 
     async def acknowledge_handoff(
         self,
@@ -1474,7 +1669,118 @@ class CapsuleService:
                     "sentinel_verified": True,
                 },
             )
+            handoff_mode = str(
+                (requested.get("metadata") or {}).get("handoff_mode") or ""
+            )
+            if handoff_mode.endswith("_auto"):
+                await self.db.add_event(
+                    "capsule.auto_handoff_completed",
+                    f"{capsule_id} automatic lane rollover turn completed by {agent}",
+                    data={
+                        "capsule_id": capsule_id,
+                        "handoff_id": handoff_id,
+                        "from_agent": requested.get("from_agent"),
+                        "to_agent": requested.get("to_agent"),
+                        "handoff_mode": handoff_mode,
+                        "correlation": verified_correlation,
+                        "sentinel_verified": True,
+                    },
+                )
             return await self.get(capsule_id)
+
+    async def _resume_guarded_auto_handoff(
+        self,
+        capsule_id: str,
+        handoff_id: str,
+        *,
+        agent: str,
+        pane_id: str,
+        approved_by: str,
+    ) -> None:
+        if self.herdr is None:
+            await self.db.add_event(
+                "capsule.auto_handoff_resume_failed",
+                f"{capsule_id} automatic rollover resume failed: herdr_not_configured",
+                severity="warning",
+                data={
+                    "capsule_id": capsule_id,
+                    "handoff_id": handoff_id,
+                    "to_agent": agent,
+                    "target_pane": pane_id,
+                    "reason": "herdr_not_configured",
+                },
+            )
+            return
+        try:
+            snapshot = await self.herdr.refresh()
+            if snapshot.get("status") == "down":
+                raise CapsuleDeliveryError(
+                    f"herdr_unavailable: {snapshot.get('error') or 'unknown'}"
+                )
+            pane = self.herdr.find_pane(pane_id=pane_id)
+            if not pane or str(pane.get("pane_id") or "") != pane_id:
+                raise CapsuleDeliveryError("target_pane_not_found")
+            if pane.get("agent") and str(pane.get("agent")) != agent:
+                raise CapsuleDeliveryError("target_pane_agent_mismatch")
+            tool = self.herdr.tool("herdr_prompt_agent")
+            if not tool:
+                raise CapsuleDeliveryError("herdr_prompt_agent_missing")
+            prompt = (
+                "HIRDA AUTO ROLLOVER RESUME — guarded approval granted\n\n"
+                f"Capsule: {capsule_id}\n"
+                f"Handoff: {handoff_id}\n"
+                f"Approved by: {approved_by}\n"
+                "HIRDA has committed capsule ownership to you. Continue from the exact "
+                "context_projection delivered with this handoff. Preserve objective, locked_decisions, "
+                "constraints, artifacts, checkpoint, current stage, and completed work. Continue the "
+                "existing next_actions; do not restart the task. When the handoff turn is fully complete, "
+                "execute the original completion callback and sentinel from the delivery message.\n"
+            )
+            args = build_tool_arguments(
+                tool,
+                pane=pane,
+                pane_id=pane_id,
+                agent=agent,
+                prompt=prompt,
+                timeout_seconds=5,
+            )
+            input_schema = tool.get("inputSchema") or tool.get("input_schema") or {}
+            properties = (
+                input_schema.get("properties")
+                if isinstance(input_schema, dict)
+                else {}
+            )
+            if isinstance(properties, dict) and "wait" in properties:
+                args["wait"] = False
+            await self.herdr.client().call_tool(
+                "herdr_prompt_agent",
+                args,
+                client_name=f"hirda-auto-resume-{handoff_id.lower()}",
+            )
+            await self.db.add_event(
+                "capsule.auto_handoff_resumed",
+                f"{capsule_id} automatic rollover resumed on {agent}",
+                data={
+                    "capsule_id": capsule_id,
+                    "handoff_id": handoff_id,
+                    "to_agent": agent,
+                    "target_pane": pane_id,
+                    "approved_by": approved_by,
+                },
+            )
+        except Exception as exc:
+            await self.db.add_event(
+                "capsule.auto_handoff_resume_failed",
+                f"{capsule_id} automatic rollover resume failed: {exc}",
+                severity="warning",
+                data={
+                    "capsule_id": capsule_id,
+                    "handoff_id": handoff_id,
+                    "to_agent": agent,
+                    "target_pane": pane_id,
+                    "reason": str(exc),
+                },
+            )
 
     async def approve_handoff(
         self,
@@ -1487,18 +1793,34 @@ class CapsuleService:
         if not approved_by:
             raise ValueError("approved_by is required")
 
+        resume_target: tuple[str, str] | None = None
         async with self._handoff_lock:
             current = await self.get(capsule_id)
-            requested = self._handoff_event(current, handoff_id, "capsule.handoff_requested")
+            requested = self._handoff_event(
+                current,
+                handoff_id,
+                "capsule.handoff_requested",
+            )
             if requested is None:
                 raise ValueError("handoff request not found")
-            if self._handoff_event(current, handoff_id, "capsule.handoff_committed") is not None:
+            if (
+                self._handoff_event(
+                    current,
+                    handoff_id,
+                    "capsule.handoff_committed",
+                )
+                is not None
+            ):
                 return current
 
             metadata = dict(requested.get("metadata") or {})
             if not metadata.get("approval_required"):
                 raise ValueError("handoff does not require approval")
-            validated = self._handoff_event(current, handoff_id, "capsule.handoff_validated")
+            validated = self._handoff_event(
+                current,
+                handoff_id,
+                "capsule.handoff_validated",
+            )
             if validated is None:
                 raise ValueError("handoff must pass validation before approval")
             validation = dict(validated.get("validation") or {})
@@ -1519,15 +1841,30 @@ class CapsuleService:
                 },
             )
             pending = current.get("pending_handoff") or {}
+            receipt = dict(pending.get("receipt") or {})
             await self._commit_handoff(
                 capsule_id,
                 handoff_id,
                 requested=requested,
-                receipt=dict(pending.get("receipt") or {}),
+                receipt=receipt,
                 validation=validation,
                 approved_by=approved_by,
             )
-            return await self.get(capsule_id)
+            if str(metadata.get("handoff_mode") or "") == "guarded_auto":
+                target_agent = str(requested.get("to_agent") or "")
+                target_pane = str(receipt.get("pane_id") or "")
+                if target_agent and target_pane:
+                    resume_target = (target_agent, target_pane)
+
+        if resume_target is not None:
+            await self._resume_guarded_auto_handoff(
+                capsule_id,
+                handoff_id,
+                agent=resume_target[0],
+                pane_id=resume_target[1],
+                approved_by=approved_by,
+            )
+        return await self.get(capsule_id)
 
     async def complete(
         self,

@@ -790,3 +790,245 @@ async def test_completion_cannot_precede_validation_gated_commit():
             sentinel=sentinel,
             receipt=correlated_receipt(acknowledged),
         )
+
+
+@pytest.mark.asyncio
+async def test_draining_lane_auto_rollover_preserves_stage_and_completes():
+    service, _, herdr, capsule_id = await prepared_service()
+    await service.update_contract(capsule_id, capsule_contract("safe"))
+    await service.set_stage(
+        capsule_id,
+        stage="implementation",
+        agent="claude",
+    )
+
+    result = await service.set_lane_state(
+        "claude",
+        "draining",
+        reason="planned_runtime_drain",
+        actor="test",
+        auto_handoff=True,
+    )
+
+    assert result["lane"]["state"] == "draining"
+    dispatched = result["auto_handoff"][0]
+    assert dispatched["status"] == "dispatched"
+    assert dispatched["source_lane_state"] == "draining"
+    assert dispatched["stage"] == "implementation"
+    assert dispatched["to_agent"] == "hermes"
+
+    pending = await service.get(capsule_id)
+    handoff = pending["pending_handoff"]
+    assert handoff["from_stage"] == "implementation"
+    assert handoff["to_stage"] == "implementation"
+    assert handoff["metadata"]["handoff_mode"] == "safe_auto"
+    assert handoff["metadata"]["auto_failover"]["source_stage"] == "implementation"
+
+    delivery_call = herdr.client_instance.calls[-1]
+    prompt = delivery_call["args"]["message"]
+    assert "AUTOMATIC LANE ROLLOVER" in prompt
+    assert "Do not restart work that the source lane already completed." in prompt
+    assert '"context_projection": {' in prompt
+
+    token = delivery_token_from_call(herdr)
+    sentinel = completion_sentinel_from_call(herdr)
+    receipt = correlated_receipt(pending)
+    handoff_id = handoff["handoff_id"]
+
+    acknowledged = await service.acknowledge_handoff(
+        capsule_id,
+        handoff_id,
+        agent="hermes",
+        delivery_token=token,
+        receipt=receipt,
+    )
+    assert acknowledged["current_agent"] == "claude"
+
+    committed = await service.validate_handoff(
+        capsule_id,
+        handoff_id,
+        agent="hermes",
+        delivery_token=token,
+        passed=True,
+        checks=[
+            {
+                "criterion": "baseline tests pass",
+                "status": "pass",
+                "evidence": "focused rollover certification green",
+            }
+        ],
+    )
+    assert committed["current_agent"] == "hermes"
+    assert committed["current_stage"] == "implementation"
+
+    completed = await service.complete_handoff(
+        capsule_id,
+        handoff_id,
+        agent="hermes",
+        delivery_token=token,
+        sentinel=sentinel,
+        receipt=receipt,
+    )
+    assert completed["last_handoff"]["completion"]["sentinel_verified"] is True
+
+    kinds = [event["kind"] for event in completed["events"]]
+    assert "capsule.auto_handoff_started" in kinds
+    assert "capsule.auto_handoff_dispatched" in kinds
+    assert "capsule.auto_handoff_committed" in kinds
+    assert "capsule.auto_handoff_completed" in kinds
+
+
+@pytest.mark.asyncio
+async def test_auto_rollover_skips_context_incompatible_target_and_uses_next():
+    class MultiPaneHerdr(FakeHerdr):
+        def __init__(self):
+            super().__init__(pane=True)
+            self.panes = [
+                {
+                    "pane_id": "pane-hermes",
+                    "agent": "hermes",
+                    "agent_status": "idle",
+                    "revision": 1,
+                },
+                {
+                    "pane_id": "pane-codex",
+                    "agent": "codex",
+                    "agent_status": "idle",
+                    "revision": 1,
+                },
+            ]
+
+        def pane_list(self, snapshot=None):
+            return [dict(item) for item in self.panes]
+
+        def find_pane(self, *, pane_id=None, workspace=None, agent=None):
+            candidates = self.panes
+            if pane_id:
+                candidates = [
+                    item for item in candidates if item["pane_id"] == pane_id
+                ]
+            if agent:
+                candidates = [
+                    item for item in candidates if item["agent"] == agent
+                ]
+            return dict(candidates[0]) if candidates else None
+
+    db = FakeDB()
+    herdr = MultiPaneHerdr()
+    service = CapsuleService(db, herdr)
+    capsule = await service.create(
+        title="Fallback fit test",
+        workspace="mcp-studio",
+        source_pane="pane-claude",
+        agent="claude",
+        metadata={
+            "context_profile": {
+                "source_tokens": 6000,
+                "retained_tokens": 5000,
+            }
+        },
+    )
+    capsule_id = capsule["capsule_id"]
+    contract = capsule_contract("safe")
+    contract["target_capabilities"] = {
+        "hermes": {
+            "provider": "test",
+            "model_id": "hermes-too-small",
+            "context_window": 8000,
+            "max_output_tokens": 2048,
+            "system_prompt_tokens": 1000,
+            "tool_schema_tokens": 1000,
+            "safety_reserve_tokens": 4096,
+        },
+        "codex": {
+            "provider": "test",
+            "model_id": "codex-large",
+            "context_window": 128000,
+            "max_output_tokens": 8192,
+            "system_prompt_tokens": 1000,
+            "tool_schema_tokens": 1000,
+            "safety_reserve_tokens": 4096,
+        },
+    }
+    await service.update_contract(capsule_id, contract)
+
+    result = await service.set_lane_state(
+        "claude",
+        "emergency",
+        reason="primary_context_exhausted",
+        actor="test",
+        auto_handoff=True,
+    )
+
+    dispatched = result["auto_handoff"][0]
+    assert dispatched["status"] == "dispatched"
+    assert dispatched["to_agent"] == "codex"
+    evaluations = dispatched["pending_handoff"]["metadata"]["auto_failover"][
+        "candidate_evaluations"
+    ]
+    assert evaluations[0]["agent"] == "hermes"
+    assert evaluations[0]["eligible"] is False
+    assert evaluations[0]["reason"] == "capsule_context_too_large"
+    assert evaluations[1]["agent"] == "codex"
+    assert evaluations[1]["eligible"] is True
+    assert herdr.client_instance.calls[-1]["args"]["agent_id"] == "pane-codex"
+
+
+@pytest.mark.asyncio
+async def test_guarded_auto_rollover_resumes_target_after_approval():
+    service, _, herdr, capsule_id = await prepared_service()
+    await service.update_contract(capsule_id, capsule_contract("guarded"))
+
+    await service.set_lane_state(
+        "claude",
+        "disabled",
+        reason="provider_unavailable",
+        actor="test",
+        auto_handoff=True,
+    )
+    pending = await service.get(capsule_id)
+    handoff_id = pending["pending_handoff"]["handoff_id"]
+    token = delivery_token_from_call(herdr)
+
+    await service.acknowledge_handoff(
+        capsule_id,
+        handoff_id,
+        agent="hermes",
+        delivery_token=token,
+        receipt=correlated_receipt(pending),
+    )
+    validated = await service.validate_handoff(
+        capsule_id,
+        handoff_id,
+        agent="hermes",
+        delivery_token=token,
+        passed=True,
+        checks=[
+            {
+                "criterion": "baseline tests pass",
+                "status": "pass",
+                "evidence": "focused guarded rollover validation green",
+            }
+        ],
+        plan="Continue from the delivered projection without semantic changes.",
+    )
+    assert validated["current_agent"] == "claude"
+    assert validated["pending_handoff"]["state"] == "awaiting_approval"
+    assert len(herdr.client_instance.calls) == 1
+
+    committed = await service.approve_handoff(
+        capsule_id,
+        handoff_id,
+        approved_by="operator/test",
+    )
+    assert committed["current_agent"] == "hermes"
+    assert committed["pending_handoff"] is None
+    assert len(herdr.client_instance.calls) == 2
+    resume_call = herdr.client_instance.calls[-1]
+    assert resume_call["args"]["agent_id"] == "pane-hermes"
+    assert "HIRDA AUTO ROLLOVER RESUME" in resume_call["args"]["message"]
+    assert "do not restart the task" in resume_call["args"]["message"]
+
+    kinds = [event["kind"] for event in committed["events"]]
+    assert "capsule.auto_handoff_committed" in kinds
+    assert "capsule.auto_handoff_resumed" in kinds

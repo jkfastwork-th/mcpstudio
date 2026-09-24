@@ -432,7 +432,7 @@ class GatewaySessionManager:
             },
             {
                 "name": "mcpstudio_set_lane_state",
-                "description": "Set one agent lane to normal, draining, disabled, or emergency. Disabled/emergency can auto-handoff active portable capsules; Guarded waits for approval and Pinned never moves automatically.",
+                "description": "Set one agent lane to normal, draining, disabled, or emergency. Draining/disabled/emergency automatically roll active portable capsules to a compatible normal lane when auto_handoff is enabled; Guarded waits for approval and resumes after approval, while Pinned never moves automatically.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
