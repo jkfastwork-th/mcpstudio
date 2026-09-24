@@ -244,6 +244,18 @@ async def test_handoff_dispatch_does_not_transfer_ownership_before_ack():
     assert call["args"]["wait"] is False
     assert "/handoff/" in call["args"]["message"]
     assert "/ack" in call["args"]["message"]
+    assert '"context_projection": {' in call["args"]["message"]
+    assert '"context_projection_sha256":' in call["args"]["message"]
+    assert '"projection_sha256":' in call["args"]["message"]
+
+    dispatched = next(
+        event
+        for event in state["events"]
+        if event["kind"] == "capsule.handoff_dispatched"
+    )
+    assert dispatched["data"]["context_projection_sha256"]
+    assert dispatched["data"]["context_projection_stream_seq"] >= 1
+    assert dispatched["data"]["context_projection_version"] == 1
 
 
 @pytest.mark.asyncio

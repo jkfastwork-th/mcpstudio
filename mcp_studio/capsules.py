@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from .db import Database
 from .context_fit import ContextProfile, ModelCapability, evaluate_context_fit
+from .context_projector import ContextProjector
 from .execution import build_tool_arguments, classify_failure
 from .herdr import HerdrManager, _decode_text_content
 
@@ -119,6 +120,7 @@ class CapsuleService:
     ):
         self.db = db
         self.herdr = herdr
+        self.context_projector = ContextProjector(db)
         self.local_api_base = local_api_base.rstrip("/")
         self.handoff_ack_timeout_seconds = max(1.0, float(handoff_ack_timeout_seconds))
         self.handoff_ack_poll_seconds = max(0.1, float(handoff_ack_poll_seconds))
@@ -433,6 +435,18 @@ class CapsuleService:
             if item.get("capsule_id") == capsule_id:
                 return item
         raise CapsuleNotFound(capsule_id)
+
+    async def context_projection(self, capsule_id: str) -> dict[str, Any]:
+        try:
+            return await self.context_projector.project_capsule(capsule_id)
+        except KeyError as exc:
+            raise CapsuleNotFound(capsule_id) from exc
+
+    async def compact_context(self, capsule_id: str) -> dict[str, Any]:
+        try:
+            return await self.context_projector.compact_capsule(capsule_id)
+        except KeyError as exc:
+            raise CapsuleNotFound(capsule_id) from exc
 
     async def create(
         self,
@@ -885,6 +899,9 @@ class CapsuleService:
                     "metadata": metadata,
                 },
             )
+            context_projection = await self.context_projector.project_capsule(
+                capsule_id
+            )
 
         async def fail_delivery(
             error: str,
@@ -970,6 +987,8 @@ class CapsuleService:
                 "reason": reason,
                 "a2a_task_id": a2a_task_id,
                 "handoff_correlation": dispatch_correlation,
+                "context_projection": context_projection,
+                "context_projection_sha256": context_projection["projection_sha256"],
                 "context_profile": current.get("context_profile"),
                 "contract": metadata.get("contract") or current.get("contract"),
                 "handoff_policy": {
@@ -1083,6 +1102,9 @@ class CapsuleService:
                 "to_agent": to_agent,
                 "target_pane": pane.get("pane_id"),
                 "correlation": dispatch_correlation,
+                "context_projection_sha256": context_projection["projection_sha256"],
+                "context_projection_stream_seq": context_projection["through_stream_seq"],
+                "context_projection_version": context_projection["projection_version"],
                 "a2a": a2a,
             },
         )

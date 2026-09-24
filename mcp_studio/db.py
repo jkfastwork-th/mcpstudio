@@ -19,6 +19,7 @@ def _now() -> str:
 
 EVENT_LEDGER_SCHEMA_VERSION = 1
 EVENT_REDACTED = "[REDACTED]"
+EVENT_PRIVATE_REASONING_OMITTED = "[OMITTED_PRIVATE_REASONING]"
 
 
 def _redact_event_text(value: str) -> str:
@@ -41,8 +42,20 @@ def _event_key_is_secret(key: str) -> bool:
 
 
 def _redact_event_data(value: Any, *, key: str | None = None) -> Any:
-    if key is not None and _event_key_is_secret(key):
-        return EVENT_REDACTED
+    if key is not None:
+        normalized = str(key).casefold().replace("-", "_")
+        if normalized in {
+            "chain_of_thought",
+            "chainofthought",
+            "hidden_reasoning",
+            "private_reasoning",
+            "internal_monologue",
+            "scratchpad",
+            "cot",
+        }:
+            return EVENT_PRIVATE_REASONING_OMITTED
+        if _event_key_is_secret(key):
+            return EVENT_REDACTED
     if isinstance(value, dict):
         return {str(k): _redact_event_data(v, key=str(k)) for k, v in value.items()}
     if isinstance(value, list):
