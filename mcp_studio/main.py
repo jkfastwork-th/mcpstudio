@@ -41,6 +41,7 @@ from .operations import OperationsManager
 from .observability import ObservabilityManager
 from .computer import ComputerUseManager
 from .graft import GraftManager, GraftError
+from .integrations import build_integration_manager
 from .reflex_metrics import ReflexMetrics
 from .action_adapter import evaluate_action_envelope
 from .action_registry import ActionProviderRegistryError, build_action_provider_registry
@@ -67,6 +68,7 @@ connectivity = ConnectivityManager(settings, db)
 oauth = OAuthManager(settings, db)
 managed_sessions = ManagedSessionManager(settings, db)
 graft = GraftManager(settings, db)
+integration_manager = build_integration_manager(graft, settings.studio)
 world_authoring = WorldAuthoringManager(
     managed_sessions,
     validator_url=os.environ.get("HIRDA_EARTH_WORLD_VALIDATOR_URL"),
@@ -92,6 +94,9 @@ templates = Jinja2Templates(directory=str(ROOT / "templates"))
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.init()
+    # Integrations self-validate and self-certify at startup. Failures are
+    # recorded in lifecycle state and never prevent the HIRDA control plane from starting.
+    await integration_manager.snapshot(reconcile=True)
     await workers.start()
     await health.start()
     await herdr.start()
@@ -419,6 +424,7 @@ async def api_status():
         "tunnel_sessions": await db.tunnel_session_summary(),
         "operations": {**operations.snapshot, **(await db.operations_summary()), "schema": await db.schema_status()},
         "observability": await observability.report() if settings.studio.observability_enabled else {"overall_state": "disabled"},
+        "integrations": await integration_manager.snapshot(),
         "servers": snapshots,
         "tunnels": await db.list_tunnels(),
     }
@@ -427,6 +433,27 @@ async def api_status():
 @app.get("/api/reflex/metrics")
 async def reflex_metrics_status(window: str = "24h", recent: int = 20):
     return reflex_metrics.snapshot(window=window, recent=recent)
+
+
+@app.get("/api/integrations")
+async def integration_registry_status(reconcile: bool = False):
+    return await integration_manager.snapshot(reconcile=reconcile)
+
+
+@app.get("/api/integrations/{integration_id}")
+async def integration_detail(integration_id: str, reconcile: bool = False):
+    try:
+        return await integration_manager.detail(integration_id, reconcile=reconcile)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unknown integration") from exc
+
+
+@app.post("/api/integrations/{integration_id}/reconcile")
+async def integration_reconcile(integration_id: str):
+    try:
+        return await integration_manager.reconcile(integration_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unknown integration") from exc
 
 
 @app.get("/api/action-adapter/registry")

@@ -102,6 +102,11 @@ studio:
   #action_provider_entrypoints_enabled: false
   #action_provider_entrypoint_group: hirda.action_providers
 
+  # Generic HIRDA integration discovery. Enable only for trusted installed
+  # packages because Python entry-point loading executes package code.
+  #integration_entrypoints_enabled: false
+  #integration_entrypoint_group: hirda.integrations
+
   # HCR cognitive fabric. Plan/shadow mode and execution are separate gates.
   #cognitive_router_enabled: false
   #cognitive_router_execute_enabled: false

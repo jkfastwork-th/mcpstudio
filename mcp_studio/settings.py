@@ -151,6 +151,12 @@ class StudioConfig:
     action_provider_entrypoints_enabled: bool = False
     action_provider_entrypoint_group: str = "hirda.action_providers"
 
+    # Generic HIRDA integration discovery. External entry points are opt-in
+    # because importing them executes installed package code. Once enabled,
+    # new integrations can register against the common lifecycle without core edits.
+    integration_entrypoints_enabled: bool = False
+    integration_entrypoint_group: str = "hirda.integrations"
+
     # HCR cognitive fabric. Routing can be exposed in shadow/plan mode without
     # permitting HIRDA to dispatch prompts. Execution is a separate opt-in gate
     # so consumers can canary route decisions before any runtime authority changes.
