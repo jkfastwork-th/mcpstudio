@@ -27,7 +27,7 @@ from .agent_runtimes import AgentRuntimeInventory
 from .models import (
     SessionCreate, SessionHeartbeat, WorkerBind, WorkerHeartbeat, WorkerStatePatch,
     WorkSubmit, WorkFinish, WorkFail, WorkDetach, AlertAcknowledge, RetryDispatch, FaultInject, BatchDispatch,
-    SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate,
+    SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate, ManagedSessionMachineUpdate,
     GraftConfigureRequest, GraftQueryRequest, GraftRollbackRequest, ComputerRepairRequest, ManagedGatewayAttach, GatewayContextUsageReport, SessionHandoffPrepareRequest,
     CapsuleCreate, CapsuleStageUpdate, CapsuleHandoff, CapsuleHandoffAck, CapsuleContractUpdate,
     CapsuleHandoffValidation, CapsuleHandoffApproval, CapsuleHandoffCompletion, LaneStateUpdate, CapsuleComplete,
@@ -43,6 +43,8 @@ from .observability import ObservabilityManager
 from .computer import ComputerUseManager
 from .graft import GraftManager, GraftError
 from .integrations import build_integration_manager
+from .machine_registry import MachineRegistry, MachineRegistryError
+from .machine_router import MachineCapabilityRouter
 from .reflex_metrics import ReflexMetrics
 from .action_adapter import evaluate_action_envelope
 from .action_registry import ActionProviderRegistryError, build_action_provider_registry
@@ -78,6 +80,9 @@ world_authoring = WorldAuthoringManager(
     managed_sessions,
     validator_url=os.environ.get("HIRDA_EARTH_WORLD_VALIDATOR_URL"),
 )
+computer = ComputerUseManager(settings.studio, db)
+machine_registry = MachineRegistry(settings.studio, base_dir=settings.config_path.parent)
+machine_router = MachineCapabilityRouter(machine_registry, integration_manager, computer)
 gateway_sessions = GatewaySessionManager(
     settings,
     db,
@@ -87,10 +92,10 @@ gateway_sessions = GatewaySessionManager(
     capsules,
     world_authoring,
     integration_manager,
+    machine_router,
 )
 operations = OperationsManager(settings, db)
 observability = ObservabilityManager(settings, db)
-computer = ComputerUseManager(settings.studio, db)
 reflex_metrics = ReflexMetrics(settings.studio)
 action_provider_registry = build_action_provider_registry(settings.studio)
 cognitive_router = CognitiveRouter(settings.studio, herdr, agent_runtimes, capsules)
@@ -615,6 +620,22 @@ async def capsule_get(capsule_id: str):
         raise HTTPException(status_code=404, detail="capsule not found")
 
 
+@app.get("/api/capsules/{capsule_id}/context")
+async def capsule_context_projection(capsule_id: str):
+    try:
+        return await capsules.context_projection(capsule_id)
+    except CapsuleNotFound:
+        raise HTTPException(status_code=404, detail="capsule not found")
+
+
+@app.post("/api/capsules/{capsule_id}/context/compact")
+async def capsule_context_compact(capsule_id: str):
+    try:
+        return await capsules.compact_context(capsule_id)
+    except CapsuleNotFound:
+        raise HTTPException(status_code=404, detail="capsule not found")
+
+
 @app.post("/api/capsules")
 async def capsule_create(body: CapsuleCreate):
     try:
@@ -916,6 +937,23 @@ async def managed_session_resume(session_id: str):
         raise HTTPException(status_code=404, detail="Unknown managed session")
     except ManagedSessionError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/api/machines")
+async def machine_registry_status():
+    return await machine_router.machine_snapshot()
+
+
+@app.put("/api/managed/sessions/{session_id}/machine")
+async def managed_session_machine_update(session_id: str, payload: ManagedSessionMachineUpdate):
+    try:
+        return await machine_router.bind_session(
+            db, session_id, payload.machine_id, actor="ui/api"
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown managed session or machine")
+    except MachineRegistryError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @app.get("/api/managed/sessions/{session_id}/permissions")
@@ -1732,28 +1770,33 @@ async def computer_status():
 @app.get("/api/computer/descriptor/{managed_session_id}")
 async def computer_descriptor(managed_session_id: str):
     try:
-        return await computer.descriptor(managed_session_id)
+        session = await managed_sessions.get_session(managed_session_id)
+        return await machine_router.computer_descriptor(managed_session_id, session)
     except KeyError:
         raise HTTPException(status_code=404, detail="Unknown managed session")
-    except (RuntimeError, ValueError, OSError) as exc:
+    except (RuntimeError, ValueError, OSError, MachineRegistryError) as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
 
 @app.get("/api/computer/re-pair-targets/{managed_session_id}")
 async def computer_re_pair_targets(managed_session_id: str):
     try:
+        session = await managed_sessions.get_session(managed_session_id)
+        machine_router.require_local_computer(session)
         return await computer.repair_targets(managed_session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Unknown managed session")
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
-    except (RuntimeError, ValueError, OSError) as exc:
+    except (RuntimeError, ValueError, OSError, MachineRegistryError) as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
 
 @app.post("/api/computer/re-pair/{managed_session_id}")
 async def computer_re_pair(managed_session_id: str, payload: ComputerRepairRequest):
     try:
+        session = await managed_sessions.get_session(managed_session_id)
+        machine_router.require_local_computer(session)
         return await computer.repair_runtime(
             managed_session_id,
             payload.mode,
@@ -1763,7 +1806,7 @@ async def computer_re_pair(managed_session_id: str, payload: ComputerRepairReque
         raise HTTPException(status_code=404, detail="Unknown managed session")
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
-    except (RuntimeError, ValueError, OSError) as exc:
+    except (RuntimeError, ValueError, OSError, MachineRegistryError) as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
 
@@ -1780,12 +1823,13 @@ async def computer_vnc_ws(websocket: WebSocket, managed_session_id: str):
         return
 
     try:
-        await computer.descriptor(managed_session_id)
+        session = await managed_sessions.get_session(managed_session_id)
+        await machine_router.computer_descriptor(managed_session_id, session)
     except KeyError:
         await websocket.accept(subprotocol=_computer_ws_subprotocol(websocket))
         await websocket.close(code=4404, reason="Unknown managed session")
         return
-    except (RuntimeError, ValueError):
+    except (RuntimeError, ValueError, MachineRegistryError):
         await websocket.accept(subprotocol=_computer_ws_subprotocol(websocket))
         await websocket.close(code=1011, reason="Computer runtime unavailable")
         return

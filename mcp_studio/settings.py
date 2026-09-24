@@ -176,6 +176,11 @@ class StudioConfig:
     desktop_commander_backend_timeout_seconds: float = 15.0
     desktop_commander_backend_cwd: str = ""
 
+    # Multi-machine capability plane. Registry entries are operator-declared;
+    # secrets are referenced through env/token files and never embedded here.
+    machine_local_id: str = "openclaw"
+    machine_registry: list[dict[str, Any]] = field(default_factory=list)
+
     # HCR cognitive fabric. Routing can be exposed in shadow/plan mode without
     # permitting HIRDA to dispatch prompts. Execution is a separate opt-in gate
     # so consumers can canary route decisions before any runtime authority changes.

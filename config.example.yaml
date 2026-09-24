@@ -123,6 +123,29 @@ studio:
   #desktop_commander_backend_timeout_seconds: 15.0
   #desktop_commander_backend_cwd: /home/alfred
 
+  # Multi-machine registry. Remote agents should listen only on a private
+  # interface (for example Tailscale) and reference a token file, never plaintext.
+  #machine_local_id: openclaw
+  #machine_registry:
+  #  - id: openclaw
+  #    name: openclaw
+  #    local: true
+  #    capabilities: [filesystem, process, computer_use]
+  #    providers:
+  #      desktop_commander: {mode: local}
+  #      computer_use: {mode: local}
+  #  - id: windows-dev
+  #    name: Windows Dev
+  #    address: 100.64.0.10
+  #    capabilities: [filesystem, process]
+  #    providers:
+  #      desktop_commander:
+  #        mode: agent
+  #        endpoint: http://100.64.0.10:8765
+  #        token_file: ~/.config/hirda/windows-dev.token
+  #    workspace_map:
+  #      example: C:\Users\me\HIRDA\workspaces\example
+
   # HCR cognitive fabric. Plan/shadow mode and execution are separate gates.
   #cognitive_router_enabled: false
   #cognitive_router_execute_enabled: false

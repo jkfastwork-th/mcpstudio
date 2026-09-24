@@ -31,6 +31,8 @@ from .graft import GraftManager, GraftError
 from .capsules import CapsuleService, CapsuleNotFound
 from .world_authoring import WorldAuthoringManager, WorldAuthoringError
 from .integrations import IntegrationManager, IntegrationError
+from .machine_router import MachineCapabilityRouter
+from .machine_registry import MachineRegistryError
 
 
 CONTROL_TOOL_NAMES = (
@@ -79,6 +81,7 @@ class GatewaySessionManager:
         capsules: CapsuleService | None = None,
         world_authoring: WorldAuthoringManager | None = None,
         integrations: IntegrationManager | None = None,
+        machine_router: MachineCapabilityRouter | None = None,
     ):
         self.settings = settings
         self.db = db
@@ -88,6 +91,7 @@ class GatewaySessionManager:
         self.capsules = capsules
         self.world_authoring = world_authoring
         self.integrations = integrations
+        self.machine_router = machine_router
 
     def authenticate(self, request: Request) -> tuple[str, str, str, str, str]:
         """Authenticate and derive a stable client identity.
@@ -306,6 +310,24 @@ class GatewaySessionManager:
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
             },
             {
+                "name": "mcpstudio_list_machines",
+                "description": "List HIRDA machines, their capabilities, providers, and live readiness.",
+                "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            {
+                "name": "mcpstudio_bind_machine",
+                "description": "Bind a managed session to a target machine. Backend tools route to that machine until rebound.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "machine": {"type": "string", "minLength": 1},
+                        "session": {"type": "string"},
+                    },
+                    "required": ["machine"],
+                    "additionalProperties": False,
+                },
+            },
+            {
                 "name": "mcpstudio_register_workspace",
                 "description": "Register an existing project directory under an approved workspace root.",
                 "inputSchema": {
@@ -372,6 +394,7 @@ class GatewaySessionManager:
                     "properties": {
                         "name": {"type": "string"}, "workspace": {"type": "string"},
                         "attach": {"type": "boolean", "default": True},
+                        "machine": {"type": "string"},
                     },
                     "required": ["name", "workspace"], "additionalProperties": False,
                 },
@@ -697,6 +720,8 @@ class GatewaySessionManager:
         )
 
     def _ordered_backend_tools(self) -> list[dict[str, Any]]:
+        if self.machine_router is not None:
+            return self.machine_router.backend_tools()
         if self.integrations is None:
             return []
         return self.integrations.backend_tools()
@@ -1831,6 +1856,25 @@ class GatewaySessionManager:
             raise ManagedSessionError("managed sessions are unavailable")
         if name == "mcpstudio_list_workspaces":
             return {"workspaces": await self.managed_sessions.list_workspaces()}
+        if name == "mcpstudio_list_machines":
+            if self.machine_router is None:
+                raise ManagedSessionError("machine capability router is unavailable")
+            return await self.machine_router.machine_snapshot()
+        if name == "mcpstudio_bind_machine":
+            if self.machine_router is None:
+                raise ManagedSessionError("machine capability router is unavailable")
+            selector = str(args.get("session") or "").strip()
+            if selector:
+                target = await self._resolve_managed_session(selector)
+            else:
+                gateway = await self.db.get_gateway_session(gateway_session_id)
+                managed_id = str(gateway.get("managed_session_id") or "")
+                if not managed_id:
+                    raise ManagedSessionError("no managed session is attached")
+                target = await self.managed_sessions.get_session(managed_id)
+            return await self.machine_router.bind_session(
+                self.db, target["id"], str(args.get("machine") or ""), actor="chatgpt/mcp"
+            )
         if name == "mcpstudio_register_workspace":
             return {"workspace": await self.managed_sessions.register_workspace(
                 key=str(args.get("key") or ""), project_path=str(args.get("project_path") or ""),
@@ -1970,6 +2014,11 @@ class GatewaySessionManager:
             created = await self.managed_sessions.create_session(
                 name=str(args.get("name") or ""), workspace_key=str(args.get("workspace") or ""), actor="chatgpt/mcp",
             )
+            if args.get("machine") and self.machine_router is not None:
+                await self.machine_router.bind_session(
+                    self.db, created["id"], str(args.get("machine")), actor="chatgpt/mcp"
+                )
+                created = await self.managed_sessions.get_session(created["id"])
             attached = None
             if args.get("attach", True):
                 attached = await self.bind_managed_session(gateway_session_id, created["id"], actor="chatgpt/mcp")
@@ -1980,6 +2029,10 @@ class GatewaySessionManager:
                 name=(str(args.get("name")) if args.get("name") is not None else None),
                 actor="chatgpt/mcp",
             )
+            if args.get("machine") and self.machine_router is not None:
+                await self.machine_router.bind_session(
+                    self.db, target["id"], str(args.get("machine")), actor="chatgpt/mcp"
+                )
             return await self.bind_managed_session(gateway_session_id, target["id"], actor="chatgpt/mcp")
         if name == "mcpstudio_use_session":
             selector = str(args.get("session") or "").strip()
@@ -2051,9 +2104,16 @@ class GatewaySessionManager:
         if name == "mcpstudio_current_session":
             gateway = await self.db.get_gateway_session(gateway_session_id)
             managed_id = gateway.get("managed_session_id")
+            managed = await self.managed_sessions.get_session(managed_id) if managed_id else None
+            machine = (
+                self.machine_router.session_machine(managed)
+                if managed is not None and self.machine_router is not None
+                else None
+            )
             return {
                 "gateway_session_id": gateway_session_id,
-                "managed_session": await self.managed_sessions.get_session(managed_id) if managed_id else None,
+                "managed_session": managed,
+                "machine": machine,
                 "context": self.context_status_from_gateway(gateway),
             }
         if name == "mcpstudio_detach_session":
@@ -2530,8 +2590,8 @@ class GatewaySessionManager:
                     is_error=True,
                 )
             backend_tool = bool(
-                self.integrations is not None
-                and self.integrations.is_backend_tool(tool_name)
+                (self.machine_router is not None and self.machine_router.is_backend_tool(tool_name))
+                or (self.machine_router is None and self.integrations is not None and self.integrations.is_backend_tool(tool_name))
             )
             if session.get("managed_session_id") and (
                 self.settings.studio.managed_session_tool_permissions_enabled or backend_tool
@@ -2549,9 +2609,9 @@ class GatewaySessionManager:
                     )
                 policy_started = time.perf_counter()
                 declared_category = (
-                    self.integrations.backend_permission(tool_name)
-                    if self.integrations is not None
-                    else None
+                    self.machine_router.backend_permission(tool_name)
+                    if self.machine_router is not None
+                    else (self.integrations.backend_permission(tool_name) if self.integrations is not None else None)
                 )
                 decision = decide_tool_call(
                     self.settings.studio,
@@ -2678,8 +2738,10 @@ class GatewaySessionManager:
         if (
             request.method == "POST"
             and rpc_method == "tools/call"
-            and self.integrations is not None
-            and self.integrations.is_backend_tool(tool_name)
+            and (
+                (self.machine_router is not None and self.machine_router.is_backend_tool(tool_name))
+                or (self.machine_router is None and self.integrations is not None and self.integrations.is_backend_tool(tool_name))
+            )
         ):
             if not session.get("managed_session_id"):
                 return local_tool_response(
@@ -2694,7 +2756,11 @@ class GatewaySessionManager:
                     managed_session = await self.db.get_managed_session(
                         str(session["managed_session_id"])
                     )
-                declared_category = self.integrations.backend_permission(tool_name)
+                declared_category = (
+                    self.machine_router.backend_permission(tool_name)
+                    if self.machine_router is not None
+                    else self.integrations.backend_permission(tool_name)
+                )
                 decision = decide_tool_call(
                     self.settings.studio,
                     managed_session,
@@ -2714,16 +2780,22 @@ class GatewaySessionManager:
                         },
                         is_error=True,
                     )
-                result = await self.integrations.call_backend_tool(
-                    tool_name,
-                    tool_args,
-                    context={
-                        "managed_session_id": managed_session.get("id"),
-                        "workspace_key": managed_session.get("workspace_key"),
-                        "project_path": managed_session.get("project_path"),
-                        "policy": decision.policy,
-                    },
-                )
+                metadata = managed_session.get("metadata") if isinstance(managed_session.get("metadata"), dict) else {}
+                context = {
+                    "managed_session_id": managed_session.get("id"),
+                    "workspace_key": managed_session.get("workspace_key"),
+                    "project_path": managed_session.get("project_path"),
+                    "machine_id": metadata.get("machine_id"),
+                    "policy": decision.policy,
+                }
+                if self.machine_router is not None:
+                    result = await self.machine_router.call_backend_tool(
+                        tool_name, tool_args, context=context
+                    )
+                else:
+                    result = await self.integrations.call_backend_tool(
+                        tool_name, tool_args, context=context
+                    )
                 await record_reflex_outcome(200, "integration-backend")
                 return local_backend_tool_response(result)
             except (IntegrationError, KeyError) as exc:

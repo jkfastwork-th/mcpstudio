@@ -178,6 +178,10 @@ class ManagedSessionRename(BaseModel):
     name: str = Field(min_length=1, max_length=240)
 
 
+class ManagedSessionMachineUpdate(BaseModel):
+    machine_id: str = Field(min_length=1, max_length=120)
+
+
 class ManagedSessionPermissionsUpdate(BaseModel):
     read: bool | None = None
     write: bool | None = None

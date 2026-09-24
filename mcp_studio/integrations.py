@@ -422,6 +422,10 @@ class IntegrationManager:
         integration_id, raw_name = resolved
         return self._integrations[integration_id].adapter.manifest.permissions.get(raw_name)
 
+    def backend_route(self, exposed_name: str) -> tuple[str, str] | None:
+        self._rebuild_backend_name_map()
+        return self._backend_name_map.get(str(exposed_name or ""))
+
     def is_backend_tool(self, exposed_name: str) -> bool:
         self._rebuild_backend_name_map()
         return str(exposed_name or "") in self._backend_name_map
