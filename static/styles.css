@@ -1427,6 +1427,49 @@ html[data-theme="light"] .focus-dashboard{background:#f4f7fb}
 }
 .lane-status span{font-size:8.5px}
 .lane-status b{font-size:8.5px}
+.lane-status-state{
+  display:flex;
+  flex-direction:column;
+  align-items:flex-end;
+  gap:4px;
+  margin-bottom:3px;
+}
+.lane-status-symbol{
+  width:24px;
+  height:24px;
+  display:grid!important;
+  place-items:center;
+  border-radius:999px;
+  font-size:12px!important;
+  line-height:1;
+  font-weight:800;
+  border:1px solid currentColor;
+  background:rgba(255,255,255,.82);
+  box-shadow:0 4px 10px rgba(16,24,40,.08);
+}
+.lane-status-text{
+  display:block!important;
+  font-weight:700;
+  line-height:1.15;
+}
+.lane-status-state.running,.lane-status-state.ready,.lane-status-state.received{color:#079455}
+.lane-status-state.awaiting-ack,.lane-status-state.handoff{color:#2563eb}
+.lane-status-state.draining{color:#d97706}
+.lane-status-state.disabled{color:#667085}
+.lane-status-state.emergency{color:#d92d20}
+.lane-status-state.emergency .lane-status-symbol{animation:lane-status-pulse 1.35s ease-in-out infinite}
+@keyframes lane-status-pulse{
+  0%,100%{box-shadow:0 0 0 0 rgba(217,45,32,.18)}
+  50%{box-shadow:0 0 0 5px rgba(217,45,32,0)}
+}
+[data-theme="dark"] .lane-status-symbol{
+  background:rgba(17,24,39,.84);
+  box-shadow:none;
+}
+@media(max-width:760px){
+  .lane-status{align-items:flex-start!important}
+  .lane-status-state{align-items:flex-start}
+}
 
 /* Active capsule hierarchy from reference: label, capsule pill and state. */
 .capsule-state-card{padding:16px}
@@ -2265,7 +2308,8 @@ body{
 .lane-agent strong{font-size:var(--fs-105)}
 .lane-agent small{font-size:var(--fs-8)}
 .capsule-stage small{font-size:var(--fs-8)}
-.lane-status span,.lane-status b{font-size:var(--fs-8)}
+.lane-status .lane-status-text,.lane-status b{font-size:var(--fs-8)}
+.lane-status .lane-status-symbol{font-size:calc(12px * var(--font-scale))!important}
 .connector-badge{font-size:var(--fs-8)}
 .capsule-state-list span{font-size:var(--fs-8)}
 .capsule-state-list strong{font-size:var(--fs-9)}
