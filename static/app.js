@@ -776,6 +776,14 @@ function runtimePresence(runtime){
   return {label:'Offline',className:'runtime-offline',online:false};
 }
 
+function agentHeaderStatus(presence,laneState){
+  const state=String(laneState||'normal').toLowerCase();
+  if(state==='emergency')return {label:'Emergency',className:'runtime-emergency'};
+  if(state==='disabled')return {label:'Disabled',className:'runtime-disabled'};
+  if(state==='draining')return {label:'Draining',className:'runtime-draining'};
+  return presence;
+}
+
 function runtimeStateLabel(state){
   const raw=String(state||'unknown').toLowerCase();
   const labels={
@@ -809,6 +817,7 @@ function renderAgentLanes(data){
     const model=r.model||r.last_used_model||tr('Not reported');
     const provider=r.provider||r.brand||'Unknown provider';
     const presence=runtimePresence(r);
+    const headerStatus=agentHeaderStatus(presence,laneState);
     const paneCount=Number(r.pane_count??0);
     const queueLength=r.queue_length;
     const contextLimit=r.context_limit||r.context_window;
@@ -819,7 +828,7 @@ function renderAgentLanes(data){
       <div class="agent-runtime-top">
         <span class="agent-runtime-icon">${agentBrandIcon(id)}</span>
         <div class="agent-runtime-title"><h3>${esc(r.name||id)}</h3><small>${esc(provider)}</small></div>
-        <span class="runtime-pill ${presence.className}"><i></i>${esc(tr(presence.label))}</span>
+        <span class="runtime-pill ${headerStatus.className}"><i></i>${esc(tr(headerStatus.label))}</span>
       </div>
       <div class="agent-reference-facts">
         <div><span>Version</span><strong>${esc(version)}</strong></div>

@@ -73,6 +73,11 @@ def test_agent_runtime_buttons_are_not_placeholders():
     assert "r.version||r.model||r.last_used_model" not in JS
     assert "r.active_capsules??r.pane_count" not in JS
     assert "const presence=runtimePresence(r);" in JS
+    assert "const headerStatus=agentHeaderStatus(presence,laneState);" in JS
+    assert "function agentHeaderStatus" in JS
+    assert "runtime-emergency" in JS
+    assert "runtime-disabled" in JS
+    assert "runtime-draining" in JS
     assert "runtime-available" in JS
     assert "runtime-attention" in JS
     assert "Credential configured" in JS

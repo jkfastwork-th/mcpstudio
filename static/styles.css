@@ -1126,10 +1126,16 @@ body{background:var(--ref-page)}
 .runtime-pill.runtime-available{background:#eef4ff;color:#3569f4}
 .runtime-pill.runtime-attention{background:#fff4ed;color:#c2410c}
 .runtime-pill.runtime-offline{background:#f3f5f8;color:#8491a4}
+.runtime-pill.runtime-draining{background:#fffaeb;color:#b54708}
+.runtime-pill.runtime-disabled{background:#f2f4f7;color:#475467}
+.runtime-pill.runtime-emergency{background:#fef3f2;color:#b42318}
 html[data-theme="dark"] .runtime-pill.runtime-online{background:#15382b;color:#6fe0aa}
 html[data-theme="dark"] .runtime-pill.runtime-available{background:#182a49;color:#9db9ff}
 html[data-theme="dark"] .runtime-pill.runtime-attention{background:#3a261c;color:#ffae7a}
 html[data-theme="dark"] .runtime-pill.runtime-offline{background:#202b3d;color:#9aa9bd}
+html[data-theme="dark"] .runtime-pill.runtime-draining{background:#3a2b12;color:#fec84b}
+html[data-theme="dark"] .runtime-pill.runtime-disabled{background:#29313f;color:#d0d5dd}
+html[data-theme="dark"] .runtime-pill.runtime-emergency{background:#3b1d1b;color:#fda29b}
 .agent-reference-facts{display:grid;margin-top:7px}
 .agent-reference-facts>div{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;min-height:26px;border-bottom:1px solid #edf1f6}
 .agent-reference-facts>div:last-child{border-bottom:0}
