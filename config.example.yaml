@@ -107,12 +107,79 @@ studio:
   #integration_entrypoints_enabled: false
   #integration_entrypoint_group: hirda.integrations
 
-  # Local plugin-folder discovery. P1/P2 reads manifests only; adapter code is
-  # never imported or executed until a later trust/runtime phase approves it.
+  # Local plugin-folder discovery + P3 trusted activation. Discovery never
+  # imports code; runtime activation additionally requires an exact fingerprint.
   #integration_plugin_folder_enabled: true
   #integration_plugin_folder_path: ./plugins
   #integration_plugin_manifest_name: hirda-plugin.yaml
   #integration_plugin_max_count: 128
+  #integration_plugin_runtime_enabled: false
+  #integration_plugin_trusted_fingerprints: []
+
+  # HIRDA machine-control backend. The raw Desktop Commander MCP is not
+  # exposed to lanes; backend tools remain under HIRDA permission/scope gates.
+  #desktop_commander_backend_enabled: false
+  #desktop_commander_backend_binary: desktop-commander
+  #desktop_commander_backend_timeout_seconds: 15.0
+  #desktop_commander_backend_cwd: /home/alfred
+
+  # Multi-machine registry. Remote agents should listen only on a private
+  # interface (for example Tailscale) and reference a token file, never plaintext.
+  #machine_local_id: openclaw
+  #machine_registry:
+  #  - id: openclaw
+  #    name: openclaw
+  #    local: true
+  #    capabilities: [filesystem, process, computer_use]
+  #    policy:
+  #      read: true
+  #      write: true
+  #      execute: true
+  #      destructive: false
+  #      fail_closed_unknown: true
+  #    providers:
+  #      desktop_commander: {mode: local}
+  #      computer_use: {mode: local}
+  #  - id: windows-dev
+  #    name: Windows Dev
+  #    address: 100.64.0.10
+  #    capabilities: [filesystem, process]
+  #    policy:
+  #      read: true
+  #      write: true
+  #      execute: false
+  #      destructive: false
+  #      fail_closed_unknown: true
+  #    providers:
+  #      desktop_commander:
+  #        mode: agent
+  #        endpoint: http://100.64.0.10:8765
+  #        token_file: ~/.config/hirda/windows-dev.token
+  #    workspace_map:
+  #      example: C:\Users\me\HIRDA\workspaces\example
+
+  # Safe auto-onboarding: HIRDA scans online Tailnet peers for a machine agent,
+  # records unknown nodes as pending, and requires explicit approval.
+  #machine_enrollment_enabled: false
+  #machine_enrollment_state_path: data/machine-enrollment.json
+  #machine_enrollment_agent_port: 8765
+  #machine_enrollment_probe_timeout_seconds: 2.0
+  #machine_enrollment_discovery_interval_seconds: 60.0
+  #machine_enrollment_allowed_cidrs: [100.64.0.0/10, "fd7a:115c:a1e0::/48"]
+  #machine_enrollment_default_policy:
+  #  read: true
+  #  write: false
+  #  execute: false
+  #  destructive: false
+  #  fail_closed_unknown: true
+
+  # P8 deterministic pixel-art candidate provider.
+  # Install/pin upstream with: uv run python scripts/bootstrap-pixel-art-studio.py
+  #pixel_art_studio_enabled: false
+  #pixel_art_studio_root: ./.hirda-cache/pixel-art-studio
+  #pixel_art_studio_output_root: ./data/visual-candidates/pixel-art-studio
+  #pixel_art_studio_expected_commit: f8c246635c4621a6c2b427833149afdc3dc3c719
+  #earth_world_validator_url: http://127.0.0.1:8816/api/world-authoring/validate
 
   # HCR cognitive fabric. Plan/shadow mode and execution are separate gates.
   #cognitive_router_enabled: false

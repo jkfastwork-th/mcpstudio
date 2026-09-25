@@ -178,6 +178,20 @@ class ManagedSessionRename(BaseModel):
     name: str = Field(min_length=1, max_length=240)
 
 
+class ManagedSessionMachineUpdate(BaseModel):
+    machine_id: str = Field(min_length=1, max_length=120)
+
+
+class MachineEnrollmentApprove(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    workspace_map: dict[str, str] = Field(default_factory=dict)
+    policy: dict[str, bool] = Field(default_factory=dict)
+
+
+class MachineEnrollmentReject(BaseModel):
+    reason: str = Field(default="operator-rejected", min_length=1, max_length=500)
+
+
 class ManagedSessionPermissionsUpdate(BaseModel):
     read: bool | None = None
     write: bool | None = None
@@ -259,6 +273,13 @@ class CapsuleHandoff(BaseModel):
 class CapsuleHandoffAck(BaseModel):
     agent: AgentId
     delivery_token: str = Field(min_length=16, max_length=512)
+    receipt: dict[str, Any] = Field(default_factory=dict)
+
+
+class CapsuleHandoffCompletion(BaseModel):
+    agent: AgentId
+    delivery_token: str = Field(min_length=16, max_length=512)
+    sentinel: str = Field(min_length=16, max_length=2048)
     receipt: dict[str, Any] = Field(default_factory=dict)
 
 

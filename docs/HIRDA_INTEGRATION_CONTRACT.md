@@ -222,6 +222,61 @@ integration_plugin_max_count: 128
 P1/P2 does not establish trust, import `adapter.py`, start plugin processes, or grant
 runtime authority. Those actions belong to the later trust/runtime phases.
 
+## P3 trusted runtime activation
+
+P3 keeps folder plugins fail-closed while allowing explicitly trusted adapters to join
+the same integration lifecycle. HIRDA computes a fingerprint over both the exact
+`hirda-plugin.yaml` bytes and the adapter entry bytes. Runtime code is imported only
+when all of the following are true:
+
+- manifest preflight passes;
+- `integration_plugin_runtime_enabled` is true;
+- the exact fingerprint is present in `integration_plugin_trusted_fingerprints`;
+- the loaded class implements the `IntegrationAdapter` contract;
+- the adapter's id, name, capabilities, tools, and permission map match the preflighted
+  manifest contract.
+
+Changing either the manifest or adapter code changes the fingerprint and returns the
+plugin to quarantine until the new fingerprint is explicitly trusted. A trusted backend
+provider also passes an `activating` stage where its runtime tool catalog must match its
+declared manifest before the integration can become `ready`.
+
+```yaml
+integration_plugin_runtime_enabled: false
+integration_plugin_trusted_fingerprints: []
+```
+
+## Desktop Commander backend capability
+
+Desktop Commander is integrated as a built-in HIRDA machine-control backend rather
+than a parallel control plane. HIRDA keeps its raw stdio MCP private and advertises a
+bounded tool subset with names such as:
+
+```text
+hirda__desktop_commander__read_file
+hirda__desktop_commander__write_file
+hirda__desktop_commander__start_process
+```
+
+These backend calls traverse the existing managed-session permission policy, workspace
+scope enforcement, Reflex policy, and JEV teacher evidence before execution. Relative
+filesystem paths are anchored to the managed workspace, URLs and paths outside a
+workspace are rejected under workspace scope, and process handles are owned by the
+managed session that created them. `start_process` is dynamically classified from the
+actual command, so a destructive shell command does not inherit a generic execute
+permission.
+
+HIRDA intentionally exposes only the file/process subset required for machine control;
+Desktop Commander configuration mutation, arbitrary process killing, feedback/browser
+actions, and unrelated diagnostics are not part of the backend contract.
+
+```yaml
+desktop_commander_backend_enabled: true
+desktop_commander_backend_binary: /path/to/desktop-commander
+desktop_commander_backend_timeout_seconds: 15.0
+desktop_commander_backend_cwd: /safe/launch/directory
+```
+
 ## Design rule
 
 Adding an integration must not create another parallel control plane.

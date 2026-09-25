@@ -33,6 +33,8 @@ class PluginFolderCandidate:
     root: str
     manifest_path: str | None
     manifest_sha256: str | None
+    adapter_sha256: str | None
+    fingerprint: str | None
     preflight_ok: bool
     quarantine_reason: str
     code_loaded: bool = False
@@ -74,6 +76,8 @@ class PluginFolderCandidate:
                 "reason": None if self.preflight_ok else self.quarantine_reason,
                 "issues": list(self.issues),
                 "manifest_sha256": self.manifest_sha256,
+                "adapter_sha256": self.adapter_sha256,
+                "fingerprint": self.fingerprint,
             },
             "certification": {},
             "status": {
@@ -83,12 +87,16 @@ class PluginFolderCandidate:
                 "quarantined": True,
                 "quarantine_reason": self.quarantine_reason,
                 "manifest_sha256": self.manifest_sha256,
+                "adapter_sha256": self.adapter_sha256,
+                "fingerprint": self.fingerprint,
             },
             "plugin": {
                 "version": self.version,
                 "root": self.root,
                 "manifest_path": self.manifest_path,
                 "manifest_sha256": self.manifest_sha256,
+                "adapter_sha256": self.adapter_sha256,
+                "fingerprint": self.fingerprint,
             },
         }
 
@@ -170,6 +178,8 @@ def _candidate(
     version: str | None = None,
     manifest_path: Path | None = None,
     manifest_sha256: str | None = None,
+    adapter_sha256: str | None = None,
+    fingerprint: str | None = None,
     preflight_ok: bool = False,
     quarantine_reason: str,
     schema: str | None = None,
@@ -190,6 +200,8 @@ def _candidate(
         root=str(plugin_root),
         manifest_path=str(manifest_path) if manifest_path is not None else None,
         manifest_sha256=manifest_sha256,
+        adapter_sha256=adapter_sha256,
+        fingerprint=fingerprint,
         preflight_ok=preflight_ok,
         quarantine_reason=quarantine_reason,
         schema=schema,
@@ -464,6 +476,36 @@ def inspect_plugin_folder(
             issues=(f"adapter entry not found: {entry}",),
         )
     try:
+        adapter_bytes = entry_path.read_bytes()
+    except OSError as exc:
+        return _candidate(
+            plugin_root,
+            plugin_id=plugin_id,
+            name=name,
+            version=version,
+            manifest_path=manifest_path,
+            manifest_sha256=digest,
+            quarantine_reason="adapter_read_failed",
+            schema=schema,
+            adapter=adapter,
+            issues=(type(exc).__name__,),
+        )
+    if len(adapter_bytes) > 2_097_152:
+        return _candidate(
+            plugin_root,
+            plugin_id=plugin_id,
+            name=name,
+            version=version,
+            manifest_path=manifest_path,
+            manifest_sha256=digest,
+            quarantine_reason="adapter_too_large",
+            schema=schema,
+            adapter=adapter,
+            issues=("adapter entry exceeds 2 MiB",),
+        )
+    adapter_digest = sha256(adapter_bytes).hexdigest()
+    fingerprint = sha256(raw_bytes + b"\0" + adapter_bytes).hexdigest()
+    try:
         capabilities = _clean_unique_strings(raw.get("capabilities", []))
         tools = _clean_unique_strings(raw.get("tools", []))
         permissions_raw = _mapping(raw.get("permissions", {}))
@@ -583,6 +625,8 @@ def inspect_plugin_folder(
         version=version,
         manifest_path=manifest_path,
         manifest_sha256=digest,
+        adapter_sha256=adapter_digest,
+        fingerprint=fingerprint,
         preflight_ok=True,
         quarantine_reason="trust_not_established",
         schema=schema,

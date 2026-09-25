@@ -27,10 +27,10 @@ from .agent_runtimes import AgentRuntimeInventory
 from .models import (
     SessionCreate, SessionHeartbeat, WorkerBind, WorkerHeartbeat, WorkerStatePatch,
     WorkSubmit, WorkFinish, WorkFail, WorkDetach, AlertAcknowledge, RetryDispatch, FaultInject, BatchDispatch,
-    SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate,
+    SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate, ManagedSessionMachineUpdate, MachineEnrollmentApprove, MachineEnrollmentReject,
     GraftConfigureRequest, GraftQueryRequest, GraftRollbackRequest, ComputerRepairRequest, ManagedGatewayAttach, GatewayContextUsageReport, SessionHandoffPrepareRequest,
     CapsuleCreate, CapsuleStageUpdate, CapsuleHandoff, CapsuleHandoffAck, CapsuleContractUpdate,
-    CapsuleHandoffValidation, CapsuleHandoffApproval, LaneStateUpdate, CapsuleComplete,
+    CapsuleHandoffValidation, CapsuleHandoffApproval, CapsuleHandoffCompletion, LaneStateUpdate, CapsuleComplete,
 )
 from .settings import Settings, load_settings
 from .workers import WorkerManager
@@ -43,10 +43,18 @@ from .observability import ObservabilityManager
 from .computer import ComputerUseManager
 from .graft import GraftManager, GraftError
 from .integrations import build_integration_manager
+from .machine_registry import MachineRegistry, MachineRegistryError
+from .machine_enrollment import MachineEnrollmentManager, MachineEnrollmentError
+from .machine_router import MachineCapabilityRouter
 from .reflex_metrics import ReflexMetrics
 from .action_adapter import evaluate_action_envelope
 from .action_registry import ActionProviderRegistryError, build_action_provider_registry
 from .cognitive_router import CognitiveRouter, CognitiveRouterError
+from .pixel_art_studio import (
+    PixelArtStudioError,
+    PixelArtStudioProvider,
+    VisualAssetOrchestrator,
+)
 from .world_authoring import WorldAuthoringError, WorldAuthoringManager
 
 
@@ -69,15 +77,35 @@ connectivity = ConnectivityManager(settings, db)
 oauth = OAuthManager(settings, db)
 managed_sessions = ManagedSessionManager(settings, db)
 graft = GraftManager(settings, db)
+earth_world_validator_url = (
+    os.environ.get("HIRDA_EARTH_WORLD_VALIDATOR_URL")
+    or str(getattr(settings.studio, "earth_world_validator_url", "") or "").strip()
+    or None
+)
+pixel_art_studio = PixelArtStudioProvider.from_settings(
+    settings.studio,
+    base_dir=settings.config_path.parent,
+)
 integration_manager = build_integration_manager(
     graft,
     settings.studio,
     base_dir=settings.config_path.parent,
+    pixel_art_studio=pixel_art_studio,
+)
+visual_assets = VisualAssetOrchestrator(
+    pixel_art_studio,
+    earth_validator_url=earth_world_validator_url,
 )
 world_authoring = WorldAuthoringManager(
     managed_sessions,
-    validator_url=os.environ.get("HIRDA_EARTH_WORLD_VALIDATOR_URL"),
+    validator_url=earth_world_validator_url,
 )
+computer = ComputerUseManager(settings.studio, db)
+machine_registry = MachineRegistry(settings.studio, base_dir=settings.config_path.parent)
+machine_enrollment = MachineEnrollmentManager(
+    settings.studio, machine_registry, base_dir=settings.config_path.parent
+)
+machine_router = MachineCapabilityRouter(machine_registry, integration_manager, computer)
 gateway_sessions = GatewaySessionManager(
     settings,
     db,
@@ -86,10 +114,12 @@ gateway_sessions = GatewaySessionManager(
     graft,
     capsules,
     world_authoring,
+    integration_manager,
+    machine_router,
+    machine_enrollment,
 )
 operations = OperationsManager(settings, db)
 observability = ObservabilityManager(settings, db)
-computer = ComputerUseManager(settings.studio, db)
 reflex_metrics = ReflexMetrics(settings.studio)
 action_provider_registry = build_action_provider_registry(settings.studio)
 cognitive_router = CognitiveRouter(settings.studio, herdr, agent_runtimes, capsules)
@@ -102,6 +132,7 @@ async def lifespan(app: FastAPI):
     # Integrations self-validate and self-certify at startup. Failures are
     # recorded in lifecycle state and never prevent the HIRDA control plane from starting.
     await integration_manager.snapshot(reconcile=True)
+    await machine_enrollment.start()
     await workers.start()
     await health.start()
     await herdr.start()
@@ -114,6 +145,8 @@ async def lifespan(app: FastAPI):
     await db.add_audit("studio.start", actor="system", data={"version": "0.9.10-m6.2.5", "production_mode": settings.studio.production_mode})
     yield
     await db.add_audit("studio.stop", actor="system", data={"version": "0.9.10-m6.2.5"})
+    await machine_enrollment.stop()
+    await integration_manager.close()
     await connectivity.stop()
     await execution.stop()
     await scheduler.stop()
@@ -561,7 +594,7 @@ async def world_authoring_preview_api(request: Request, payload: dict[str, Any])
             workspace=str(payload.get("workspace") or ""),
             proposal=proposal,
             providers=[dict(item) for item in providers],
-            actor="nova/http",
+            actor="hirda/http",
         )
     except WorldAuthoringError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -584,10 +617,52 @@ async def world_authoring_promote_api(request: Request, payload: dict[str, Any])
             commands=[dict(item) for item in commands],
             validation_id=str(payload.get("validationId") or ""),
             rationale=str(payload.get("rationale") or ""),
-            actor="nova/http",
+            actor="hirda/http",
         )
     except WorldAuthoringError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/visual-assets/generate")
+async def visual_asset_generate_api(request: Request, payload: dict[str, Any]):
+    if not _loopback_request(request):
+        raise HTTPException(status_code=403, detail="Visual asset API is loopback-only")
+    proposal = payload.get("proposal")
+    commands = payload.get("commands")
+    if not isinstance(proposal, dict):
+        raise HTTPException(status_code=400, detail="proposal must be an object")
+    if not isinstance(commands, list) or any(not isinstance(item, dict) for item in commands):
+        raise HTTPException(status_code=400, detail="commands must be an array of objects")
+    try:
+        result = await visual_assets.generate_and_promote(
+            proposal=proposal,
+            commands=[dict(item) for item in commands],
+            validation_id=str(payload.get("validationId") or ""),
+            rationale=str(payload.get("rationale") or ""),
+        )
+    except PixelArtStudioError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    candidate = result.get("candidate", {})
+    promotion = result.get("earthPromotion", {})
+    await db.add_audit(
+        "visual_asset.promote",
+        actor="hirda/http",
+        target_type="visual_asset",
+        target_id=str(candidate.get("logicalId") or ""),
+        data={
+            "provider": "pixel_art_studio",
+            "proposal_id": proposal.get("proposalId"),
+            "candidate_id": candidate.get("candidateId"),
+            "logical_id": candidate.get("logicalId"),
+            "sha256": candidate.get("sha256"),
+            "provider_commit": candidate.get("providerCommit"),
+            "promoted_by": result.get("promotedBy"),
+            "hirda_world_authority": result.get("hirdaWorldAuthority"),
+            "earth_validation_id": promotion.get("validationId"),
+            "canonical_url": promotion.get("canonicalUrl"),
+        },
+    )
+    return result
 
 
 @app.post("/api/health/poll")
@@ -609,6 +684,22 @@ async def capsule_list(limit: int = 100):
 async def capsule_get(capsule_id: str):
     try:
         return await capsules.get(capsule_id)
+    except CapsuleNotFound:
+        raise HTTPException(status_code=404, detail="capsule not found")
+
+
+@app.get("/api/capsules/{capsule_id}/context")
+async def capsule_context_projection(capsule_id: str):
+    try:
+        return await capsules.context_projection(capsule_id)
+    except CapsuleNotFound:
+        raise HTTPException(status_code=404, detail="capsule not found")
+
+
+@app.post("/api/capsules/{capsule_id}/context/compact")
+async def capsule_context_compact(capsule_id: str):
+    try:
+        return await capsules.compact_context(capsule_id)
     except CapsuleNotFound:
         raise HTTPException(status_code=404, detail="capsule not found")
 
@@ -680,6 +771,23 @@ async def capsule_handoff_ack(capsule_id: str, handoff_id: str, body: CapsuleHan
             handoff_id,
             agent=body.agent,
             delivery_token=body.delivery_token,
+            receipt=body.receipt,
+        )
+    except CapsuleNotFound:
+        raise HTTPException(status_code=404, detail="capsule not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/capsules/{capsule_id}/handoff/{handoff_id}/complete")
+async def capsule_handoff_complete(capsule_id: str, handoff_id: str, body: CapsuleHandoffCompletion):
+    try:
+        return await capsules.complete_handoff(
+            capsule_id,
+            handoff_id,
+            agent=body.agent,
+            delivery_token=body.delivery_token,
+            sentinel=body.sentinel,
             receipt=body.receipt,
         )
     except CapsuleNotFound:
@@ -897,6 +1005,70 @@ async def managed_session_resume(session_id: str):
         raise HTTPException(status_code=404, detail="Unknown managed session")
     except ManagedSessionError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/api/machines")
+async def machine_registry_status():
+    return await machine_router.machine_snapshot()
+
+
+@app.get("/api/machines/enrollments")
+async def machine_enrollment_status():
+    return machine_enrollment.snapshot()
+
+
+@app.post("/api/machines/discover")
+async def machine_enrollment_discover():
+    try:
+        return await machine_enrollment.discover()
+    except MachineEnrollmentError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.post("/api/machines/enrollments/{machine_id}/approve")
+async def machine_enrollment_approve(machine_id: str, payload: MachineEnrollmentApprove):
+    try:
+        return machine_enrollment.approve(
+            machine_id,
+            name=payload.name,
+            workspace_map=payload.workspace_map,
+            policy=payload.policy,
+            actor="ui/api",
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown pending machine")
+    except (MachineEnrollmentError, MachineRegistryError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.post("/api/machines/enrollments/{machine_id}/reject")
+async def machine_enrollment_reject(machine_id: str, payload: MachineEnrollmentReject):
+    try:
+        return machine_enrollment.reject(machine_id, reason=payload.reason, actor="ui/api")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown pending machine")
+
+
+@app.get("/api/machines/{machine_id}/policy")
+async def machine_policy(machine_id: str):
+    try:
+        return machine_router.machine_policy(machine_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown machine")
+    except MachineRegistryError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.put("/api/managed/sessions/{session_id}/machine")
+async def managed_session_machine_update(session_id: str, payload: ManagedSessionMachineUpdate):
+    try:
+        return await machine_router.bind_session(
+            db, session_id, payload.machine_id, actor="ui/api"
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown managed session or machine")
+    except MachineRegistryError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @app.get("/api/managed/sessions/{session_id}/permissions")
@@ -1705,6 +1877,21 @@ def _computer_token_ok(websocket: WebSocket) -> bool:
     return websocket.query_params.get("token") == expected
 
 
+def _require_machine_permission(session: dict[str, Any], category: str) -> None:
+    decision = machine_router.authorize_session(session, category)
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": decision.code,
+                "message": decision.message,
+                "machine_id": decision.machine_id,
+                "permission_class": decision.category,
+                "machine_policy": decision.policy,
+            },
+        )
+
+
 @app.get("/api/computer/status")
 async def computer_status():
     return await computer.status()
@@ -1713,28 +1900,36 @@ async def computer_status():
 @app.get("/api/computer/descriptor/{managed_session_id}")
 async def computer_descriptor(managed_session_id: str):
     try:
-        return await computer.descriptor(managed_session_id)
+        session = await managed_sessions.get_session(managed_session_id)
+        _require_machine_permission(session, "read")
+        return await machine_router.computer_descriptor(managed_session_id, session)
     except KeyError:
         raise HTTPException(status_code=404, detail="Unknown managed session")
-    except (RuntimeError, ValueError, OSError) as exc:
+    except (RuntimeError, ValueError, OSError, MachineRegistryError) as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
 
 @app.get("/api/computer/re-pair-targets/{managed_session_id}")
 async def computer_re_pair_targets(managed_session_id: str):
     try:
+        session = await managed_sessions.get_session(managed_session_id)
+        _require_machine_permission(session, "read")
+        machine_router.require_local_computer(session)
         return await computer.repair_targets(managed_session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Unknown managed session")
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
-    except (RuntimeError, ValueError, OSError) as exc:
+    except (RuntimeError, ValueError, OSError, MachineRegistryError) as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
 
 @app.post("/api/computer/re-pair/{managed_session_id}")
 async def computer_re_pair(managed_session_id: str, payload: ComputerRepairRequest):
     try:
+        session = await managed_sessions.get_session(managed_session_id)
+        _require_machine_permission(session, "execute")
+        machine_router.require_local_computer(session)
         return await computer.repair_runtime(
             managed_session_id,
             payload.mode,
@@ -1744,7 +1939,7 @@ async def computer_re_pair(managed_session_id: str, payload: ComputerRepairReque
         raise HTTPException(status_code=404, detail="Unknown managed session")
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
-    except (RuntimeError, ValueError, OSError) as exc:
+    except (RuntimeError, ValueError, OSError, MachineRegistryError) as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
 
@@ -1761,12 +1956,14 @@ async def computer_vnc_ws(websocket: WebSocket, managed_session_id: str):
         return
 
     try:
-        await computer.descriptor(managed_session_id)
+        session = await managed_sessions.get_session(managed_session_id)
+        _require_machine_permission(session, "execute")
+        await machine_router.computer_descriptor(managed_session_id, session)
     except KeyError:
         await websocket.accept(subprotocol=_computer_ws_subprotocol(websocket))
         await websocket.close(code=4404, reason="Unknown managed session")
         return
-    except (RuntimeError, ValueError):
+    except (RuntimeError, ValueError, MachineRegistryError):
         await websocket.accept(subprotocol=_computer_ws_subprotocol(websocket))
         await websocket.close(code=1011, reason="Computer runtime unavailable")
         return

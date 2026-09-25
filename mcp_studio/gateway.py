@@ -30,6 +30,10 @@ from .reflex import (
 from .graft import GraftManager, GraftError
 from .capsules import CapsuleService, CapsuleNotFound
 from .world_authoring import WorldAuthoringManager, WorldAuthoringError
+from .integrations import IntegrationManager, IntegrationError
+from .machine_router import MachineCapabilityRouter
+from .machine_registry import MachineRegistryError
+from .machine_enrollment import MachineEnrollmentManager, MachineEnrollmentError
 
 
 CONTROL_TOOL_NAMES = (
@@ -77,6 +81,9 @@ class GatewaySessionManager:
         graft: GraftManager | None = None,
         capsules: CapsuleService | None = None,
         world_authoring: WorldAuthoringManager | None = None,
+        integrations: IntegrationManager | None = None,
+        machine_router: MachineCapabilityRouter | None = None,
+        machine_enrollment: MachineEnrollmentManager | None = None,
     ):
         self.settings = settings
         self.db = db
@@ -85,6 +92,9 @@ class GatewaySessionManager:
         self.graft = graft
         self.capsules = capsules
         self.world_authoring = world_authoring
+        self.integrations = integrations
+        self.machine_router = machine_router
+        self.machine_enrollment = machine_enrollment
 
     def authenticate(self, request: Request) -> tuple[str, str, str, str, str]:
         """Authenticate and derive a stable client identity.
@@ -303,6 +313,75 @@ class GatewaySessionManager:
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
             },
             {
+                "name": "mcpstudio_list_machines",
+                "description": "List HIRDA machines, their capabilities, providers, and live readiness.",
+                "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            {
+                "name": "mcpstudio_list_machine_enrollments",
+                "description": "List pending, approved, and rejected HIRDA machine enrollment candidates.",
+                "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            {
+                "name": "mcpstudio_discover_machines",
+                "description": "Scan online Tailscale peers for HIRDA Machine Agents. Unknown nodes remain pending and receive no authority.",
+                "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            {
+                "name": "mcpstudio_approve_machine",
+                "description": "Explicitly approve one pending machine with workspace mappings and a restrictive per-machine policy.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "machine": {"type": "string", "minLength": 1},
+                        "name": {"type": "string"},
+                        "workspace_map": {
+                            "type": "object",
+                            "additionalProperties": {"type": "string"},
+                        },
+                        "policy": {
+                            "type": "object",
+                            "properties": {
+                                "read": {"type": "boolean"},
+                                "write": {"type": "boolean"},
+                                "execute": {"type": "boolean"},
+                                "destructive": {"type": "boolean"},
+                                "fail_closed_unknown": {"type": "boolean"},
+                            },
+                            "additionalProperties": False,
+                        },
+                    },
+                    "required": ["machine"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "mcpstudio_reject_machine",
+                "description": "Reject one pending machine enrollment candidate without granting any capability.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "machine": {"type": "string", "minLength": 1},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["machine"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "mcpstudio_bind_machine",
+                "description": "Bind a managed session to a target machine. Backend tools route to that machine until rebound.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "machine": {"type": "string", "minLength": 1},
+                        "session": {"type": "string"},
+                    },
+                    "required": ["machine"],
+                    "additionalProperties": False,
+                },
+            },
+            {
                 "name": "mcpstudio_register_workspace",
                 "description": "Register an existing project directory under an approved workspace root.",
                 "inputSchema": {
@@ -369,6 +448,7 @@ class GatewaySessionManager:
                     "properties": {
                         "name": {"type": "string"}, "workspace": {"type": "string"},
                         "attach": {"type": "boolean", "default": True},
+                        "machine": {"type": "string"},
                     },
                     "required": ["name", "workspace"], "additionalProperties": False,
                 },
@@ -406,7 +486,7 @@ class GatewaySessionManager:
             },
             {
                 "name": "mcpstudio_set_lane_state",
-                "description": "Set one agent lane to normal, draining, disabled, or emergency. Disabled/emergency can auto-handoff active portable capsules; Guarded waits for approval and Pinned never moves automatically.",
+                "description": "Set one agent lane to normal, draining, disabled, or emergency. Draining/disabled/emergency automatically roll active portable capsules to a compatible normal lane when auto_handoff is enabled; Guarded waits for approval and resumes after approval, while Pinned never moves automatically.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -664,6 +744,21 @@ class GatewaySessionManager:
             headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
         )
 
+    @staticmethod
+    def _jsonrpc_raw_tool_response(
+        request_id: Any, result: dict[str, Any], *, is_error: bool = False
+    ) -> Response:
+        payload = dict(result or {})
+        if is_error:
+            payload["isError"] = True
+        body = {"jsonrpc": "2.0", "id": request_id, "result": payload}
+        return Response(
+            content=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            status_code=200,
+            media_type="application/json",
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
+
     def _ordered_management_tools(self) -> list[dict[str, Any]]:
         """Return Studio tools with project-selection controls first.
 
@@ -678,13 +773,23 @@ class GatewaySessionManager:
             key=lambda tool: (priority.get(str(tool.get("name")), len(priority)), str(tool.get("name"))),
         )
 
+    def _ordered_backend_tools(self) -> list[dict[str, Any]]:
+        if self.machine_router is not None:
+            return self.machine_router.backend_tools()
+        if self.integrations is None:
+            return []
+        return self.integrations.backend_tools()
+
+    def _all_local_tools(self) -> list[dict[str, Any]]:
+        return self._ordered_management_tools() + self._ordered_backend_tools()
+
     def _augment_tools_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         result = payload.get("result") if isinstance(payload, dict) else None
         tools = result.get("tools") if isinstance(result, dict) else None
         if not isinstance(tools, list):
             return payload
 
-        studio_tools = self._ordered_management_tools()
+        studio_tools = self._all_local_tools()
         studio_names = {str(t.get("name")) for t in studio_tools if isinstance(t, dict)}
         # Studio control tools are intentionally prepended.  Besides making the
         # control plane discoverable on an unbound transport, this protects the
@@ -697,7 +802,7 @@ class GatewaySessionManager:
         return payload
 
     def _augment_tools_content(self, content: bytes, content_type: str) -> bytes:
-        if not self._management_tools():
+        if not self._all_local_tools():
             return content
         try:
             if "text/event-stream" in content_type:
@@ -807,7 +912,7 @@ class GatewaySessionManager:
         return {
             "jsonrpc": "2.0",
             "id": request_id,
-            "result": {"tools": self._ordered_management_tools()},
+            "result": {"tools": self._all_local_tools()},
         }
 
     async def _resolve_managed_session(self, value: str) -> dict[str, Any]:
@@ -1805,6 +1910,60 @@ class GatewaySessionManager:
             raise ManagedSessionError("managed sessions are unavailable")
         if name == "mcpstudio_list_workspaces":
             return {"workspaces": await self.managed_sessions.list_workspaces()}
+        if name == "mcpstudio_list_machines":
+            if self.machine_router is None:
+                raise ManagedSessionError("machine capability router is unavailable")
+            return await self.machine_router.machine_snapshot()
+        if name == "mcpstudio_list_machine_enrollments":
+            if self.machine_enrollment is None:
+                raise ManagedSessionError("machine enrollment is unavailable")
+            return self.machine_enrollment.snapshot()
+        if name == "mcpstudio_discover_machines":
+            if self.machine_enrollment is None:
+                raise ManagedSessionError("machine enrollment is unavailable")
+            try:
+                return await self.machine_enrollment.discover()
+            except MachineEnrollmentError as exc:
+                raise ManagedSessionError(str(exc)) from exc
+        if name == "mcpstudio_approve_machine":
+            if self.machine_enrollment is None:
+                raise ManagedSessionError("machine enrollment is unavailable")
+            try:
+                return self.machine_enrollment.approve(
+                    str(args.get("machine") or ""),
+                    name=(str(args.get("name")) if args.get("name") is not None else None),
+                    workspace_map=(dict(args.get("workspace_map")) if isinstance(args.get("workspace_map"), dict) else {}),
+                    policy=(dict(args.get("policy")) if isinstance(args.get("policy"), dict) else {}),
+                    actor="chatgpt/mcp",
+                )
+            except (KeyError, MachineEnrollmentError, MachineRegistryError) as exc:
+                raise ManagedSessionError(str(exc)) from exc
+        if name == "mcpstudio_reject_machine":
+            if self.machine_enrollment is None:
+                raise ManagedSessionError("machine enrollment is unavailable")
+            try:
+                return self.machine_enrollment.reject(
+                    str(args.get("machine") or ""),
+                    reason=str(args.get("reason") or "operator-rejected"),
+                    actor="chatgpt/mcp",
+                )
+            except KeyError as exc:
+                raise ManagedSessionError(str(exc)) from exc
+        if name == "mcpstudio_bind_machine":
+            if self.machine_router is None:
+                raise ManagedSessionError("machine capability router is unavailable")
+            selector = str(args.get("session") or "").strip()
+            if selector:
+                target = await self._resolve_managed_session(selector)
+            else:
+                gateway = await self.db.get_gateway_session(gateway_session_id)
+                managed_id = str(gateway.get("managed_session_id") or "")
+                if not managed_id:
+                    raise ManagedSessionError("no managed session is attached")
+                target = await self.managed_sessions.get_session(managed_id)
+            return await self.machine_router.bind_session(
+                self.db, target["id"], str(args.get("machine") or ""), actor="chatgpt/mcp"
+            )
         if name == "mcpstudio_register_workspace":
             return {"workspace": await self.managed_sessions.register_workspace(
                 key=str(args.get("key") or ""), project_path=str(args.get("project_path") or ""),
@@ -1944,6 +2103,11 @@ class GatewaySessionManager:
             created = await self.managed_sessions.create_session(
                 name=str(args.get("name") or ""), workspace_key=str(args.get("workspace") or ""), actor="chatgpt/mcp",
             )
+            if args.get("machine") and self.machine_router is not None:
+                await self.machine_router.bind_session(
+                    self.db, created["id"], str(args.get("machine")), actor="chatgpt/mcp"
+                )
+                created = await self.managed_sessions.get_session(created["id"])
             attached = None
             if args.get("attach", True):
                 attached = await self.bind_managed_session(gateway_session_id, created["id"], actor="chatgpt/mcp")
@@ -1954,6 +2118,10 @@ class GatewaySessionManager:
                 name=(str(args.get("name")) if args.get("name") is not None else None),
                 actor="chatgpt/mcp",
             )
+            if args.get("machine") and self.machine_router is not None:
+                await self.machine_router.bind_session(
+                    self.db, target["id"], str(args.get("machine")), actor="chatgpt/mcp"
+                )
             return await self.bind_managed_session(gateway_session_id, target["id"], actor="chatgpt/mcp")
         if name == "mcpstudio_use_session":
             selector = str(args.get("session") or "").strip()
@@ -2025,9 +2193,16 @@ class GatewaySessionManager:
         if name == "mcpstudio_current_session":
             gateway = await self.db.get_gateway_session(gateway_session_id)
             managed_id = gateway.get("managed_session_id")
+            managed = await self.managed_sessions.get_session(managed_id) if managed_id else None
+            machine = (
+                self.machine_router.session_machine(managed)
+                if managed is not None and self.machine_router is not None
+                else None
+            )
             return {
                 "gateway_session_id": gateway_session_id,
-                "managed_session": await self.managed_sessions.get_session(managed_id) if managed_id else None,
+                "managed_session": managed,
+                "machine": machine,
                 "context": self.context_status_from_gateway(gateway),
             }
         if name == "mcpstudio_detach_session":
@@ -2140,23 +2315,18 @@ class GatewaySessionManager:
         else:
             studio_session, reclaimed = await self.db.create_session(session_payload), False
 
-        # A durable Studio session owns its project pin. When a transport is
-        # reclaimed, initialize it directly against the same dedicated Serena
-        # process instead of briefly falling back to the neutral/base Serena.
-        managed_session_id = studio_session.get("managed_session_id")
+        # Reclaim restores logical identity/project continuity only. MCP
+        # initialize/reconnect is transport lifecycle traffic and must never
+        # wake a managed Serena runtime. The durable project pin remains on the
+        # Studio logical session; this transport starts unbound on the neutral
+        # base upstream and activates the pinned runtime lazily on real Serena
+        # tool execution (or via an explicit management bind/use operation).
+        managed_session_id = None
         target_url = server.url
-        if managed_session_id:
-            if not (self.managed_sessions and self.managed_sessions.enabled):
-                raise HTTPException(
-                    status_code=503,
-                    detail="Managed project pin cannot be restored while managed sessions are disabled",
-                )
-            managed = await self.managed_sessions.ensure_running(str(managed_session_id))
-            target_url = managed.get("endpoint") or f"http://127.0.0.1:{managed['port']}/mcp"
-
         # ChatGPT may create a fresh external Streamable-HTTP transport for each
-        # tool call. Reclaimed logical sessions must keep the same gateway/upstream
-        # Serena session or Serena's workspace lease becomes stale immediately.
+        # tool call. Reclaim may reuse an existing neutral/base gateway transport,
+        # but it deliberately does not reactivate a previously pinned Serena
+        # runtime during initialize.
         if reclaimed:
             reusable = await self.db.find_reusable_gateway_session(
                 studio_session_id=studio_session["id"],
@@ -2333,7 +2503,10 @@ class GatewaySessionManager:
             pass
         await self.db.touch_gateway_session(gateway_session_id)
         session = await self.db.get_gateway_session(gateway_session_id)
-        session = await self._reconcile_gateway_managed_binding(gateway_session_id, session)
+
+        # Do not reconcile/wake a managed runtime merely because a transport
+        # reconnected. Runtime activation is decided after the JSON-RPC request
+        # has been classified below.
         header_context = self.context_usage_from_request(request)
         context_report: dict[str, Any] | None = None
         if header_context is not None and session.get("managed_session_id"):
@@ -2353,9 +2526,43 @@ class GatewaySessionManager:
 
         jsonrpc = self.parse_jsonrpc(body)
         rpc_method = jsonrpc.get("method") if jsonrpc else None
-        params = jsonrpc.get("params") if jsonrpc and isinstance(jsonrpc.get("params"), dict) else {}
-        tool_name = str(params.get("name") or "") if rpc_method == "tools/call" else ""
-        tool_args = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+        params = (
+            jsonrpc.get("params")
+            if jsonrpc and isinstance(jsonrpc.get("params"), dict)
+            else {}
+        )
+        tool_name = (
+            str(params.get("name") or "")
+            if rpc_method == "tools/call"
+            else ""
+        )
+        tool_args = (
+            params.get("arguments")
+            if isinstance(params.get("arguments"), dict)
+            else {}
+        )
+
+        # Lazy managed-runtime activation:
+        #
+        # Transport lifecycle traffic such as initialize, notifications, ping,
+        # tools/list and HIRDA's own control tools must remain on the neutral
+        # control plane and must not wake a Serena worker.
+        #
+        # Ordinary Serena tool execution is the point where the durable logical
+        # project pin becomes an active runtime binding.
+        needs_managed_runtime = (
+            request.method == "POST"
+            and rpc_method == "tools/call"
+            and bool(tool_name)
+            and not tool_name.startswith("mcpstudio_")
+        )
+
+        if needs_managed_runtime:
+            session = await self._reconcile_gateway_managed_binding(
+                gateway_session_id,
+                session,
+            )
+
         reflex_id: str | None = None
 
         def _decorate_local_response(response: Response) -> Response:
@@ -2380,6 +2587,27 @@ class GatewaySessionManager:
             return _decorate_local_response(
                 self._jsonrpc_tool_response(
                     jsonrpc.get("id") if jsonrpc else None, visible_payload, is_error=is_error
+                )
+            )
+
+        def local_backend_tool_response(result: dict[str, Any]) -> Response:
+            visible_result = dict(result or {})
+            if context_notice:
+                blocks = visible_result.get("content")
+                if isinstance(blocks, list):
+                    blocks.append(
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {"HIRDA_CONTEXT_WARNING": context_notice},
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        }
+                    )
+            return _decorate_local_response(
+                self._jsonrpc_raw_tool_response(
+                    jsonrpc.get("id") if jsonrpc else None, visible_result
                 )
             )
 
@@ -2482,7 +2710,13 @@ class GatewaySessionManager:
                     },
                     is_error=True,
                 )
-            if session.get("managed_session_id") and self.settings.studio.managed_session_tool_permissions_enabled:
+            backend_tool = bool(
+                (self.machine_router is not None and self.machine_router.is_backend_tool(tool_name))
+                or (self.machine_router is None and self.integrations is not None and self.integrations.is_backend_tool(tool_name))
+            )
+            if session.get("managed_session_id") and (
+                self.settings.studio.managed_session_tool_permissions_enabled or backend_tool
+            ):
                 try:
                     if managed_session is None:
                         managed_session = await self.db.get_managed_session(str(session["managed_session_id"]))
@@ -2495,7 +2729,18 @@ class GatewaySessionManager:
                         is_error=True,
                     )
                 policy_started = time.perf_counter()
-                decision = decide_tool_call(self.settings.studio, managed_session, tool_name, tool_args)
+                declared_category = (
+                    self.machine_router.backend_permission(tool_name)
+                    if self.machine_router is not None
+                    else (self.integrations.backend_permission(tool_name) if self.integrations is not None else None)
+                )
+                decision = decide_tool_call(
+                    self.settings.studio,
+                    managed_session,
+                    tool_name,
+                    tool_args,
+                    declared_category=declared_category,
+                )
                 policy_ms = round((time.perf_counter() - policy_started) * 1000.0, 3)
                 if not decision.allowed:
                     return local_tool_response(
@@ -2509,6 +2754,26 @@ class GatewaySessionManager:
                         },
                         is_error=True,
                     )
+
+                machine_decision = None
+                if backend_tool and self.machine_router is not None:
+                    machine_decision = self.machine_router.authorize_session(
+                        managed_session, decision.category
+                    )
+                    if not machine_decision.allowed:
+                        return local_tool_response(
+                            {
+                                "error": machine_decision.code,
+                                "message": machine_decision.message,
+                                "tool": tool_name,
+                                "permission_class": decision.category,
+                                "workspace_key": managed_session.get("workspace_key"),
+                                "machine_id": machine_decision.machine_id,
+                                "session_policy": decision.policy,
+                                "machine_policy": machine_decision.policy,
+                            },
+                            is_error=True,
+                        )
 
                 reflex_started = time.perf_counter()
                 reflex_decision, reflex_features = evaluate_reflex_tool_call(
@@ -2547,6 +2812,14 @@ class GatewaySessionManager:
                         "reflex_id": reflex_id,
                         "request_id": jsonrpc.get("id") if jsonrpc else None,
                         "workspace_key": managed_session.get("workspace_key"),
+                        "machine": (
+                            {
+                                "id": machine_decision.machine_id,
+                                "policy": machine_decision.policy,
+                            }
+                            if machine_decision is not None
+                            else None
+                        ),
                         "features": reflex_features.as_dict(),
                         "reflex": reflex_decision.as_dict(),
                         "teacher": {
@@ -2577,6 +2850,16 @@ class GatewaySessionManager:
                             "studio_session_id": session["studio_session_id"],
                             "managed_session_id": session.get("managed_session_id"),
                             "workspace_key": managed_session.get("workspace_key"),
+                            "machine_id": (
+                                machine_decision.machine_id
+                                if machine_decision is not None
+                                else None
+                            ),
+                            "machine_policy": (
+                                machine_decision.policy
+                                if machine_decision is not None
+                                else None
+                            ),
                             "tool": tool_name,
                             "permission_class": decision.category,
                             "reflex": reflex_decision.as_dict(),
@@ -2610,6 +2893,85 @@ class GatewaySessionManager:
                         },
                         is_error=True,
                     )
+
+        if (
+            request.method == "POST"
+            and rpc_method == "tools/call"
+            and (
+                (self.machine_router is not None and self.machine_router.is_backend_tool(tool_name))
+                or (self.machine_router is None and self.integrations is not None and self.integrations.is_backend_tool(tool_name))
+            )
+        ):
+            if not session.get("managed_session_id"):
+                return local_tool_response(
+                    {
+                        "error": "NO_MANAGED_SESSION_BOUND",
+                        "message": "HIRDA backend tools require a managed workspace session.",
+                    },
+                    is_error=True,
+                )
+            try:
+                if managed_session is None:
+                    managed_session = await self.db.get_managed_session(
+                        str(session["managed_session_id"])
+                    )
+                declared_category = (
+                    self.machine_router.backend_permission(tool_name)
+                    if self.machine_router is not None
+                    else self.integrations.backend_permission(tool_name)
+                )
+                decision = decide_tool_call(
+                    self.settings.studio,
+                    managed_session,
+                    tool_name,
+                    tool_args,
+                    declared_category=declared_category,
+                )
+                if not decision.allowed:
+                    return local_tool_response(
+                        {
+                            "error": decision.code,
+                            "message": decision.message,
+                            "tool": tool_name,
+                            "permission_class": decision.category,
+                            "workspace_key": managed_session.get("workspace_key"),
+                            "policy": decision.policy,
+                        },
+                        is_error=True,
+                    )
+                metadata = managed_session.get("metadata") if isinstance(managed_session.get("metadata"), dict) else {}
+                context = {
+                    "managed_session_id": managed_session.get("id"),
+                    "workspace_key": managed_session.get("workspace_key"),
+                    "project_path": managed_session.get("project_path"),
+                    "machine_id": metadata.get("machine_id"),
+                    "policy": decision.policy,
+                    "permission_class": decision.category,
+                }
+                if self.machine_router is not None:
+                    result = await self.machine_router.call_backend_tool(
+                        tool_name, tool_args, context=context
+                    )
+                else:
+                    result = await self.integrations.call_backend_tool(
+                        tool_name, tool_args, context=context
+                    )
+                await record_reflex_outcome(200, "integration-backend")
+                return local_backend_tool_response(result)
+            except (IntegrationError, KeyError) as exc:
+                return local_tool_response(
+                    {"error": type(exc).__name__, "message": str(exc), "tool": tool_name},
+                    is_error=True,
+                )
+            except Exception as exc:
+                return local_tool_response(
+                    {
+                        "error": "BACKEND_TOOL_FAILED",
+                        "message": f"{type(exc).__name__}: {exc}",
+                        "tool": tool_name,
+                    },
+                    is_error=True,
+                )
 
         target_url = session.get("upstream_url") or server.url
         if (

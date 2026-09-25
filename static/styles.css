@@ -3737,3 +3737,62 @@ html[data-theme="dark"] .reflex-disagree{color:#efbd68!important}
 html[data-theme="dark"] .context-usage.ok{color:#81c995}html[data-theme="dark"] .context-usage.warning{color:#fdd663}html[data-theme="dark"] .context-usage.critical{color:#f28b82}
 .reference-icon-button i[hidden]{display:none}
 .context-rollover-button{border-color:rgba(249,171,0,.55);background:rgba(249,171,0,.12);color:#8a5b00}.context-rollover-button.critical{border-color:rgba(234,67,53,.55);background:rgba(234,67,53,.12);color:#b3261e}html[data-theme="dark"] .context-rollover-button{color:#fdd663}html[data-theme="dark"] .context-rollover-button.critical{color:#f28b82}
+
+/* Machine capability + effective permission UI */
+.managed-session-row.machine-aware{
+  grid-template-columns:minmax(150px,1.25fr) minmax(180px,1.45fr) minmax(175px,1.25fr) 92px minmax(130px,1fr) auto;
+}
+.session-machine-cell{display:flex;min-width:0;flex-direction:column;align-items:flex-start;gap:4px}
+.machine-health,.computer-session-machine{display:inline-flex;align-items:center;gap:6px;min-width:0;font-weight:760;color:var(--ref-text,var(--text))}
+.machine-health i,.computer-session-machine i{width:7px;height:7px;flex:0 0 7px;border-radius:50%;background:#9aa0a6;box-shadow:0 0 0 2px rgba(154,160,166,.10)}
+.machine-health.online i,.computer-session-machine.online i{background:#34a853;box-shadow:0 0 0 2px rgba(52,168,83,.14)}
+.machine-health.offline i,.computer-session-machine.offline i{background:#ea4335;box-shadow:0 0 0 2px rgba(234,67,53,.14)}
+.machine-provider-badges,.machine-capability-badges,.machine-permission-badges{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.machine-provider-badge,.machine-capability-badge,.machine-permission-badge{display:inline-flex;align-items:center;justify-content:center;min-height:18px;padding:2px 5px;border:1px solid var(--border);border-radius:5px;background:var(--surface-2);color:var(--ref-muted,var(--muted));font-size:var(--fs-75);font-weight:800;line-height:1;letter-spacing:.02em}
+.machine-provider-badge.ready,.machine-capability-badge.ready,.machine-permission-badge.allowed{border-color:rgba(52,168,83,.30);background:rgba(52,168,83,.10);color:#188038}
+.machine-provider-badge.down,.machine-capability-badge.down,.machine-permission-badge.blocked{border-color:rgba(234,67,53,.26);background:rgba(234,67,53,.08);color:#b3261e}
+.machine-permission-badge{width:20px;padding-left:0;padding-right:0}
+.machine-permission-badges.large .machine-permission-badge{width:24px;min-height:22px}
+.session-machine-detail{display:grid;grid-template-columns:minmax(180px,.9fr) minmax(260px,1.4fr) minmax(220px,1fr);gap:12px;margin:10px 0 16px;padding:12px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2)}
+.session-machine-detail>div{display:flex;min-width:0;flex-direction:column;align-items:flex-start;gap:5px}
+.session-machine-detail>div>span:first-child{color:var(--ref-muted,var(--muted));font-size:var(--fs-75);font-weight:800;text-transform:uppercase;letter-spacing:.06em}
+.session-machine-detail strong{font-size:var(--fs-9)}
+.session-machine-detail small{color:var(--ref-muted,var(--muted));font-size:var(--fs-75)}
+.computer-session-machine{margin-top:3px;font-size:var(--fs-75);font-weight:700;color:var(--ref-muted,var(--muted))}
+.computer-session-card.gui-unavailable{opacity:.68;cursor:not-allowed;filter:saturate(.65)}
+.computer-session-card.gui-unavailable .computer-monitor-icon{opacity:.45}
+.computer-session-card.gui-unavailable .computer-session-runtime{color:#b3261e}
+html[data-theme="dark"] .machine-provider-badge.ready,html[data-theme="dark"] .machine-capability-badge.ready,html[data-theme="dark"] .machine-permission-badge.allowed{color:#81c995;border-color:rgba(129,201,149,.35);background:rgba(129,201,149,.08)}
+html[data-theme="dark"] .machine-provider-badge.down,html[data-theme="dark"] .machine-capability-badge.down,html[data-theme="dark"] .machine-permission-badge.blocked,html[data-theme="dark"] .computer-session-card.gui-unavailable .computer-session-runtime{color:#f28b82;border-color:rgba(242,139,130,.30);background:rgba(242,139,130,.07)}
+@media(max-width:1120px){
+  .managed-session-row.machine-aware{grid-template-columns:minmax(145px,1.1fr) minmax(170px,1.3fr) minmax(160px,1.1fr) 90px auto}
+  .managed-session-row.machine-aware>:nth-child(5){display:none}
+  .session-machine-detail{grid-template-columns:1fr 1fr}
+  .session-machine-detail>div:last-child{grid-column:1/-1}
+}
+@media(max-width:760px){
+  .managed-session-row.machine-aware{grid-template-columns:1fr}
+  .managed-session-row.machine-aware.header{display:none}
+  .managed-session-row.machine-aware>:nth-child(5){display:block}
+  .session-machine-detail{grid-template-columns:1fr}
+  .session-machine-detail>div:last-child{grid-column:auto}
+}
+
+/* Machine enrollment / Tailnet onboarding */
+.machine-enrollment-card{margin:14px 0}
+.machine-enrollment-head{align-items:flex-start}
+.machine-enrollment-head p{margin:4px 0 0;color:var(--ref-muted,var(--muted));font-size:var(--fs-8)}
+.machine-enrollment-list{display:grid;gap:8px}
+.machine-enrollment-row{display:grid;grid-template-columns:minmax(180px,1.25fr) minmax(210px,1.4fr) minmax(110px,.7fr) auto;gap:14px;align-items:center;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2)}
+.machine-enrollment-identity,.machine-enrollment-caps,.machine-enrollment-seen{display:flex;min-width:0;flex-direction:column;align-items:flex-start;gap:4px}
+.machine-enrollment-identity small,.machine-enrollment-caps small,.machine-enrollment-seen small{color:var(--ref-muted,var(--muted));font-size:var(--fs-75)}
+.machine-enrollment-identity code{max-width:100%;overflow:hidden;text-overflow:ellipsis;color:var(--ref-muted,var(--muted));font-size:var(--fs-75)}
+.machine-enrollment-caps>div{display:flex;gap:4px;flex-wrap:wrap}
+.machine-enrollment-caps>div>span{padding:3px 6px;border:1px solid rgba(26,115,232,.22);border-radius:999px;background:rgba(26,115,232,.07);color:#185abc;font-size:var(--fs-75);font-weight:700}
+.machine-enrollment-label,.machine-enrollment-seen>span{color:var(--ref-muted,var(--muted));font-size:var(--fs-75);font-weight:800;text-transform:uppercase;letter-spacing:.05em}
+.machine-enrollment-actions{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap}
+.machine-enrollment-error{padding:10px 12px;border:1px solid rgba(234,67,53,.28);border-radius:8px;background:rgba(234,67,53,.08);color:#b3261e;font-size:var(--fs-8)}
+html[data-theme="dark"] .machine-enrollment-caps>div>span{border-color:rgba(138,180,248,.28);background:rgba(138,180,248,.08);color:#8ab4f8}
+html[data-theme="dark"] .machine-enrollment-error{color:#f28b82;border-color:rgba(242,139,130,.28);background:rgba(242,139,130,.07)}
+@media(max-width:1000px){.machine-enrollment-row{grid-template-columns:1fr 1fr}.machine-enrollment-actions{justify-content:flex-start}}
+@media(max-width:620px){.machine-enrollment-row{grid-template-columns:1fr}.machine-enrollment-head{gap:10px;flex-direction:column}.machine-enrollment-head .button{width:100%}}

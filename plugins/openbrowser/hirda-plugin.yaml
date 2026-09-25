@@ -1,0 +1,51 @@
+schema: hirda-plugin-v1
+id: openbrowser
+name: OpenBrowser
+version: 0.1.2
+adapter:
+  runtime: python
+  entry: adapter.py
+  class: OpenBrowserIntegration
+capabilities:
+  - browser_automation
+  - browser_session
+  - browser_dom
+  - web_interaction
+tools:
+  - navigate
+  - state
+  - click
+  - input_text
+  - select_dropdown
+  - scroll
+  - wait
+  - go_back
+  - switch_tab
+  - close_tab
+  - send_keys
+permissions:
+  navigate: execute
+  state: read
+  click: execute
+  input_text: write
+  select_dropdown: write
+  scroll: execute
+  wait: read
+  go_back: execute
+  switch_tab: execute
+  close_tab: execute
+  send_keys: write
+health:
+  type: adapter_probe
+routing:
+  mode: browser-control-backend
+  preferred_lanes: [hermes, codex, claude]
+metadata:
+  backend_capability: true
+  raw_mcp_not_exposed: true
+  managed_session_profile_isolation: true
+  permission_router: hirda
+  routing_strategy: dom_cdp_first_visual_fallback
+  visual_fallback_provider: computer_use
+  upstream: openbrowser-ai
+  upstream_version: 0.1.54

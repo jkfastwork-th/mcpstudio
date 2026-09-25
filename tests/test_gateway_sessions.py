@@ -230,3 +230,38 @@ def test_context_usage_header_is_accepted_without_estimation(tmp_path: Path):
     out_of_range = make_request()
     out_of_range.scope["headers"].append((b"x-openai-context-usage-percent", b"101"))
     assert manager.context_usage_from_request(out_of_range) is None
+
+
+def test_tools_list_includes_hirda_backend_before_upstream(tmp_path: Path):
+    class FakeIntegrations:
+        @staticmethod
+        def backend_tools():
+            return [
+                {
+                    "name": "hirda__desktop_commander__read_file",
+                    "description": "HIRDA backend read",
+                    "inputSchema": {"type": "object", "properties": {}},
+                }
+            ]
+
+    manager = GatewaySessionManager(
+        make_settings(tmp_path),
+        Database(str(tmp_path / "db.sqlite3")),
+        integrations=FakeIntegrations(),
+    )
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "tools": [
+                {
+                    "name": "serena_tool",
+                    "description": "upstream",
+                    "inputSchema": {"type": "object", "properties": {}},
+                }
+            ]
+        },
+    }
+    result = manager._augment_tools_payload(payload)
+    names = [tool["name"] for tool in result["result"]["tools"]]
+    assert names == ["hirda__desktop_commander__read_file", "serena_tool"]

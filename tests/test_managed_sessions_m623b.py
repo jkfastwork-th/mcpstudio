@@ -70,8 +70,8 @@ async def test_schema_v6_managed_session_tables_and_gateway_columns(tmp_path: Pa
     db = Database(str(tmp_path / "db.sqlite3"))
     await db.init()
     status = await db.schema_status()
-    assert status["current_version"] == 9
-    assert status["expected_version"] == 9
+    assert status["current_version"] == 10
+    assert status["expected_version"] == 10
 
     def inspect():
         with db._connect() as conn:
@@ -484,7 +484,7 @@ def init_request(body: bytes) -> Request:
 
 
 @pytest.mark.asyncio
-async def test_reclaimed_logical_session_restores_project_pin_before_initialize(tmp_path: Path, monkeypatch):
+async def test_reclaimed_logical_session_preserves_pin_without_waking_runtime_during_initialize(tmp_path: Path, monkeypatch):
     settings = settings_for(tmp_path)
     db = Database(settings.studio.database); await db.init()
     studio = await db.create_session({"client_id":"stable", "client_type":"chatgpt", "server_id":"serena-8001"})
@@ -496,14 +496,22 @@ async def test_reclaimed_logical_session_restores_project_pin_before_initialize(
 
     manager = GatewaySessionManager(settings, db, managed_sessions=FakeManagedPool())
     targets = []
+    ensure_calls = []
+
+    async def unexpected_ensure(session_id):
+        ensure_calls.append(session_id)
+        raise AssertionError("initialize must not wake a managed Serena runtime")
+
     async def fake_send(**kwargs):
         targets.append(kwargs["server_url"])
         return FakeHttpClient(), httpx.Response(
             200,
-            headers={"content-type":"application/json", "mcp-session-id":"managed-up"},
+            headers={"content-type":"application/json", "mcp-session-id":"base-up"},
             content=b'{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"Serena","version":"1"}}}',
             request=httpx.Request("POST", kwargs["server_url"]),
         )
+
+    monkeypatch.setattr(manager.managed_sessions, "ensure_running", unexpected_ensure)
     monkeypatch.setattr(manager, "_send", fake_send)
     payload = {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}
     body = json.dumps(payload).encode()
@@ -511,17 +519,22 @@ async def test_reclaimed_logical_session_restores_project_pin_before_initialize(
         request=init_request(body), server=settings.servers[0], body=body, jsonrpc=payload,
         client_id="stable", client_type="chatgpt", identity_scope="explicit", identity_source="test",
     )
-    assert targets == ["http://127.0.0.1:43110/mcp"]
+
+    assert ensure_calls == []
+    assert targets == ["http://127.0.0.1:8001/mcp"]
     gateway = await db.get_gateway_session(response.headers["mcp-session-id"])
     assert gateway["studio_session_id"] == studio["id"]
-    assert gateway["managed_session_id"] == "ms-alpha"
-    assert gateway["upstream_url"] == "http://127.0.0.1:43110/mcp"
-    assert gateway["upstream_session_id"] == "managed-up"
-    assert response.headers["x-mcp-studio-managed-session-id"] == "ms-alpha"
+    assert gateway["managed_session_id"] is None
+    assert gateway["upstream_url"] == "http://127.0.0.1:8001/mcp"
+    assert gateway["upstream_session_id"] == "base-up"
+    assert response.headers.get("x-mcp-studio-managed-session-id") is None
+
+    logical = await db.get_session(studio["id"])
+    assert logical["managed_session_id"] == "ms-alpha"
 
 
 @pytest.mark.asyncio
-async def test_gateway_lazily_converges_to_logical_session_pin(tmp_path: Path, monkeypatch):
+async def test_gateway_does_not_converge_logical_pin_for_tools_list(tmp_path: Path, monkeypatch):
     settings = settings_for(tmp_path)
     db = Database(settings.studio.database); await db.init()
     studio = await db.create_session({"client_id":"c", "client_type":"chatgpt", "server_id":"serena-8001"})
@@ -531,13 +544,20 @@ async def test_gateway_lazily_converges_to_logical_session_pin(tmp_path: Path, m
         init_payload={"jsonrpc":"2.0","id":1,"method":"initialize","params":{}},
         upstream_url="http://127.0.0.1:8001/mcp",
     )
+
     def pin():
         with db._connect() as conn:
             conn.execute("UPDATE sessions SET managed_session_id=? WHERE id=?", ("ms-alpha", studio["id"]))
     await db._run(pin)
 
     manager = GatewaySessionManager(settings, db, managed_sessions=FakeManagedPool())
-    opened=[]; closed=[]; proxied=[]
+    opened=[]; closed=[]; proxied=[]; ensure_calls=[]
+    original_ensure = manager.managed_sessions.ensure_running
+
+    async def tracked_ensure(session_id):
+        ensure_calls.append(session_id)
+        return await original_ensure(session_id)
+
     async def fake_open(session, url):
         opened.append(url); return "managed-up"
     async def fake_close(url, upstream):
@@ -549,6 +569,8 @@ async def test_gateway_lazily_converges_to_logical_session_pin(tmp_path: Path, m
             content=b'{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}',
             request=httpx.Request("POST", kwargs["server_url"]),
         )
+
+    monkeypatch.setattr(manager.managed_sessions, "ensure_running", tracked_ensure)
     monkeypatch.setattr(manager, "_open_upstream_session", fake_open)
     monkeypatch.setattr(manager, "_close_upstream_session", fake_close)
     monkeypatch.setattr(manager, "_send", fake_send)
@@ -557,11 +579,77 @@ async def test_gateway_lazily_converges_to_logical_session_pin(tmp_path: Path, m
         request=request_for(body, gateway["id"]), server=settings.servers[0], body=body,
         gateway_session_id=gateway["id"],
     )
+
     assert response.status_code == 200
     updated=await db.get_gateway_session(gateway["id"])
+    assert updated["managed_session_id"] is None
+    assert updated["upstream_url"] == "http://127.0.0.1:8001/mcp"
+    assert updated["upstream_session_id"] == "base-up"
+    assert ensure_calls == []
+    assert opened == []
+    assert closed == []
+    assert proxied == ["http://127.0.0.1:8001/mcp"]
+
+    logical = await db.get_session(studio["id"])
+    assert logical["managed_session_id"] == "ms-alpha"
+
+
+@pytest.mark.asyncio
+async def test_gateway_lazily_converges_to_logical_session_pin_on_serena_tool_call(tmp_path: Path, monkeypatch):
+    settings = settings_for(tmp_path)
+    db = Database(settings.studio.database); await db.init()
+    studio = await db.create_session({"client_id":"c", "client_type":"chatgpt", "server_id":"serena-8001"})
+    gateway = await db.create_gateway_session(
+        studio_session_id=studio["id"], client_id="c", client_type="chatgpt", server_id="serena-8001",
+        upstream_session_id="base-up", protocol_version="2025-06-18",
+        init_payload={"jsonrpc":"2.0","id":1,"method":"initialize","params":{}},
+        upstream_url="http://127.0.0.1:8001/mcp",
+    )
+
+    def pin():
+        with db._connect() as conn:
+            conn.execute("UPDATE sessions SET managed_session_id=? WHERE id=?", ("ms-alpha", studio["id"]))
+    await db._run(pin)
+
+    manager = GatewaySessionManager(settings, db, managed_sessions=FakeManagedPool())
+    opened=[]; closed=[]; proxied=[]; ensure_calls=[]
+    original_ensure = manager.managed_sessions.ensure_running
+
+    async def tracked_ensure(session_id):
+        ensure_calls.append(session_id)
+        return await original_ensure(session_id)
+
+    async def fake_open(session, url):
+        opened.append(url); return "managed-up"
+    async def fake_close(url, upstream):
+        closed.append((url, upstream))
+    async def fake_send(**kwargs):
+        proxied.append(kwargs["server_url"])
+        return FakeHttpClient(), httpx.Response(
+            200, headers={"content-type":"application/json"},
+            content=b'{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"ok"}],"isError":false}}',
+            request=httpx.Request("POST", kwargs["server_url"]),
+        )
+
+    monkeypatch.setattr(manager.managed_sessions, "ensure_running", tracked_ensure)
+    monkeypatch.setattr(manager, "_open_upstream_session", fake_open)
+    monkeypatch.setattr(manager, "_close_upstream_session", fake_close)
+    monkeypatch.setattr(manager, "_send", fake_send)
+    body = json.dumps({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {"name": "list_dir", "arguments": {"relative_path": "."}},
+    }).encode()
+    response = await manager.proxy_existing(
+        request=request_for(body, gateway["id"]), server=settings.servers[0], body=body,
+        gateway_session_id=gateway["id"],
+    )
+
+    assert response.status_code == 200
+    updated = await db.get_gateway_session(gateway["id"])
     assert updated["managed_session_id"] == "ms-alpha"
     assert updated["upstream_url"] == "http://127.0.0.1:43110/mcp"
     assert updated["upstream_session_id"] == "managed-up"
+    assert ensure_calls == ["ms-alpha"]
     assert opened == ["http://127.0.0.1:43110/mcp"]
     assert closed == [("http://127.0.0.1:8001/mcp", "base-up")]
     assert proxied == ["http://127.0.0.1:43110/mcp"]

@@ -44,3 +44,4 @@ graft/.cache/
 # One-off machine/session-specific browser experiments
 /scripts/restart-oriverse-chrome-tieroff.cjs
 /scripts/test-webgpu-tier-off.cjs
+.hirda-cache/

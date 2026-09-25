@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -13,6 +15,116 @@ T = TypeVar("T")
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+EVENT_LEDGER_SCHEMA_VERSION = 1
+EVENT_REDACTED = "[REDACTED]"
+EVENT_PRIVATE_REASONING_OMITTED = "[OMITTED_PRIVATE_REASONING]"
+
+
+def _redact_event_text(value: str) -> str:
+    text = str(value or "")
+    text = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+\-/=]+", "Bearer [REDACTED]", text)
+    text = re.sub(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b", EVENT_REDACTED, text)
+    text = re.sub(r"\b(?:sk|xai|ghp|github_pat)-?[A-Za-z0-9_\-]{12,}\b", EVENT_REDACTED, text)
+    return text
+
+
+def _event_key_is_secret(key: str) -> bool:
+    normalized = str(key or "").casefold().replace("-", "_")
+    if normalized.endswith(("_sha256", "_hash", "_fingerprint")):
+        return False
+    return normalized in {
+        "authorization", "proxy_authorization", "password", "passwd",
+        "secret", "client_secret", "api_key", "apikey", "access_token",
+        "refresh_token", "id_token", "delivery_token", "cookie", "set_cookie",
+    } or normalized.endswith(("_password", "_secret", "_api_key", "_apikey", "_token"))
+
+
+def _redact_event_data(value: Any, *, key: str | None = None) -> Any:
+    if key is not None:
+        normalized = str(key).casefold().replace("-", "_")
+        if normalized in {
+            "chain_of_thought",
+            "chainofthought",
+            "hidden_reasoning",
+            "private_reasoning",
+            "internal_monologue",
+            "scratchpad",
+            "cot",
+        }:
+            return EVENT_PRIVATE_REASONING_OMITTED
+        if _event_key_is_secret(key):
+            return EVENT_REDACTED
+    if isinstance(value, dict):
+        return {str(k): _redact_event_data(v, key=str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_event_data(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_event_data(item) for item in value]
+    if isinstance(value, str):
+        return _redact_event_text(value)
+    return value
+
+
+def _event_stream_id(kind: str, data: dict[str, Any], server_id: str | None = None) -> str:
+    explicit = str(data.get("stream_id") or "").strip()
+    if explicit:
+        return explicit
+    for key, prefix in (
+        ("capsule_id", "capsule"),
+        ("managed_session_id", "managed-session"),
+        ("gateway_session_id", "gateway-session"),
+        ("studio_session_id", "studio-session"),
+        ("session_id", "session"),
+        ("work_id", "work"),
+        ("worker_id", "worker"),
+    ):
+        value = str(data.get(key) or "").strip()
+        if value:
+            return f"{prefix}:{value}"
+    if server_id:
+        return f"server:{server_id}"
+    family = str(kind or "event").split(".", 1)[0] or "event"
+    return f"{family}:global"
+
+
+def _event_correlation_id(data: dict[str, Any]) -> str | None:
+    correlation = data.get("correlation")
+    if isinstance(correlation, dict):
+        for key in ("correlation_id", "handoff_id", "turn_id"):
+            value = str(correlation.get(key) or "").strip()
+            if value:
+                return value
+    for key in ("correlation_id", "handoff_id", "a2a_task_id", "request_id"):
+        value = str(data.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _event_payload_sha256(
+    *, created_at: str, kind: str, severity: str, server_id: str | None,
+    message: str, data: dict[str, Any],
+) -> str:
+    payload = {
+        "created_at": created_at,
+        "kind": kind,
+        "severity": severity,
+        "server_id": server_id,
+        "message": message,
+        "data": data,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _event_chain_sha256(
+    *, event_id: str, stream_id: str, stream_seq: int,
+    payload_sha256: str, prev_event_hash: str | None,
+) -> str:
+    raw = "|".join((event_id, stream_id, str(stream_seq), payload_sha256, prev_event_hash or ""))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _workspace_key(value: str) -> str:
@@ -56,6 +168,14 @@ class Database:
                     PRAGMA journal_mode=WAL;
                     CREATE TABLE IF NOT EXISTS events (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        event_id TEXT,
+                        stream_id TEXT,
+                        stream_seq INTEGER,
+                        correlation_id TEXT,
+                        schema_version INTEGER NOT NULL DEFAULT 1,
+                        payload_sha256 TEXT,
+                        prev_event_hash TEXT,
+                        event_hash TEXT,
                         created_at TEXT NOT NULL,
                         kind TEXT NOT NULL,
                         severity TEXT NOT NULL,
@@ -508,6 +628,104 @@ class Database:
                     (now,),
                 )
 
+                event_columns = {row[1] for row in db.execute("PRAGMA table_info(events)").fetchall()}
+                event_additions = {
+                    "event_id": "TEXT",
+                    "stream_id": "TEXT",
+                    "stream_seq": "INTEGER",
+                    "correlation_id": "TEXT",
+                    "schema_version": "INTEGER NOT NULL DEFAULT 1",
+                    "payload_sha256": "TEXT",
+                    "prev_event_hash": "TEXT",
+                    "event_hash": "TEXT",
+                }
+                for name, ddl in event_additions.items():
+                    if name not in event_columns:
+                        db.execute(f"ALTER TABLE events ADD COLUMN {name} {ddl}")
+
+                migration_10 = db.execute(
+                    "SELECT 1 FROM schema_migrations WHERE version=10"
+                ).fetchone()
+                if migration_10 is None:
+                    db.execute("DROP TRIGGER IF EXISTS trg_events_append_only_update")
+                    db.execute("DROP TRIGGER IF EXISTS trg_events_append_only_delete")
+                    rows = db.execute("SELECT * FROM events ORDER BY id ASC").fetchall()
+                    stream_state: dict[str, tuple[int, str | None]] = {}
+                    for row in rows:
+                        raw_data = json.loads(row["data_json"] or "{}")
+                        stream_id = str(row["stream_id"] or "").strip() or _event_stream_id(
+                            str(row["kind"] or ""),
+                            raw_data,
+                            row["server_id"],
+                        )
+                        previous_seq, previous_hash = stream_state.get(stream_id, (0, None))
+                        stream_seq = previous_seq + 1
+                        event_id = str(row["event_id"] or "").strip() or f"EV-LEGACY-{int(row['id']):016X}"
+                        correlation_id = (
+                            str(row["correlation_id"] or "").strip()
+                            or _event_correlation_id(raw_data)
+                        )
+                        payload_sha256 = _event_payload_sha256(
+                            created_at=str(row["created_at"]),
+                            kind=str(row["kind"]),
+                            severity=str(row["severity"]),
+                            server_id=row["server_id"],
+                            message=str(row["message"]),
+                            data=raw_data,
+                        )
+                        event_hash = _event_chain_sha256(
+                            event_id=event_id,
+                            stream_id=stream_id,
+                            stream_seq=stream_seq,
+                            payload_sha256=payload_sha256,
+                            prev_event_hash=previous_hash,
+                        )
+                        db.execute(
+                            """UPDATE events
+                               SET event_id=?, stream_id=?, stream_seq=?, correlation_id=?,
+                                   schema_version=?, payload_sha256=?, prev_event_hash=?, event_hash=?
+                               WHERE id=?""",
+                            (
+                                event_id,
+                                stream_id,
+                                stream_seq,
+                                correlation_id,
+                                EVENT_LEDGER_SCHEMA_VERSION,
+                                payload_sha256,
+                                previous_hash,
+                                event_hash,
+                                row["id"],
+                            ),
+                        )
+                        stream_state[stream_id] = (stream_seq, event_hash)
+                    db.execute(
+                        "INSERT OR IGNORE INTO schema_migrations(version, name, applied_at) VALUES(10, 'hirda-canonical-event-ledger', ?)",
+                        (now,),
+                    )
+
+                db.executescript(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id
+                        ON events(event_id);
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_events_stream_seq
+                        ON events(stream_id, stream_seq);
+                    CREATE INDEX IF NOT EXISTS idx_events_stream_id
+                        ON events(stream_id, id);
+                    CREATE INDEX IF NOT EXISTS idx_events_correlation
+                        ON events(correlation_id, id);
+                    CREATE TRIGGER IF NOT EXISTS trg_events_append_only_update
+                    BEFORE UPDATE ON events
+                    BEGIN
+                        SELECT RAISE(ABORT, 'events ledger is append-only');
+                    END;
+                    CREATE TRIGGER IF NOT EXISTS trg_events_append_only_delete
+                    BEFORE DELETE ON events
+                    BEGIN
+                        SELECT RAISE(ABORT, 'events ledger is append-only');
+                    END;
+                    """
+                )
+
         await self._run(op)
 
     async def set_lane_state(
@@ -560,12 +778,71 @@ class Database:
         severity: str = "info",
         server_id: str | None = None,
         data: dict[str, Any] | None = None,
+        stream_id: str | None = None,
+        correlation_id: str | None = None,
     ) -> None:
+        safe_data = _redact_event_data(dict(data or {}))
+        if not isinstance(safe_data, dict):
+            safe_data = {}
+        safe_message = _redact_event_text(message)
+        resolved_stream = str(stream_id or "").strip() or _event_stream_id(
+            kind,
+            safe_data,
+            server_id,
+        )
+        resolved_correlation = (
+            str(correlation_id or "").strip()
+            or _event_correlation_id(safe_data)
+        ) or None
+        stamp = _now()
+        event_id = f"EV-{uuid.uuid4().hex.upper()}"
+
         def op() -> None:
             with self._connect() as db:
+                previous = db.execute(
+                    """SELECT stream_seq, event_hash FROM events
+                       WHERE stream_id=? ORDER BY stream_seq DESC LIMIT 1""",
+                    (resolved_stream,),
+                ).fetchone()
+                stream_seq = int(previous["stream_seq"] or 0) + 1 if previous else 1
+                previous_hash = str(previous["event_hash"] or "") or None if previous else None
+                payload_sha256 = _event_payload_sha256(
+                    created_at=stamp,
+                    kind=kind,
+                    severity=severity,
+                    server_id=server_id,
+                    message=safe_message,
+                    data=safe_data,
+                )
+                event_hash = _event_chain_sha256(
+                    event_id=event_id,
+                    stream_id=resolved_stream,
+                    stream_seq=stream_seq,
+                    payload_sha256=payload_sha256,
+                    prev_event_hash=previous_hash,
+                )
                 db.execute(
-                    "INSERT INTO events(created_at, kind, severity, server_id, message, data_json) VALUES(?,?,?,?,?,?)",
-                    (_now(), kind, severity, server_id, message, json.dumps(data or {}, ensure_ascii=False)),
+                    """INSERT INTO events(
+                           event_id, stream_id, stream_seq, correlation_id,
+                           schema_version, payload_sha256, prev_event_hash, event_hash,
+                           created_at, kind, severity, server_id, message, data_json
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        event_id,
+                        resolved_stream,
+                        stream_seq,
+                        resolved_correlation,
+                        EVENT_LEDGER_SCHEMA_VERSION,
+                        payload_sha256,
+                        previous_hash,
+                        event_hash,
+                        stamp,
+                        kind,
+                        severity,
+                        server_id,
+                        safe_message,
+                        json.dumps(safe_data, ensure_ascii=False, sort_keys=True),
+                    ),
                 )
 
         await self._run(op)
@@ -577,6 +854,122 @@ class Database:
             with self._connect() as db:
                 rows = db.execute("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
                 return [{**dict(row), "data": json.loads(row["data_json"] or "{}")} for row in rows]
+
+        return await self._run(op)
+
+    async def list_events(
+        self,
+        *,
+        stream_id: str | None = None,
+        stream_prefix: str | None = None,
+        correlation_id: str | None = None,
+        kind_prefix: str | None = None,
+        after_sequence: int | None = None,
+        limit: int | None = None,
+        ascending: bool = True,
+    ) -> list[dict[str, Any]]:
+        if stream_id and stream_prefix:
+            raise ValueError("stream_id and stream_prefix are mutually exclusive")
+        if after_sequence is not None and not stream_id:
+            raise ValueError("after_sequence requires stream_id")
+        resolved_limit = None if limit is None else max(1, min(int(limit), 50000))
+
+        def op() -> list[dict[str, Any]]:
+            with self._connect() as db:
+                where: list[str] = []
+                params: list[Any] = []
+                if stream_id:
+                    where.append("stream_id=?")
+                    params.append(stream_id)
+                elif stream_prefix:
+                    where.append("stream_id LIKE ?")
+                    params.append(f"{stream_prefix}%")
+                if correlation_id:
+                    where.append("correlation_id=?")
+                    params.append(correlation_id)
+                if kind_prefix:
+                    where.append("kind LIKE ?")
+                    params.append(f"{kind_prefix}%")
+                if after_sequence is not None:
+                    where.append("stream_seq>?")
+                    params.append(int(after_sequence))
+                sql = "SELECT * FROM events"
+                if where:
+                    sql += " WHERE " + " AND ".join(where)
+                order_column = "stream_seq" if stream_id else "id"
+                sql += f" ORDER BY {order_column} {'ASC' if ascending else 'DESC'}"
+                if resolved_limit is not None:
+                    sql += " LIMIT ?"
+                    params.append(resolved_limit)
+                rows = db.execute(sql, tuple(params)).fetchall()
+                return [
+                    {**dict(row), "data": json.loads(row["data_json"] or "{}")}
+                    for row in rows
+                ]
+
+        return await self._run(op)
+
+    async def verify_event_ledger(self, stream_id: str | None = None) -> dict[str, Any]:
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                if stream_id:
+                    rows = db.execute(
+                        "SELECT * FROM events WHERE stream_id=? ORDER BY stream_seq ASC",
+                        (stream_id,),
+                    ).fetchall()
+                else:
+                    rows = db.execute(
+                        "SELECT * FROM events ORDER BY stream_id ASC, stream_seq ASC, id ASC"
+                    ).fetchall()
+
+                errors: list[dict[str, Any]] = []
+                state: dict[str, tuple[int, str | None]] = {}
+                for row in rows:
+                    current_stream = str(row["stream_id"] or "")
+                    expected_seq, expected_prev_hash = state.get(current_stream, (0, None))
+                    expected_seq += 1
+                    data = json.loads(row["data_json"] or "{}")
+                    payload_sha256 = _event_payload_sha256(
+                        created_at=str(row["created_at"]),
+                        kind=str(row["kind"]),
+                        severity=str(row["severity"]),
+                        server_id=row["server_id"],
+                        message=str(row["message"]),
+                        data=data,
+                    )
+                    event_hash = _event_chain_sha256(
+                        event_id=str(row["event_id"] or ""),
+                        stream_id=current_stream,
+                        stream_seq=int(row["stream_seq"] or 0),
+                        payload_sha256=payload_sha256,
+                        prev_event_hash=expected_prev_hash,
+                    )
+                    problems: list[str] = []
+                    if int(row["stream_seq"] or 0) != expected_seq:
+                        problems.append("stream_seq")
+                    if (row["prev_event_hash"] or None) != expected_prev_hash:
+                        problems.append("prev_event_hash")
+                    if str(row["payload_sha256"] or "") != payload_sha256:
+                        problems.append("payload_sha256")
+                    if str(row["event_hash"] or "") != event_hash:
+                        problems.append("event_hash")
+                    if problems:
+                        errors.append(
+                            {
+                                "event_id": row["event_id"],
+                                "stream_id": current_stream,
+                                "stream_seq": row["stream_seq"],
+                                "problems": problems,
+                            }
+                        )
+                    state[current_stream] = (expected_seq, str(row["event_hash"] or "") or None)
+
+                return {
+                    "ok": not errors,
+                    "checked": len(rows),
+                    "streams": len(state),
+                    "errors": errors,
+                }
 
         return await self._run(op)
 
@@ -692,7 +1085,7 @@ class Database:
                 integrity = db.execute("PRAGMA quick_check").fetchone()[0]
                 return {
                     "current_version": int(rows[-1]["version"]) if rows else 0,
-                    "expected_version": 9,
+                    "expected_version": 10,
                     "integrity": integrity,
                     "migrations": [dict(r) for r in rows],
                 }

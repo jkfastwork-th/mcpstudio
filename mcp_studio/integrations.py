@@ -2,12 +2,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from importlib import metadata
+import importlib.util
 import os
+import re
+import sys
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 from urllib.parse import urlparse
 
+from .desktop_commander import (
+    EXPOSED_DESKTOP_COMMANDER_TOOLS,
+    DesktopCommanderBackend,
+)
 from .graft import ALLOWED_GRAFT_TOOLS, GraftManager
+from .pixel_art_studio import PixelArtStudioProvider
 from .plugin_folder import (
     DEFAULT_PLUGIN_DIRECTORY,
     DEFAULT_PLUGIN_MANIFEST_NAME,
@@ -25,6 +33,7 @@ INTEGRATION_STAGES = (
     "validating",
     "registered",
     "certifying",
+    "activating",
     "ready",
 )
 DEFAULT_INTEGRATION_ENTRYPOINT_GROUP = "hirda.integrations"
@@ -169,6 +178,23 @@ class IntegrationAdapter(Protocol):
         ...
 
 
+@runtime_checkable
+class BackendIntegrationAdapter(Protocol):
+    manifest: IntegrationManifest
+
+    async def list_tools(self) -> list[dict[str, Any]]:
+        ...
+
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        ...
+
+
 @dataclass(slots=True)
 class RegisteredIntegration:
     adapter: IntegrationAdapter
@@ -179,6 +205,7 @@ class RegisteredIntegration:
     error: str | None = None
     validation: dict[str, Any] = field(default_factory=dict)
     certification: dict[str, Any] = field(default_factory=dict)
+    tool_catalog: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def integration_id(self) -> str:
@@ -186,19 +213,16 @@ class RegisteredIntegration:
 
 
 class IntegrationManager:
-    """One lifecycle for HIRDA subsystem integrations.
-
-    Adapters keep subsystem-specific logic; this manager owns discovery,
-    validation, registration, certification, and readiness reporting.
-
-    Local plugin-folder discovery is manifest-only in P1/P2. Folder plugins
-    remain quarantined and no adapter code is imported or executed.
-    """
+    """Common lifecycle plus trusted backend-tool activation for HIRDA integrations."""
 
     def __init__(self) -> None:
         self._integrations: dict[str, RegisteredIntegration] = {}
         self._discovery_errors: list[dict[str, str]] = []
         self._plugin_discovery: PluginFolderDiscovery | None = None
+        self._plugin_runtime_enabled = False
+        self._plugin_trusted_fingerprints: set[str] = set()
+        self._plugin_loaded_fingerprints: dict[str, str] = {}
+        self._backend_name_map: dict[str, tuple[str, str]] = {}
 
     def register(
         self,
@@ -220,6 +244,7 @@ class IntegrationManager:
             source=_clean_text(source, field_name="source"),
         )
         self._integrations[integration_id] = registration
+        self._rebuild_backend_name_map()
         return registration
 
     def get(self, integration_id: str) -> RegisteredIntegration:
@@ -233,35 +258,66 @@ class IntegrationManager:
         self,
         root: Path,
         *,
-        manifest_name: str = "hirda-plugin.yaml",
-        max_plugins: int = 128,
+        manifest_name: str = DEFAULT_PLUGIN_MANIFEST_NAME,
+        max_plugins: int = DEFAULT_PLUGIN_MAX_COUNT,
+        runtime_enabled: bool = False,
+        trusted_fingerprints: list[str] | tuple[str, ...] | set[str] = (),
     ) -> dict[str, Any]:
         self._plugin_discovery = PluginFolderDiscovery(
             root,
             manifest_name=manifest_name,
             max_plugins=max_plugins,
         )
+        self._plugin_runtime_enabled = bool(runtime_enabled)
+        self._plugin_trusted_fingerprints = {
+            str(value or "").strip().lower()
+            for value in trusted_fingerprints
+            if str(value or "").strip()
+        }
         return self.discover_plugin_folders()
+
+    def _reserved_plugin_ids(self) -> set[str]:
+        return {
+            integration_id
+            for integration_id, registration in self._integrations.items()
+            if not registration.source.startswith("folder:")
+        }
 
     def discover_plugin_folders(self) -> dict[str, Any]:
         if self._plugin_discovery is None:
-            return {
-                "enabled": False,
-                "plugin_count": 0,
-                "preflight_ok_count": 0,
-                "quarantined_count": 0,
-                "code_loaded_count": 0,
-                "errors": [],
-                "plugins": [],
-            }
-        return self._plugin_discovery.scan(
-            reserved_ids=set(self._integrations)
-        )
+            return self.plugin_folder_snapshot()
+        self._plugin_discovery.scan(reserved_ids=self._reserved_plugin_ids())
+        # P3 trust is tied to exact manifest+adapter bytes. A rescan that sees
+        # changed, removed, invalid, disabled, or no-longer-trusted code must
+        # revoke routing immediately. The Python module may remain in sys.modules
+        # until process exit, but it is unreachable through HIRDA after removal.
+        for integration_id, loaded_fingerprint in list(
+            self._plugin_loaded_fingerprints.items()
+        ):
+            candidate = self._plugin_discovery.candidates.get(integration_id)
+            current = str(candidate.fingerprint or "").lower() if candidate else ""
+            keep = bool(
+                candidate
+                and candidate.preflight_ok
+                and self._plugin_runtime_enabled
+                and current == loaded_fingerprint
+                and current in self._plugin_trusted_fingerprints
+            )
+            if keep:
+                continue
+            registration = self._integrations.get(integration_id)
+            if registration is not None and registration.source.startswith("folder:"):
+                self._integrations.pop(integration_id, None)
+            self._plugin_loaded_fingerprints.pop(integration_id, None)
+        self._rebuild_backend_name_map()
+        return self.plugin_folder_snapshot()
 
     def plugin_folder_snapshot(self) -> dict[str, Any]:
         if self._plugin_discovery is None:
             return {
                 "enabled": False,
+                "runtime_enabled": False,
+                "trusted_fingerprint_count": 0,
                 "plugin_count": 0,
                 "preflight_ok_count": 0,
                 "quarantined_count": 0,
@@ -269,16 +325,54 @@ class IntegrationManager:
                 "errors": [],
                 "plugins": [],
             }
-        return self._plugin_discovery.snapshot()
+        snapshot = self._plugin_discovery.snapshot()
+        snapshot["runtime_enabled"] = self._plugin_runtime_enabled
+        snapshot["trusted_fingerprint_count"] = len(self._plugin_trusted_fingerprints)
+        code_loaded_count = 0
+        quarantined_count = 0
+        for item in snapshot["plugins"]:
+            plugin_id = str(item.get("id") or "")
+            fingerprint = str((item.get("validation") or {}).get("fingerprint") or "").lower()
+            trusted = bool(fingerprint and fingerprint in self._plugin_trusted_fingerprints)
+            registration = self._integrations.get(plugin_id)
+            loaded = bool(registration and registration.source.startswith("folder:"))
+            status = item.setdefault("status", {})
+            status["trust_established"] = trusted
+            status["code_loaded"] = loaded
+            status["runtime_enabled"] = self._plugin_runtime_enabled
+            if loaded and registration is not None:
+                code_loaded_count += 1
+                item["stage"] = registration.stage
+                item["blocked"] = registration.blocked
+                item["failed_stage"] = registration.failed_stage
+                item["error"] = registration.error
+                status["quarantined"] = False
+                status["quarantine_reason"] = None
+            else:
+                quarantined_count += 1
+                status["quarantined"] = True
+                if item.get("validation", {}).get("ok"):
+                    if not self._plugin_runtime_enabled:
+                        item["error"] = "runtime_activation_disabled"
+                        status["quarantine_reason"] = "runtime_activation_disabled"
+                    elif not trusted:
+                        item["error"] = "trust_not_established"
+                        status["quarantine_reason"] = "trust_not_established"
+        snapshot["code_loaded_count"] = code_loaded_count
+        snapshot["quarantined_count"] = quarantined_count
+        return snapshot
 
     def _folder_candidate(self, integration_id: str) -> PluginFolderCandidate | None:
         if self._plugin_discovery is None:
             return None
         return self._plugin_discovery.candidates.get(integration_id)
 
-    @staticmethod
-    def _folder_detail(candidate: PluginFolderCandidate) -> dict[str, Any]:
-        item = candidate.as_registry_item()
+    def _folder_detail(self, candidate: PluginFolderCandidate) -> dict[str, Any]:
+        snapshot = self.plugin_folder_snapshot()
+        item = next(
+            (plugin for plugin in snapshot["plugins"] if plugin.get("id") == candidate.plugin_id),
+            candidate.as_registry_item(),
+        )
         item["schema"] = INTEGRATION_REGISTRY_SCHEMA
         return item
 
@@ -290,6 +384,145 @@ class IntegrationManager:
         if not isinstance(normalized.get("ok"), bool):
             raise IntegrationError(f"{phase} probe must return boolean ok")
         return normalized
+
+    @staticmethod
+    def _backend_prefix(integration_id: str) -> str:
+        normalized = re.sub(r"[^a-zA-Z0-9_]+", "_", integration_id).strip("_")
+        return f"hirda__{normalized or 'integration'}__"
+
+    def _rebuild_backend_name_map(self) -> None:
+        names: dict[str, tuple[str, str]] = {}
+        for integration_id, registration in self._integrations.items():
+            if registration.stage != "ready" or registration.blocked:
+                continue
+            prefix = self._backend_prefix(integration_id)
+            for raw_name in registration.tool_catalog:
+                names[prefix + raw_name] = (integration_id, raw_name)
+        self._backend_name_map = names
+
+    def backend_tools(self) -> list[dict[str, Any]]:
+        self._rebuild_backend_name_map()
+        output: list[dict[str, Any]] = []
+        for exposed_name in sorted(self._backend_name_map):
+            integration_id, raw_name = self._backend_name_map[exposed_name]
+            registration = self._integrations[integration_id]
+            descriptor = dict(registration.tool_catalog[raw_name])
+            descriptor["name"] = exposed_name
+            description = str(descriptor.get("description") or "").strip()
+            descriptor["description"] = (
+                f"HIRDA backend [{integration_id}] {description}".strip()
+            )
+            output.append(descriptor)
+        return output
+
+    def backend_permission(self, exposed_name: str) -> str | None:
+        self._rebuild_backend_name_map()
+        resolved = self._backend_name_map.get(str(exposed_name or ""))
+        if resolved is None:
+            return None
+        integration_id, raw_name = resolved
+        return self._integrations[integration_id].adapter.manifest.permissions.get(raw_name)
+
+    def backend_route(self, exposed_name: str) -> tuple[str, str] | None:
+        self._rebuild_backend_name_map()
+        return self._backend_name_map.get(str(exposed_name or ""))
+
+    def is_backend_tool(self, exposed_name: str) -> bool:
+        self._rebuild_backend_name_map()
+        return str(exposed_name or "") in self._backend_name_map
+
+    async def call_backend_tool(
+        self,
+        exposed_name: str,
+        arguments: dict[str, Any],
+        *,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        self._rebuild_backend_name_map()
+        resolved = self._backend_name_map.get(str(exposed_name or ""))
+        if resolved is None:
+            raise IntegrationError(f"unknown backend tool: {exposed_name}")
+        integration_id, raw_name = resolved
+        registration = self._integrations[integration_id]
+        adapter = registration.adapter
+        if not isinstance(adapter, BackendIntegrationAdapter):
+            raise IntegrationError(f"integration {integration_id} is not a backend provider")
+        return await adapter.call_tool(raw_name, dict(arguments or {}), context=context)
+
+    @staticmethod
+    def _validate_folder_adapter_contract(
+        candidate: PluginFolderCandidate, adapter: IntegrationAdapter
+    ) -> None:
+        manifest = adapter.manifest
+        checks = {
+            "id": manifest.integration_id == candidate.plugin_id,
+            "name": manifest.name == candidate.name,
+            "capabilities": tuple(manifest.capabilities) == tuple(candidate.capabilities),
+            "tools": tuple(manifest.tools) == tuple(candidate.tools),
+            "permissions": dict(manifest.permissions) == dict(candidate.permissions),
+        }
+        failed = [field for field, ok in checks.items() if not ok]
+        if failed:
+            raise IntegrationError(
+                "plugin adapter manifest mismatch: " + ", ".join(failed)
+            )
+
+    def activate_trusted_plugins(self) -> dict[str, Any]:
+        result = {"activated": [], "quarantined": [], "errors": []}
+        if self._plugin_discovery is None:
+            return result
+        self.discover_plugin_folders()
+        for plugin_id in sorted(self._plugin_discovery.candidates):
+            candidate = self._plugin_discovery.candidates[plugin_id]
+            if not candidate.preflight_ok:
+                result["quarantined"].append(plugin_id)
+                continue
+            fingerprint = str(candidate.fingerprint or "").lower()
+            if not self._plugin_runtime_enabled or fingerprint not in self._plugin_trusted_fingerprints:
+                result["quarantined"].append(plugin_id)
+                continue
+            try:
+                existing = self._integrations.get(plugin_id)
+                if (
+                    existing is not None
+                    and existing.source.startswith("folder:")
+                    and self._plugin_loaded_fingerprints.get(plugin_id) == fingerprint
+                ):
+                    if plugin_id not in result["activated"]:
+                        result["activated"].append(plugin_id)
+                    continue
+                entry = Path(candidate.root) / str(candidate.adapter.get("entry") or "")
+                class_name = str(candidate.adapter.get("class") or "")
+                module_name = (
+                    f"_hirda_plugin_{re.sub(r'[^a-zA-Z0-9_]+', '_', plugin_id)}_"
+                    f"{fingerprint[:12]}"
+                )
+                spec = importlib.util.spec_from_file_location(module_name, entry)
+                if spec is None or spec.loader is None:
+                    raise IntegrationError("plugin adapter import spec unavailable")
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module
+                try:
+                    spec.loader.exec_module(module)
+                except Exception:
+                    sys.modules.pop(module_name, None)
+                    raise
+                loaded = getattr(module, class_name, None)
+                adapter_obj = loaded() if isinstance(loaded, type) else loaded
+                if callable(adapter_obj) and not isinstance(adapter_obj, IntegrationAdapter):
+                    adapter_obj = adapter_obj()
+                if not isinstance(adapter_obj, IntegrationAdapter):
+                    raise IntegrationError("plugin class must implement IntegrationAdapter contract")
+                adapter = cast(IntegrationAdapter, adapter_obj)
+                self._validate_folder_adapter_contract(candidate, adapter)
+                self.register(adapter, source=f"folder:{candidate.root}")
+                self._plugin_loaded_fingerprints[plugin_id] = fingerprint
+                result["activated"].append(plugin_id)
+            except Exception as exc:
+                result["errors"].append(
+                    {"plugin": plugin_id, "error": f"{type(exc).__name__}: {exc}"}
+                )
+        return result
 
     async def reconcile(self, integration_id: str) -> dict[str, Any]:
         key = str(integration_id or "").strip()
@@ -307,6 +540,7 @@ class IntegrationManager:
         registration.error = None
         registration.validation = {}
         registration.certification = {}
+        registration.tool_catalog = {}
 
         registration.stage = "validating"
         try:
@@ -317,12 +551,14 @@ class IntegrationManager:
             registration.blocked = True
             registration.failed_stage = "validating"
             registration.error = f"{type(exc).__name__}: {exc}"
+            self._rebuild_backend_name_map()
             return await self._detail(registration)
         registration.validation = validation
         if not validation["ok"]:
             registration.blocked = True
             registration.failed_stage = "validating"
             registration.error = str(validation.get("reason") or "validation failed")
+            self._rebuild_backend_name_map()
             return await self._detail(registration)
 
         registration.stage = "registered"
@@ -335,6 +571,7 @@ class IntegrationManager:
             registration.blocked = True
             registration.failed_stage = "certifying"
             registration.error = f"{type(exc).__name__}: {exc}"
+            self._rebuild_backend_name_map()
             return await self._detail(registration)
         registration.certification = certification
         if not certification["ok"]:
@@ -343,9 +580,40 @@ class IntegrationManager:
             registration.error = str(
                 certification.get("reason") or "certification failed"
             )
+            self._rebuild_backend_name_map()
             return await self._detail(registration)
 
+        if isinstance(registration.adapter, BackendIntegrationAdapter):
+            registration.stage = "activating"
+            try:
+                tools = await registration.adapter.list_tools()
+                catalog: dict[str, dict[str, Any]] = {}
+                for tool in tools:
+                    if not isinstance(tool, dict):
+                        raise IntegrationError("backend tool descriptor must be an object")
+                    name = str(tool.get("name") or "").strip()
+                    schema = tool.get("inputSchema", {})
+                    if not name or not isinstance(schema, dict):
+                        raise IntegrationError("backend tool requires name and inputSchema")
+                    catalog[name] = dict(tool)
+                declared = set(registration.adapter.manifest.tools)
+                if set(catalog) != declared:
+                    raise IntegrationError(
+                        "backend tool catalog mismatch: declared="
+                        + ",".join(sorted(declared))
+                        + " discovered="
+                        + ",".join(sorted(catalog))
+                    )
+                registration.tool_catalog = catalog
+            except Exception as exc:
+                registration.blocked = True
+                registration.failed_stage = "activating"
+                registration.error = f"{type(exc).__name__}: {exc}"
+                self._rebuild_backend_name_map()
+                return await self._detail(registration)
+
         registration.stage = "ready"
+        self._rebuild_backend_name_map()
         return await self._detail(registration)
 
     async def _detail(self, registration: RegisteredIntegration) -> dict[str, Any]:
@@ -368,6 +636,8 @@ class IntegrationManager:
             "manifest": registration.adapter.manifest.as_dict(),
             "validation": dict(registration.validation),
             "certification": dict(registration.certification),
+            "backend_tool_count": len(registration.tool_catalog),
+            "backend_tools": sorted(registration.tool_catalog),
             "status": live_status,
         }
 
@@ -379,7 +649,6 @@ class IntegrationManager:
             if reconcile:
                 return await self.reconcile(key)
             return await self._detail(self._integrations[key])
-
         if reconcile and self._plugin_discovery is not None:
             self.discover_plugin_folders()
         candidate = self._folder_candidate(key)
@@ -393,11 +662,6 @@ class IntegrationManager:
         group: str = DEFAULT_INTEGRATION_ENTRYPOINT_GROUP,
         strict: bool = False,
     ) -> dict[str, Any]:
-        """Discover external integrations without changing HIRDA core code.
-
-        Loading a Python entry point executes installed package code, so HIRDA
-        keeps this opt-in at the Studio configuration boundary.
-        """
         loaded_ids: list[str] = []
         errors: list[dict[str, str]] = []
         try:
@@ -428,19 +692,14 @@ class IntegrationManager:
                         "entry point must provide IntegrationAdapter contract"
                     )
                 adapter = cast(IntegrationAdapter, adapter_obj)
-                registration = self.register(
-                    adapter,
-                    source=f"entrypoint:{name}",
-                )
+                registration = self.register(adapter, source=f"entrypoint:{name}")
                 loaded_ids.append(registration.integration_id)
             except Exception as exc:
                 if strict:
                     raise IntegrationError(
                         f"failed to load integration entry point {name!r}: {exc}"
                     ) from exc
-                errors.append(
-                    {"entry_point": name, "error": type(exc).__name__}
-                )
+                errors.append({"entry_point": name, "error": type(exc).__name__})
 
         self._discovery_errors.extend(errors)
         return {"loaded": loaded_ids, "errors": errors}
@@ -458,8 +717,19 @@ class IntegrationManager:
             items.append(item)
 
         plugin_folder = self.plugin_folder_snapshot()
-        items.extend(plugin_folder["plugins"])
-        items.sort(key=lambda item: (str(item.get("id") or ""), str(item.get("source") or "")))
+        loaded_folder_ids = {
+            integration_id
+            for integration_id, registration in self._integrations.items()
+            if registration.source.startswith("folder:")
+        }
+        items.extend(
+            item
+            for item in plugin_folder["plugins"]
+            if str(item.get("id") or "") not in loaded_folder_ids
+        )
+        items.sort(
+            key=lambda item: (str(item.get("id") or ""), str(item.get("source") or ""))
+        )
 
         return {
             "schema": INTEGRATION_REGISTRY_SCHEMA,
@@ -472,13 +742,20 @@ class IntegrationManager:
             "quarantined_count": sum(
                 item["stage"] == "quarantined" for item in items
             ),
+            "backend_tool_count": len(self.backend_tools()),
             "entrypoint_group": DEFAULT_INTEGRATION_ENTRYPOINT_GROUP,
             "discovery_errors": list(self._discovery_errors),
             "plugin_folder": plugin_folder,
             "integrations": items,
         }
 
-
+    async def close(self) -> None:
+        for registration in self._integrations.values():
+            close = getattr(registration.adapter, "close", None)
+            if callable(close):
+                result = close()
+                if hasattr(result, "__await__"):
+                    await result
 
 
 class JevIntegrationAdapter:
@@ -647,6 +924,108 @@ class JevIntegrationAdapter:
             },
         }
 
+class DesktopCommanderIntegrationAdapter:
+    """HIRDA machine-control backend using a local Desktop Commander MCP process."""
+
+    def __init__(self, studio: Any, *, base_dir: Path | None = None) -> None:
+        binary = str(
+            getattr(
+                studio,
+                "desktop_commander_backend_binary",
+                "desktop-commander",
+            )
+            or "desktop-commander"
+        ).strip()
+        cwd_value = str(
+            getattr(studio, "desktop_commander_backend_cwd", "") or ""
+        ).strip()
+        cwd = Path(cwd_value).expanduser() if cwd_value else (base_dir or Path.home())
+        timeout = float(
+            getattr(studio, "desktop_commander_backend_timeout_seconds", 15.0) or 15.0
+        )
+        self.backend = DesktopCommanderBackend(
+            binary,
+            timeout_seconds=timeout,
+            cwd=cwd,
+        )
+        tools = tuple(EXPOSED_DESKTOP_COMMANDER_TOOLS)
+        self.manifest = IntegrationManifest.from_mapping(
+            {
+                "id": "desktop-commander",
+                "name": "Desktop Commander",
+                "capabilities": [
+                    "machine_filesystem",
+                    "machine_process",
+                    "workspace_scoped_execution",
+                ],
+                "runtime": {
+                    "type": "local-stdio-mcp",
+                    "authority": "hirda-gated-backend",
+                    "binary": binary,
+                },
+                "tools": list(tools),
+                "permissions": dict(EXPOSED_DESKTOP_COMMANDER_TOOLS),
+                "health": {"type": "mcp-tool-discovery"},
+                "routing": {
+                    "mode": "machine-control-backend",
+                    "preferred_lanes": ["hermes", "codex", "claude"],
+                },
+                "metadata": {
+                    "backend_capability": True,
+                    "raw_mcp_not_exposed": True,
+                    "workspace_scope_enforced": True,
+                    "process_ownership_enforced": True,
+                    "permission_router": "hirda",
+                },
+            }
+        )
+
+    async def validate(self) -> dict[str, Any]:
+        binary_ok = self.backend.binary_ok()
+        return {
+            "ok": binary_ok,
+            "reason": None if binary_ok else "desktop_commander_binary_missing",
+            "binary": str(self.backend.binary),
+            "binary_exists": self.backend.binary.is_file(),
+            "binary_executable": binary_ok,
+        }
+
+    async def certify(self) -> dict[str, Any]:
+        tools = await self.backend.list_tools(refresh=True)
+        discovered = {str(tool.get("name") or "") for tool in tools}
+        expected = set(self.manifest.tools)
+        permission_contract_ok = all(
+            self.manifest.permissions.get(name) in _PERMISSION_CLASSES for name in expected
+        )
+        ok = discovered == expected and permission_contract_ok
+        return {
+            "ok": ok,
+            "reason": None if ok else "desktop_commander_tool_contract_mismatch",
+            "expected_tools": sorted(expected),
+            "discovered_tools": sorted(discovered),
+            "permission_contract_ok": permission_contract_ok,
+            "raw_mcp_not_exposed": True,
+        }
+
+    async def status(self) -> dict[str, Any]:
+        return self.backend.status()
+
+    async def list_tools(self) -> list[dict[str, Any]]:
+        return await self.backend.list_tools()
+
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await self.backend.call_tool(name, arguments, context=context)
+
+    async def close(self) -> None:
+        await self.backend.close()
+
+
 class GraftIntegrationAdapter:
     """Expose the existing Graft context plane through the common lifecycle."""
 
@@ -733,16 +1112,113 @@ class GraftIntegrationAdapter:
         }
 
 
+class PixelArtStudioIntegrationAdapter:
+    """Expose deterministic pixel-art candidate generation through HIRDA lifecycle."""
+
+    def __init__(self, provider: PixelArtStudioProvider) -> None:
+        self.provider = provider
+        self.manifest = IntegrationManifest.from_mapping(
+            {
+                "id": "pixel_art_studio",
+                "name": "Pixel Art Studio",
+                "capabilities": [
+                    "pixel_art_sprite",
+                    "pixel_art_prop",
+                    "pixel_art_icon",
+                    "deterministic_asset_compiler",
+                ],
+                "runtime": {
+                    "type": "local-python-library",
+                    "authority": "candidate-only",
+                },
+                "tools": ["pixel_art_generate"],
+                "permissions": {"pixel_art_generate": "execute"},
+                "health": {"type": "adapter_probe"},
+                "routing": {
+                    "mode": "visual-provider",
+                    "preferred_lanes": ["claude", "codex", "hermes"],
+                },
+                "metadata": {
+                    "provider": "Gamezxz/pixel-art-studio",
+                    "nova_arbitrary_code": False,
+                    "earth_world_authority": False,
+                    "candidate_only": True,
+                    "deterministic": True,
+                },
+            }
+        )
+
+    async def validate(self) -> dict[str, Any]:
+        state = self.provider.status()
+        reason = None
+        if not state["enabled"]:
+            reason = "pixel_art_studio_disabled"
+        elif not state["required_files_ok"]:
+            reason = "pixel_art_studio_files_missing"
+        elif not state["pin_ok"]:
+            reason = "pixel_art_studio_commit_mismatch"
+        return {
+            "ok": bool(state["ready"]),
+            "reason": reason,
+            **state,
+        }
+
+    async def certify(self) -> dict[str, Any]:
+        metadata = self.manifest.metadata
+        runtime = self.manifest.runtime
+        permissions = self.manifest.permissions
+        authority_ok = bool(
+            runtime.get("authority") == "candidate-only"
+            and metadata.get("candidate_only") is True
+            and metadata.get("earth_world_authority") is False
+            and metadata.get("nova_arbitrary_code") is False
+        )
+        permission_ok = permissions == {"pixel_art_generate": "execute"}
+        ok = bool(authority_ok and permission_ok)
+        return {
+            "ok": ok,
+            "reason": None if ok else "pixel_art_studio_authority_contract_mismatch",
+            "authority_contract_ok": authority_ok,
+            "permission_contract_ok": permission_ok,
+            "candidate_only": True,
+            "earth_world_authority": False,
+            "arbitrary_code_from_nova": False,
+        }
+
+    async def status(self) -> dict[str, Any]:
+        state = self.provider.status()
+        return {
+            "ok": bool(state["ready"]),
+            **state,
+            "authority": {
+                "candidate_only": True,
+                "earth_world_authority": False,
+                "arbitrary_code_from_nova": False,
+            },
+        }
+
+
 def build_integration_manager(
     graft: GraftManager,
     studio: Any | None = None,
     *,
     base_dir: Path | None = None,
+    pixel_art_studio: PixelArtStudioProvider | None = None,
 ) -> IntegrationManager:
     manager = IntegrationManager()
     manager.register(GraftIntegrationAdapter(graft), source="builtin:graft")
+    if pixel_art_studio is not None:
+        manager.register(
+            PixelArtStudioIntegrationAdapter(pixel_art_studio),
+            source="builtin:pixel-art-studio",
+        )
     if studio is not None:
         manager.register(JevIntegrationAdapter(studio), source="builtin:jev")
+        if bool(getattr(studio, "desktop_commander_backend_enabled", False)):
+            manager.register(
+                DesktopCommanderIntegrationAdapter(studio, base_dir=base_dir),
+                source="builtin:desktop-commander",
+            )
 
         if bool(getattr(studio, "integration_plugin_folder_enabled", True)):
             configured_root = Path(
@@ -776,11 +1252,17 @@ def build_integration_manager(
                     or DEFAULT_PLUGIN_MAX_COUNT
                 ),
             )
+            trusted = getattr(studio, "integration_plugin_trusted_fingerprints", []) or []
             manager.configure_plugin_folder(
                 configured_root,
                 manifest_name=manifest_name,
                 max_plugins=max_plugins,
+                runtime_enabled=bool(
+                    getattr(studio, "integration_plugin_runtime_enabled", False)
+                ),
+                trusted_fingerprints=list(trusted),
             )
+            manager.activate_trusted_plugins()
 
     if studio is not None and bool(
         getattr(studio, "integration_entrypoints_enabled", False)

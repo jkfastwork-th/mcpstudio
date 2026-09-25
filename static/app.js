@@ -117,6 +117,22 @@ const I18N_TH={
   'Recent decisions':'การตัดสินใจล่าสุด',
   'Authority boundary':'ขอบเขตอำนาจ',
   'Computer':'คอมพิวเตอร์',
+  'Machine':'เครื่อง',
+  'Machines':'เครื่อง',
+  'MACHINE ENROLLMENT':'การเพิ่มเครื่อง',
+  'Pending machines':'เครื่องที่รออนุมัติ',
+  'Discover now':'ค้นหาเดี๋ยวนี้',
+  'Tailnet discovery is automatic. Unknown agents stay pending until approved.':'ระบบค้นหา Tailnet อัตโนมัติ เครื่องใหม่จะรออนุมัติก่อนใช้งาน',
+  'Approve':'อนุมัติ',
+  'Reject':'ปฏิเสธ',
+  'Capabilities':'ความสามารถ',
+  'Machine policy':'นโยบายเครื่อง',
+  'Effective permissions':'สิทธิ์ที่ใช้ได้จริง',
+  'Filesystem':'ไฟล์',
+  'Process':'โปรเซส',
+  'GUI':'หน้าจอ',
+  'Machine offline':'เครื่องออฟไลน์',
+  'GUI unavailable':'ไม่มี GUI',
   'Settings':'การตั้งค่า',
   'Appearance':'รูปลักษณ์',
   'Theme':'ธีม',
@@ -1339,6 +1355,196 @@ function renderCapsuleLedger(data){
   }).join('');
 }
 
+function machineInventory(data=latestData){
+  return data?.machinesData?.machines||[];
+}
+
+function machineMap(data=latestData){
+  return Object.fromEntries(machineInventory(data).map(machine=>[String(machine.id),machine]));
+}
+
+function machineForSession(session,data=latestData){
+  const inventory=data?.machinesData||{};
+  const id=String(session?.metadata?.machine_id||inventory.local_machine_id||'openclaw');
+  return machineMap(data)[id]||{
+    id,
+    name:id,
+    online:false,
+    capabilities:[],
+    providers:{},
+    provider_health:{},
+    policy:{read:false,write:false,execute:false,destructive:false,fail_closed_unknown:true},
+  };
+}
+
+function effectiveMachinePermissions(session,machine){
+  const sessionPolicy=session?.tool_permissions||{};
+  const machinePolicy=machine?.policy||{};
+  const effective={};
+  ['read','write','execute','destructive'].forEach(key=>{
+    effective[key]=(sessionPolicy[key]!==false)&&(machinePolicy[key]!==false);
+  });
+  effective.scope=sessionPolicy.scope||'workspace';
+  effective.fail_closed_unknown=(sessionPolicy.fail_closed_unknown!==false)&&(machinePolicy.fail_closed_unknown!==false);
+  return effective;
+}
+
+function machinePermissionBadges(policy,extraClass=''){
+  const labels={read:'R',write:'W',execute:'X',destructive:'D'};
+  return '<span class="machine-permission-badges '+extraClass+'">'+Object.entries(labels).map(([key,label])=>{
+    const allowed=policy?.[key]===true;
+    return '<span class="machine-permission-badge '+(allowed?'allowed':'blocked')+'" title="'+esc(key)+': '+(allowed?'allowed':'blocked')+'">'+label+'</span>';
+  }).join('')+'</span>';
+}
+
+function machineProviderReady(machine,provider){
+  const configured=machine?.providers&&machine.providers[provider];
+  if(!configured)return false;
+  const health=machine?.provider_health&&machine.provider_health[provider];
+  return health?health.ready===true:machine.online===true;
+}
+
+function machineCapabilityBadges(machine){
+  const defs=[
+    ['filesystem','Files'],
+    ['process','Shell'],
+    ['computer_use','GUI'],
+  ];
+  return '<span class="machine-capability-badges">'+defs.filter(([key])=>(machine?.capabilities||[]).includes(key)).map(([key,label])=>{
+    let ready=true;
+    if(key==='filesystem'||key==='process')ready=machineProviderReady(machine,'desktop_commander');
+    if(key==='computer_use')ready=machineProviderReady(machine,'computer_use');
+    return '<span class="machine-capability-badge '+(ready?'ready':'down')+'">'+label+'</span>';
+  }).join('')+'</span>';
+}
+
+function machineCell(session,data){
+  const machine=machineForSession(session,data);
+  const policy=effectiveMachinePermissions(session,machine);
+  const state=machine.online?'online':'offline';
+  const os=machine.os||'unknown';
+  const address=machine.address||'local';
+  const dc=machineProviderReady(machine,'desktop_commander');
+  const gui=machineProviderReady(machine,'computer_use');
+  return '<div class="session-machine-cell">'
+    +'<span class="machine-health '+state+'"><i></i>'+esc(machine.name||machine.id)+'</span>'
+    +'<small>'+esc(os)+' · '+esc(address)+'</small>'
+    +'<span class="machine-provider-badges"><span class="machine-provider-badge '+(dc?'ready':'down')+'">DC</span><span class="machine-provider-badge '+(gui?'ready':'down')+'">GUI</span></span>'
+    +machineCapabilityBadges(machine)
+    +machinePermissionBadges(policy)
+    +'</div>';
+}
+
+function renderMachineEnrollment(data){
+  const payload=data.machineEnrollmentsData||{};
+  const panel=document.getElementById('machineEnrollmentPanel');
+  const summary=document.getElementById('machineEnrollmentSummary');
+  const discover=document.getElementById('machineDiscoverBtn');
+  if(!panel||!summary)return;
+  const pending=payload.pending||[];
+  const approved=payload.approved||[];
+  const rejected=payload.rejected||[];
+  const machines=data.machinesData||{};
+  summary.innerHTML='<span class="mini-stat '+(pending.length?'warning':'primary')+'">Pending <strong>'+pending.length+'</strong></span>'
+    +'<span class="mini-stat">Registered <strong>'+(machines.machine_count||0)+'</strong></span>'
+    +'<span class="mini-stat">Auto scan <strong>'+(payload.enabled?'ON':'OFF')+'</strong></span>'
+    +'<span class="mini-stat">Interval <strong>'+esc(payload.discovery_interval_seconds||'—')+'s</strong></span>';
+  if(discover)discover.disabled=!payload.enabled;
+  if(!payload.enabled){
+    panel.innerHTML='<div class="empty">Machine enrollment is disabled in HIRDA config.</div>';
+    return;
+  }
+  if(payload.last_error){
+    panel.innerHTML='<div class="machine-enrollment-error">'+esc(payload.last_error)+'</div>';
+    return;
+  }
+  if(!pending.length){
+    panel.innerHTML='<div class="empty good">No machines are waiting for approval.'+(payload.last_discovery_at?' Last scan '+esc(ago(payload.last_discovery_at))+'.':'')+'</div>';
+    return;
+  }
+  panel.innerHTML='<div class="machine-enrollment-list">'+pending.map(candidate=>{
+    const caps=(candidate.capabilities||[]).map(x=>'<span>'+esc(x)+'</span>').join('');
+    const fingerprint=String(candidate.fingerprint||'');
+    return '<div class="machine-enrollment-row">'
+      +'<div class="machine-enrollment-identity"><span class="machine-health online"><i></i>'+esc(candidate.hostname||candidate.machine_id)+'</span><small>'+esc(candidate.machine_id)+' · '+esc(candidate.platform||'unknown')+' · '+esc(candidate.architecture||'unknown')+'</small><code>'+esc(candidate.address||'—')+'</code></div>'
+      +'<div class="machine-enrollment-caps"><span class="machine-enrollment-label">Capabilities</span><div>'+caps+'</div><small>Agent '+esc(candidate.agent_version||'—')+' · '+esc(fingerprint?fingerprint.slice(0,12):'no fingerprint')+'</small></div>'
+      +'<div class="machine-enrollment-seen"><span>Last seen</span><strong>'+esc(ago(candidate.last_seen_at))+'</strong><small>'+esc(candidate.peer_hostname||'Tailnet peer')+'</small></div>'
+      +'<div class="machine-enrollment-actions"><button class="button small" data-machine-approve="'+esc(candidate.machine_id)+'" type="button">Approve</button><button class="button danger small" data-machine-reject="'+esc(candidate.machine_id)+'" type="button">Reject</button></div>'
+      +'</div>';
+  }).join('')+'</div>';
+}
+
+function parseWorkspaceMappings(raw){
+  const result={};
+  String(raw||'').split(/\r?\n/).map(line=>line.trim()).filter(Boolean).forEach(line=>{
+    const at=line.indexOf('=');
+    if(at<=0||at===line.length-1)throw new Error('Workspace mapping must use key=absolute-path, one per line.');
+    const key=line.slice(0,at).trim();
+    const path=line.slice(at+1).trim();
+    if(!key||!path)throw new Error('Workspace mapping must use key=absolute-path, one per line.');
+    result[key]=path;
+  });
+  return result;
+}
+
+async function approveMachineEnrollment(machineId){
+  const candidate=(latestData?.machineEnrollmentsData?.pending||[]).find(item=>item.machine_id===machineId);
+  if(!candidate)throw new Error('Pending machine is no longer available.');
+  const result=await openAppDialog({
+    title:'Approve machine',
+    message:'Approve '+(candidate.hostname||machineId)+' as a HIRDA node. New machines default to read-only. Workspace mappings are required before sessions can bind to that workspace.',
+    icon:'✓',
+    tone:'info',
+    confirmText:'Approve',
+    fields:[
+      {name:'name',label:'Display name',value:candidate.hostname||machineId,required:true},
+      {name:'policy_profile',label:'Permission profile',type:'select',value:'readonly',options:[
+        {value:'readonly',label:'Read only'},
+        {value:'readwrite',label:'Read + write'},
+        {value:'execute',label:'Read + write + execute'}
+      ]},
+      {name:'workspace_map',label:'Workspace mappings',type:'textarea',placeholder:'mcp-studio=/absolute/path/on/this/machine'}
+    ]
+  });
+  if(!result.confirmed)return;
+  const profiles={
+    readonly:{read:true,write:false,execute:false,destructive:false,fail_closed_unknown:true},
+    readwrite:{read:true,write:true,execute:false,destructive:false,fail_closed_unknown:true},
+    execute:{read:true,write:true,execute:true,destructive:false,fail_closed_unknown:true},
+  };
+  await sendJson('/api/machines/enrollments/'+encodeURIComponent(machineId)+'/approve',{
+    name:result.values.name,
+    workspace_map:parseWorkspaceMappings(result.values.workspace_map),
+    policy:profiles[result.values.policy_profile]||profiles.readonly,
+  });
+  await load();
+}
+
+async function rejectMachineEnrollment(machineId){
+  const result=await openAppDialog({
+    title:'Reject machine',
+    message:'This Tailnet machine will remain unable to receive HIRDA work.',
+    icon:'!',
+    tone:'danger',
+    confirmText:'Reject',
+    fields:[{name:'reason',label:'Reason',value:'operator-rejected'}]
+  });
+  if(!result.confirmed)return;
+  await sendJson('/api/machines/enrollments/'+encodeURIComponent(machineId)+'/reject',{reason:result.values.reason||'operator-rejected'});
+  await load();
+}
+
+async function discoverMachinesNow(){
+  const button=document.getElementById('machineDiscoverBtn');
+  if(button)button.disabled=true;
+  try{
+    await sendJson('/api/machines/discover');
+    await load();
+  }finally{
+    if(button)button.disabled=false;
+  }
+}
+
 function renderManagedSessions(data){
   const managed=data.managedSessions||{sessions:[],status:{}}, workspaces=data.managedWorkspaces||{workspaces:[]};
   const items=managed.sessions||[], ws=workspaces.workspaces||[], status=managed.status||{};
@@ -1347,7 +1553,8 @@ function renderManagedSessions(data){
   const stopped=items.filter(x=>x.status==='stopped').length;
   const errors=items.filter(x=>x.status==='error').length;
   const contextWarnings=items.filter(x=>x.context_usage?.recommended).length;
-  document.getElementById('managedSessionSummary').innerHTML=`<span class="mini-stat primary">Active <strong>${active}</strong></span><span class="mini-stat">Idle <strong>${idle}</strong></span><span class="mini-stat">Errors <strong>${errors}</strong></span>${contextWarnings?`<span class="mini-stat warning">Context alerts <strong>${contextWarnings}</strong></span>`:''}${(status.cutover?.unbound_transports??0)?`<span class="mini-stat warning">Unbound clients <strong>${status.cutover.unbound_transports}</strong></span>`:''}`;
+  const machineSummary=data.machinesData||{};
+  document.getElementById('managedSessionSummary').innerHTML=`<span class="mini-stat primary">Active <strong>${active}</strong></span><span class="mini-stat">Idle <strong>${idle}</strong></span><span class="mini-stat">Machines <strong>${machineSummary.online_count||0}/${machineSummary.machine_count||0}</strong></span><span class="mini-stat">Errors <strong>${errors}</strong></span>${contextWarnings?`<span class="mini-stat warning">Context alerts <strong>${contextWarnings}</strong></span>`:''}${(status.cutover?.unbound_transports??0)?`<span class="mini-stat warning">Unbound clients <strong>${status.cutover.unbound_transports}</strong></span>`:''}`;
   const select=document.getElementById('managedSessionWorkspace');
   const old=select.value;
   select.innerHTML=ws.map(w=>`<option value="${esc(w.key)}">${esc(w.name||w.key)} · ${esc(w.project_path)}</option>`).join('')||'<option value="">Register a workspace first</option>';
@@ -1357,7 +1564,7 @@ function renderManagedSessions(data){
   const toggle=document.getElementById('managedHistoryToggle');
   toggle.textContent=showManagedHistory?'Hide stopped':`Show stopped (${stopped})`;
   const visible=items.filter(x=>showManagedHistory || x.status!=='stopped');
-  document.getElementById('managedSessionsPanel').innerHTML=visible.length?`<div class="managed-session-row header"><span>SESSION</span><span>PINNED PROJECT</span><span>STATE</span><span>ACTIVITY</span><span>ACTIONS</span></div>${visible.map(x=>{
+  document.getElementById('managedSessionsPanel').innerHTML=visible.length?`<div class="managed-session-row machine-aware header"><span>SESSION</span><span>PINNED PROJECT</span><span>MACHINE</span><span>STATE</span><span>ACTIVITY</span><span>ACTIONS</span></div>${visible.map(x=>{
     const lifecycle=x.lifecycle_state||x.status;
     const providers=(x.ingress_providers||[]).join(', ')||'—';
     const last=x.last_used_at||x.last_transport_seen_at||x.last_started_at||x.updated_at;
@@ -1368,7 +1575,7 @@ function renderManagedSessions(data){
     const resume=x.status==='stopped'?`<button class="button small" data-managed-resume="${esc(x.id)}" type="button">Resume</button>`:`<button class="button secondary small" data-managed-restart="${esc(x.id)}" type="button" ${x.connected_transports?'disabled':''}>Restart</button>`;
     const stop=x.status!=='stopped'?`<button class="button danger small" data-managed-stop="${esc(x.id)}" type="button" ${x.connected_transports?'disabled':''}>Stop</button>`:'';
     const rollover=ctx.recommended&&ctx.gateway_session_id?`<button class="button small context-rollover-button ${ctx.urgency==='critical'?'critical':''}" data-managed-rollover="${esc(ctx.gateway_session_id)}" data-managed-rollover-name="${esc(x.name)}" data-managed-rollover-workspace="${esc(x.workspace_key)}" type="button">${ctx.urgency==='critical'?'Rollover now':'Prepare rollover'}</button>`:'';
-    return `<div class="managed-session-row"><div><strong>${esc(x.name)}</strong><small>${esc(shortId(x.id,18))}</small><span class="project-pin">🔒 PINNED</span></div><div><strong>${esc(x.workspace_key)}</strong><small>${esc(x.project_path)}</small></div><div>${badge(lifecycle)}<small>${esc(x.status)} · port ${esc(x.port||'—')}</small></div><div><strong>${esc(x.connected_transports||0)} transport${x.connected_transports===1?'':'s'}</strong><small>${esc(providers)} · ${esc(ago(last))}</small><span class="context-usage ${ctxClass}">${esc(ctxText)}</span></div><div class="managed-actions">${rollover}${resume}<button class="button secondary small" data-managed-rename="${esc(x.id)}" data-managed-name="${esc(x.name)}" type="button">Rename</button><button class="text-button" data-managed-history="${esc(x.id)}" type="button">History</button>${stop}</div></div>`;
+    return `<div class="managed-session-row machine-aware"><div><strong>${esc(x.name)}</strong><small>${esc(shortId(x.id,18))}</small><span class="project-pin">🔒 PINNED</span></div><div><strong>${esc(x.workspace_key)}</strong><small>${esc(x.project_path)}</small></div>${machineCell(x,data)}<div>${badge(lifecycle)}<small>${esc(x.status)} · port ${esc(x.port||'—')}</small></div><div><strong>${esc(x.connected_transports||0)} transport${x.connected_transports===1?'':'s'}</strong><small>${esc(providers)} · ${esc(ago(last))}</small><span class="context-usage ${ctxClass}">${esc(ctxText)}</span></div><div class="managed-actions">${rollover}${resume}<button class="button secondary small" data-managed-rename="${esc(x.id)}" data-managed-name="${esc(x.name)}" type="button">Rename</button><button class="text-button" data-managed-history="${esc(x.id)}" type="button">History</button>${stop}</div></div>`;
   }).join('')}`:`<div class="empty ${status.enabled?'':'good'}">${status.enabled?'No managed sessions in this view.':'Managed session isolation is disabled in config.'}</div>`;
   document.getElementById('managedWorkspacesPanel').innerHTML=ws.length?`<div class="workspace-reference-table">
     <div class="workspace-reference-row header"><span>Name</span><span>Path</span><span>Active Sessions</span><span>Status</span><span>Actions</span></div>
@@ -1393,8 +1600,13 @@ function renderManagedSessions(data){
 function renderManagedHistory(payload){
   const panel=document.getElementById('managedSessionHistoryPanel');
   const session=payload.session||{}; const audit=payload.audit||[]; const transports=payload.transports||[];
+  const overview=(latestData?.managedSessions?.sessions||[]).find(item=>item.id===session.id)||session;
+  const machine=machineForSession(overview,latestData);
+  const effective=effectiveMachinePermissions(overview,machine);
+  const dc=machineProviderReady(machine,'desktop_commander');
+  const gui=machineProviderReady(machine,'computer_use');
   panel.hidden=false;
-  panel.innerHTML=`<div class="history-head"><div><span class="eyebrow">SESSION HISTORY</span><h3>${esc(session.name||session.id)}</h3><p>${esc(session.workspace_key||'')} · ${esc(session.project_path||'')}</p></div><button class="text-button" data-managed-history-close type="button">Close</button></div><div class="history-grid"><div><h4>Lifecycle</h4>${audit.length?audit.slice(0,30).map(a=>`<div class="history-item"><strong>${esc(a.action)}</strong><small>${esc(ago(a.created_at))} · ${esc(a.actor||'system')}</small></div>`).join(''):'<div class="empty">No lifecycle audit yet.</div>'}</div><div><h4>Transport history</h4>${transports.length?transports.slice(0,30).map(t=>`<div class="history-item"><strong>${esc(t.ingress_provider||t.last_tunnel_id||'direct')}</strong><small>${esc(t.status)} · ${esc(ago(t.last_seen_at))} · ${esc(shortId(t.id,14))}</small></div>`).join(''):'<div class="empty">No transport history yet.</div>'}</div></div>`;
+  panel.innerHTML=`<div class="history-head"><div><span class="eyebrow">SESSION HISTORY</span><h3>${esc(session.name||session.id)}</h3><p>${esc(session.workspace_key||'')} · ${esc(session.project_path||'')}</p></div><button class="text-button" data-managed-history-close type="button">Close</button></div><div class="session-machine-detail"><div><span>Machine</span><strong class="machine-health ${machine.online?'online':'offline'}"><i></i>${esc(machine.name||machine.id)}</strong><small>${esc(machine.os||'unknown')} · ${esc(machine.address||'local')}</small></div><div><span>Providers</span><strong>Desktop Commander ${dc?'ready':'unavailable'} · Computer Use ${gui?'ready':'unavailable'}</strong>${machineCapabilityBadges(machine)}</div><div><span>Effective permissions</span>${machinePermissionBadges(effective,'large')}<small>session policy ∩ machine policy · ${esc(effective.scope||'workspace')}</small></div></div><div class="history-grid"><div><h4>Lifecycle</h4>${audit.length?audit.slice(0,30).map(a=>`<div class="history-item"><strong>${esc(a.action)}</strong><small>${esc(ago(a.created_at))} · ${esc(a.actor||'system')}</small></div>`).join(''):'<div class="empty">No lifecycle audit yet.</div>'}</div><div><h4>Transport history</h4>${transports.length?transports.slice(0,30).map(t=>`<div class="history-item"><strong>${esc(t.ingress_provider||t.last_tunnel_id||'direct')}</strong><small>${esc(t.status)} · ${esc(ago(t.last_seen_at))} · ${esc(shortId(t.id,14))}</small></div>`).join(''):'<div class="empty">No transport history yet.</div>'}</div></div>`;
   panel.scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 
@@ -1470,13 +1682,13 @@ function renderDebug(data){
 
 async function load(){
   try{
-    const [status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,openaiCompat,operationsData,observabilityData,alertsData,auditData,events,capsulesData,agentRuntimesData,laneStatesData,reflexMetricsData]=await Promise.all([
-      getJson('/api/status'),getJson('/api/workers'),getJson('/api/work?limit=100'),getJson('/api/sessions'),getJson('/api/gateway/sessions'),getJson('/api/managed/sessions'),getJson('/api/managed/workspaces'),getJson('/api/openai/compatibility'),getJson('/api/operations'),getJson('/api/observability'),getJson('/api/alerts?status=open&limit=20'),getJson('/api/audit?limit=30'),getJson('/api/events?limit=40'),getJson('/api/capsules?limit=100'),getJson('/api/agents/runtimes'),getJson('/api/lanes'),getJson(`/api/reflex/metrics?window=${encodeURIComponent(reflexWindow)}&recent=20`).catch(()=>null)
+    const [status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,machinesData,machineEnrollmentsData,openaiCompat,operationsData,observabilityData,alertsData,auditData,events,capsulesData,agentRuntimesData,laneStatesData,reflexMetricsData]=await Promise.all([
+      getJson('/api/status'),getJson('/api/workers'),getJson('/api/work?limit=100'),getJson('/api/sessions'),getJson('/api/gateway/sessions'),getJson('/api/managed/sessions'),getJson('/api/managed/workspaces'),getJson('/api/machines'),getJson('/api/machines/enrollments').catch(()=>({enabled:false,pending:[],approved:[],rejected:[],pending_count:0})),getJson('/api/openai/compatibility'),getJson('/api/operations'),getJson('/api/observability'),getJson('/api/alerts?status=open&limit=20'),getJson('/api/audit?limit=30'),getJson('/api/events?limit=40'),getJson('/api/capsules?limit=100'),getJson('/api/agents/runtimes'),getJson('/api/lanes'),getJson(`/api/reflex/metrics?window=${encodeURIComponent(reflexWindow)}&recent=20`).catch(()=>null)
     ]);
-    latestData={status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,openaiCompat,operationsData,observabilityData,alertsData,auditData,events,capsulesData,agentRuntimesData,laneStatesData,reflexMetricsData};
+    latestData={status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,machinesData,machineEnrollmentsData,openaiCompat,operationsData,observabilityData,alertsData,auditData,events,capsulesData,agentRuntimesData,laneStatesData,reflexMetricsData};
     const studio=document.getElementById('studioStatus'); studio.className=`pill ${status.studio.status}`; studio.textContent=String(status.studio.status||'unknown').toUpperCase();
     document.getElementById('lastUpdated').textContent=`Updated ${new Date().toLocaleTimeString()} · ${status.studio.version}`;
-    renderOverview(latestData); renderReflexMetrics(latestData); renderCapsuleLedger(latestData); renderManagedSessions(latestData); renderSessions(latestData); renderWorkspaces(latestData); renderWorkers(latestData); renderTunnels(latestData); renderReliability(latestData); renderActivity(latestData); renderDebug(latestData); captureAndTranslateText(document);
+    renderOverview(latestData); renderReflexMetrics(latestData); renderCapsuleLedger(latestData); renderMachineEnrollment(latestData); renderManagedSessions(latestData); renderSessions(latestData); renderWorkspaces(latestData); renderWorkers(latestData); renderTunnels(latestData); renderReliability(latestData); renderActivity(latestData); renderDebug(latestData); captureAndTranslateText(document);
   }catch(err){
     const studio=document.getElementById('studioStatus'); studio.className='pill down'; studio.textContent='UI ERROR';
     document.getElementById('lastUpdated').textContent=err.message;
@@ -1794,7 +2006,7 @@ setInterval(load,5000);
 
 
 /* MCP_STUDIO_COMPUTER_USE_MVP */
-const computerUiState={descriptor:null,sessions:[],selectedSessionId:null,status:null};
+const computerUiState={descriptor:null,sessions:[],selectedSessionId:null,status:null,machinesData:null};
 
 function computerMessage(text,kind=''){
   const el=document.getElementById('computerMessage');
@@ -1828,16 +2040,15 @@ function renderComputerSessions(sessions){
     const runtimeLabel=Number.isInteger(runtimeDisplay)?('VNC :'+runtimeDisplay):'VNC unpaired';
     const selected=s.id===computerUiState.selectedSessionId;
     const accent=accents[index%accents.length];
-    const permissions=s.tool_permissions||{};
-    const permissionBadge=function(key,label){
-      const allowed=permissions[key]!==false;
-      return '<span class="computer-permission-badge '+(allowed?'allowed':'blocked')+'" title="'+label+': '+(allowed?'allowed':'blocked')+'">'+label+'</span>';
-    };
-    const permissionRow=s.tool_permissions_enabled===false?'':('<span class="computer-session-permissions">'
-      +permissionBadge('read','R')+permissionBadge('write','W')+permissionBadge('execute','X')+permissionBadge('destructive','D')+'</span>');
-    return '<button class="computer-session-card'+(selected?' selected':'')+'" style="--session-accent:'+accent+'" type="button" data-computer-session="'+id+'" data-status="'+status+'" aria-pressed="'+(selected?'true':'false')+'">'
+    const machine=machineForSession(s,{machinesData:computerUiState.machinesData});
+    const permissions=effectiveMachinePermissions(s,machine);
+    const guiAvailable=machineProviderReady(machine,'computer_use')&&permissions.execute===true;
+    const permissionRow=s.tool_permissions_enabled===false?'':machinePermissionBadges(permissions,'computer-session-permissions');
+    const machineLabel='<span class="computer-session-machine '+(machine.online?'online':'offline')+'"><i></i>'+esc(machine.name||machine.id)+'</span>';
+    const effectiveRuntimeLabel=guiAvailable?runtimeLabel:('GUI unavailable · '+esc(machine.name||machine.id));
+    return '<button class="computer-session-card'+(selected?' selected':'')+(guiAvailable?'':' gui-unavailable')+'" style="--session-accent:'+accent+'" type="button" data-computer-session="'+id+'" data-status="'+status+'" data-gui-available="'+(guiAvailable?'true':'false')+'" aria-disabled="'+(guiAvailable?'false':'true')+'" aria-pressed="'+(selected?'true':'false')+'">'
       +'<span class="computer-monitor-icon">'+computerMonitorSvg()+'<span class="computer-monitor-glow"></span></span>'
-      +'<span class="computer-session-copy"><strong>'+name+'</strong><small>'+workspace+'</small><small class="computer-session-runtime">'+esc(runtimeLabel)+'</small></span>'
+      +'<span class="computer-session-copy"><strong>'+name+'</strong><small>'+workspace+'</small>'+machineLabel+'<small class="computer-session-runtime">'+effectiveRuntimeLabel+'</small></span>'
       +permissionRow
       +'<span class="computer-session-status"><i></i>'+status+'</span>'
       +'</button>';
@@ -1863,10 +2074,11 @@ function updateComputerStatus(status){
 async function refreshComputerView(){
   if((location.hash||'#home')!=='#computer')return;
   try{
-    const data=await Promise.all([getJson('/api/computer/status'),getJson('/api/managed/sessions')]);
+    const data=await Promise.all([getJson('/api/computer/status'),getJson('/api/managed/sessions'),getJson('/api/machines')]);
     const status=data[0]||{};
     const sessions=(data[1]&&data[1].sessions)||[];
     computerUiState.status=status;
+    computerUiState.machinesData=data[2]||{machines:[]};
     const ready=updateComputerStatus(status);
     renderComputerSessions(sessions);
     if(!status.enabled)computerMessage('Computer Use is disabled in HIRDA config.','warning');
@@ -1886,17 +2098,22 @@ async function connectComputerView(id){
   try{
     const status=computerUiState.status||await getJson('/api/computer/status');
     if(!status.enabled)throw new Error('Computer Use is disabled');
+    const session=computerUiState.sessions.find(item=>item.id===id)||{};
+    const machine=machineForSession(session,{machinesData:computerUiState.machinesData});
+    const effective=effectiveMachinePermissions(session,machine);
+    if(!machineProviderReady(machine,'computer_use'))throw new Error('Computer Use is unavailable on '+(machine.name||machine.id));
+    if(effective.execute!==true)throw new Error('Machine policy blocks interactive Computer Use on '+(machine.name||machine.id));
     if(!status.novnc_available)throw new Error('Local noVNC assets are missing');
     if(!(status.runtime_mode==='session-isolated'?status.transport_ready:status.websockify_reachable))throw new Error(status.runtime_mode==='session-isolated'?'Session VNC transport is offline':'Local websockify bridge is offline');
     const descriptor=await getJson('/api/computer/descriptor/'+encodeURIComponent(id));
     computerUiState.descriptor=descriptor;
     computerUiState.selectedSessionId=id;
     renderComputerSessions(computerUiState.sessions);
-    const session=computerUiState.sessions.find(function(s){return s.id===id;})||{};
+    const selectedSession=session;
     const name=document.getElementById('computerSelectedSessionName');
     const meta=document.getElementById('computerSelectedSessionMeta');
-    if(name)name.textContent=session.name||session.workspace_key||id;
-    if(meta)meta.textContent=(session.workspace_key||'managed session')+' · '+(session.status||'unknown')+' · VNC '+(descriptor.desktop_display||'unpaired')+(descriptor.cdp_port?' · CDP '+descriptor.cdp_port:'');
+    if(name)name.textContent=selectedSession.name||selectedSession.workspace_key||id;
+    if(meta)meta.textContent=(selectedSession.workspace_key||'managed session')+' · '+(machine.name||machine.id)+' · '+(selectedSession.status||'unknown')+' · VNC '+(descriptor.desktop_display||'unpaired')+(descriptor.cdp_port?' · CDP '+descriptor.cdp_port:'');
     const websocketPath=descriptor.websocket_path||('/api/computer/vnc/ws/'+encodeURIComponent(id));
     // noVNC resolves its `path` setting relative to vnc.html. The viewer is
     // mounted at /computer/novnc/, so climb back to the application root first.
@@ -1930,7 +2147,7 @@ async function connectComputerView(id){
     url.hash=viewerParams.toString();
     if(iframe)iframe.src=url.pathname+url.hash;
     if(panel)panel.scrollIntoView({behavior:'smooth',block:'start'});
-    computerMessage('Opened '+(session.name||session.workspace_key||'session')+' desktop. If noVNC asks for credentials, enter the existing VNC password.','good');
+    computerMessage('Opened '+(selectedSession.name||selectedSession.workspace_key||'session')+' desktop on '+(machine.name||machine.id)+'. If noVNC asks for credentials, enter the existing VNC password.','good');
   }catch(err){
     computerMessage('Could not connect: '+err.message,'error');
   }
@@ -2060,6 +2277,15 @@ document.addEventListener('click',function(event){
 
 window.addEventListener('hashchange',function(){if(location.hash==='#computer')refreshComputerView();});
 if((location.hash||'#home')==='#computer')setTimeout(refreshComputerView,0);
+
+document.addEventListener('click',function(event){
+  const discover=event.target.closest&&event.target.closest('#machineDiscoverBtn');
+  if(discover){uiAction(discoverMachinesNow);return;}
+  const approve=event.target.closest&&event.target.closest('[data-machine-approve]');
+  if(approve){uiAction(()=>approveMachineEnrollment(approve.dataset.machineApprove));return;}
+  const reject=event.target.closest&&event.target.closest('[data-machine-reject]');
+  if(reject){uiAction(()=>rejectMachineEnrollment(reject.dataset.machineReject));return;}
+});
 
 /* Reference settings proxies keep the compact topbar faithful without removing controls. */
 document.addEventListener('click',function(event){
