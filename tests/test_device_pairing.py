@@ -136,7 +136,13 @@ def test_owner_approval_is_separate_from_human_verification(tmp_path):
     assert device["trust_state"] == "trusted"
     assert device["approved_by"] == "owner"
     assert device["platform"] == "windows"
-    assert device["policy"] == {"read": True, "write": False}
+    assert device["policy"] == {
+        "read": True,
+        "write": False,
+        "execute": False,
+        "destructive": False,
+        "fail_closed_unknown": True,
+    }
     assert manager.status(started["session_id"])["state"] == "trusted"
 
 

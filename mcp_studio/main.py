@@ -104,14 +104,19 @@ world_authoring = WorldAuthoringManager(
     validator_url=earth_world_validator_url,
 )
 computer = ComputerUseManager(settings.studio, db)
-machine_registry = MachineRegistry(settings.studio, base_dir=settings.config_path.parent)
-machine_enrollment = MachineEnrollmentManager(
-    settings.studio, machine_registry, base_dir=settings.config_path.parent
-)
 device_pairing = DevicePairingManager(
     settings.studio, base_dir=settings.config_path.parent
 )
 device_broker = DeviceBroker(settings.studio, device_pairing)
+machine_registry = MachineRegistry(
+    settings.studio,
+    base_dir=settings.config_path.parent,
+    device_pairing=device_pairing,
+    device_broker=device_broker,
+)
+machine_enrollment = MachineEnrollmentManager(
+    settings.studio, machine_registry, base_dir=settings.config_path.parent
+)
 machine_router = MachineCapabilityRouter(machine_registry, integration_manager, computer)
 gateway_sessions = GatewaySessionManager(
     settings,
@@ -1136,13 +1141,37 @@ async def device_broker_ws(websocket: WebSocket):
                 )
                 continue
             kind = str(message.get("type") or "")
+            if kind == "rpc_response":
+                try:
+                    await device_broker.touch_connection(device_id, connection_id)
+                except DeviceBrokerError:
+                    await websocket.close(code=4403, reason="Device trust revoked or session expired")
+                    return
+                accepted = await device_broker.resolve_rpc_response(
+                    device_id,
+                    connection_id,
+                    message,
+                )
+                if not accepted:
+                    await device_broker.send_connection_message(
+                        device_id,
+                        connection_id,
+                        {
+                            "schema": device_broker.SCHEMA,
+                            "type": "error",
+                            "error": "unknown_rpc_request",
+                        },
+                    )
+                continue
             if kind not in {"heartbeat", "ping"}:
-                await websocket.send_json(
+                await device_broker.send_connection_message(
+                    device_id,
+                    connection_id,
                     {
                         "schema": device_broker.SCHEMA,
                         "type": "error",
                         "error": "unsupported_message",
-                    }
+                    },
                 )
                 continue
             try:
@@ -1150,14 +1179,16 @@ async def device_broker_ws(websocket: WebSocket):
             except DeviceBrokerError:
                 await websocket.close(code=4403, reason="Device trust revoked or session expired")
                 return
-            await websocket.send_json(
+            await device_broker.send_connection_message(
+                device_id,
+                connection_id,
                 {
                     "schema": device_broker.SCHEMA,
                     "type": "heartbeat_ack" if kind == "heartbeat" else "pong",
                     "connection_id": connection_id,
                     "last_seen_at": current["last_seen_at"],
                     "expires_at": current["expires_at"],
-                }
+                },
             )
     except WebSocketDisconnect:
         pass
@@ -1223,6 +1254,7 @@ async def device_pairing_approve(
             actor="owner/api",
             policy=payload.policy,
         )
+        machine_registry.sync_trusted_devices()
         return JSONResponse(result, headers={"Cache-Control": "no-store"})
     except KeyError:
         raise HTTPException(status_code=404, detail="Unknown pairing session")
@@ -1275,6 +1307,7 @@ async def device_pairing_revoke(
             actor="owner/api",
             reason=payload.reason,
         )
+        machine_registry.sync_trusted_devices()
         return JSONResponse(result, headers={"Cache-Control": "no-store"})
     except KeyError:
         raise HTTPException(status_code=404, detail="Unknown trusted device")

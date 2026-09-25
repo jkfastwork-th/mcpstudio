@@ -80,6 +80,7 @@ class DeviceBroker:
         )
         self._challenges: dict[str, dict[str, Any]] = {}
         self._connections: dict[str, dict[str, Any]] = {}
+        self._pending: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
 
     def _require_enabled(self) -> None:
@@ -193,6 +194,7 @@ class DeviceBroker:
             "remote": remote,
             "transport": "wss",
             "websocket": websocket,
+            "send_lock": asyncio.Lock(),
         }
         previous: dict[str, Any] | None = None
         async with self._lock:
@@ -209,10 +211,22 @@ class DeviceBroker:
         return self._public_connection(item)
 
     async def unregister_connection(self, device_id: str, connection_id: str) -> None:
+        failed: list[asyncio.Future[Any]] = []
         async with self._lock:
             current = self._connections.get(str(device_id))
             if isinstance(current, dict) and current.get("connection_id") == connection_id:
                 self._connections.pop(str(device_id), None)
+            for request_id, pending in list(self._pending.items()):
+                if (
+                    pending.get("device_id") == str(device_id)
+                    and pending.get("connection_id") == connection_id
+                ):
+                    future = pending.get("future")
+                    if isinstance(future, asyncio.Future) and not future.done():
+                        failed.append(future)
+                    self._pending.pop(request_id, None)
+        for future in failed:
+            future.set_exception(DeviceBrokerError("device_connection_closed"))
 
     async def touch_connection(self, device_id: str, connection_id: str) -> dict[str, Any]:
         # Re-check trust on every heartbeat so owner revocation cuts authority
@@ -239,11 +253,144 @@ class DeviceBroker:
                 (_parse_iso(str(item["expires_at"])) - _utcnow()).total_seconds(),
             )
 
+    async def connection_status(self, device_id: str) -> dict[str, Any]:
+        async with self._lock:
+            item = self._connections.get(str(device_id))
+            if not isinstance(item, dict):
+                return {
+                    "connected": False,
+                    "device_id": str(device_id),
+                }
+            if _parse_iso(str(item["expires_at"])) <= _utcnow():
+                self._connections.pop(str(device_id), None)
+                return {
+                    "connected": False,
+                    "device_id": str(device_id),
+                }
+            return {
+                "connected": True,
+                **self._public_connection(item),
+            }
+
+    async def call_device(
+        self,
+        device_id: str,
+        *,
+        method: str,
+        payload: dict[str, Any],
+        timeout_seconds: float = 20.0,
+    ) -> dict[str, Any]:
+        self._require_enabled()
+        self._trusted_device(device_id)
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[Any] = loop.create_future()
+        request_id = "devrpc_" + secrets.token_urlsafe(18)
+
+        async with self._lock:
+            item = self._connections.get(str(device_id))
+            if not isinstance(item, dict):
+                raise DeviceBrokerError("device_offline")
+            if _parse_iso(str(item["expires_at"])) <= _utcnow():
+                self._connections.pop(str(device_id), None)
+                raise DeviceBrokerError("device_connection_expired")
+            connection_id = str(item["connection_id"])
+            websocket = item.get("websocket")
+            send_lock = item.get("send_lock")
+            if websocket is None or not isinstance(send_lock, asyncio.Lock):
+                raise DeviceBrokerError("device_connection_invalid")
+            self._pending[request_id] = {
+                "request_id": request_id,
+                "device_id": str(device_id),
+                "connection_id": connection_id,
+                "future": future,
+            }
+
+        message = {
+            "schema": self.SCHEMA,
+            "type": "rpc_request",
+            "request_id": request_id,
+            "connection_id": connection_id,
+            "method": str(method or "").strip(),
+            "payload": dict(payload or {}),
+        }
+        try:
+            async with send_lock:
+                await websocket.send_json(message)
+            result = await asyncio.wait_for(
+                future,
+                timeout=max(1.0, min(120.0, float(timeout_seconds))),
+            )
+        except TimeoutError as exc:
+            raise DeviceBrokerError("device_rpc_timeout") from exc
+        finally:
+            async with self._lock:
+                current = self._pending.get(request_id)
+                if isinstance(current, dict) and current.get("future") is future:
+                    self._pending.pop(request_id, None)
+
+        if not isinstance(result, dict):
+            raise DeviceBrokerError("device_rpc_invalid_result")
+        if not bool(result.get("ok")):
+            raise DeviceBrokerError(str(result.get("error") or "device_rpc_failed"))
+        body = result.get("result")
+        if not isinstance(body, dict):
+            raise DeviceBrokerError("device_rpc_invalid_result")
+        return body
+
+    async def resolve_rpc_response(
+        self,
+        device_id: str,
+        connection_id: str,
+        message: dict[str, Any],
+    ) -> bool:
+        request_id = str(message.get("request_id") or "")
+        if not request_id:
+            return False
+        async with self._lock:
+            pending = self._pending.get(request_id)
+            if not isinstance(pending, dict):
+                return False
+            if (
+                pending.get("device_id") != str(device_id)
+                or pending.get("connection_id") != str(connection_id)
+            ):
+                return False
+            future = pending.get("future")
+            if not isinstance(future, asyncio.Future) or future.done():
+                self._pending.pop(request_id, None)
+                return False
+            future.set_result(
+                {
+                    "ok": bool(message.get("ok")),
+                    "result": message.get("result"),
+                    "error": message.get("error"),
+                }
+            )
+            self._pending.pop(request_id, None)
+            return True
+
+    async def send_connection_message(
+        self,
+        device_id: str,
+        connection_id: str,
+        message: dict[str, Any],
+    ) -> None:
+        async with self._lock:
+            item = self._connections.get(str(device_id))
+            if not isinstance(item, dict) or item.get("connection_id") != connection_id:
+                raise DeviceBrokerError("device_connection_not_active")
+            websocket = item.get("websocket")
+            send_lock = item.get("send_lock")
+            if websocket is None or not isinstance(send_lock, asyncio.Lock):
+                raise DeviceBrokerError("device_connection_invalid")
+        async with send_lock:
+            await websocket.send_json(dict(message))
+
     def _public_connection(self, item: dict[str, Any]) -> dict[str, Any]:
         return {
             key: value
             for key, value in item.items()
-            if key != "websocket"
+            if key not in {"websocket", "send_lock"}
         }
 
     async def snapshot(self) -> dict[str, Any]:

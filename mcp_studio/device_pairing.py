@@ -15,6 +15,13 @@ from typing import Any
 _DEVICE_NAME_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,120}$")
 _PLATFORM_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,31}$")
 _CAPABILITY_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
+_SAFE_DEVICE_POLICY = {
+    "read": True,
+    "write": False,
+    "execute": False,
+    "destructive": False,
+    "fail_closed_unknown": True,
+}
 
 
 class DevicePairingError(RuntimeError):
@@ -305,7 +312,20 @@ class DevicePairingManager:
         self._require_enabled()
         item = self._session(session_id)
         if item.get("state") != "pending_owner":
-            raise DevicePairingError(f"pairing_session_not_approvable:{item.get('state')}")
+            raise DevicePairingError(
+                f"pairing_session_not_approvable:{item.get('state')}"
+            )
+
+        effective_policy = dict(_SAFE_DEVICE_POLICY)
+        supplied = dict(policy or {})
+        for key in _SAFE_DEVICE_POLICY:
+            if key not in supplied:
+                continue
+            value = supplied[key]
+            if not isinstance(value, bool):
+                raise DevicePairingError(f"invalid_device_policy:{key}")
+            effective_policy[key] = value
+
         now = _iso(_utcnow())
         device = {
             "device_id": item["device_id"],
@@ -317,7 +337,7 @@ class DevicePairingManager:
             "fingerprint": item["fingerprint"],
             "capabilities": list(item.get("capabilities") or []),
             "trust_state": "trusted",
-            "policy": dict(policy or {}),
+            "policy": effective_policy,
             "paired_at": now,
             "approved_by": str(actor or "unknown"),
             "last_seen_at": None,

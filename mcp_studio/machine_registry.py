@@ -28,6 +28,13 @@ _DEFAULT_MACHINE_POLICY: dict[str, Any] = {
     "destructive": False,
     "fail_closed_unknown": True,
 }
+_DYNAMIC_DEVICE_POLICY: dict[str, Any] = {
+    "read": True,
+    "write": False,
+    "execute": False,
+    "destructive": False,
+    "fail_closed_unknown": True,
+}
 
 
 def _normalize_machine_policy(raw: object) -> dict[str, Any]:
@@ -103,9 +110,18 @@ class MachineRegistry:
     every machine remains operator-declared and fail-closed.
     """
 
-    def __init__(self, studio: Any, *, base_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        studio: Any,
+        *,
+        base_dir: Path | None = None,
+        device_pairing: Any | None = None,
+        device_broker: Any | None = None,
+    ) -> None:
         self.studio = studio
         self.base_dir = (base_dir or Path.cwd()).resolve(strict=False)
+        self.device_pairing = device_pairing
+        self.device_broker = device_broker
         configured = list(getattr(studio, "machine_registry", []) or [])
         local_id = str(getattr(studio, "machine_local_id", "openclaw") or "openclaw").strip()
         self.local_machine_id = local_id
@@ -132,6 +148,7 @@ class MachineRegistry:
                 },
                 policy=dict(_DEFAULT_MACHINE_POLICY),
             )
+        self.sync_trusted_devices()
 
     @staticmethod
     def _parse(raw: dict[str, Any]) -> MachineDescriptor:
@@ -184,6 +201,81 @@ class MachineRegistry:
 
     def list(self) -> list[MachineDescriptor]:
         return [self._machines[key] for key in sorted(self._machines)]
+
+
+    def sync_trusted_devices(self) -> None:
+        pairing = self.device_pairing
+        if pairing is None or not bool(getattr(pairing, "enabled", False)):
+            return
+        snapshot = pairing.list_devices()
+        desired: set[str] = set()
+        for raw in snapshot.get("devices", []):
+            if not isinstance(raw, dict) or raw.get("trust_state") != "trusted":
+                continue
+            device_id = str(raw.get("device_id") or "").strip()
+            if not device_id or device_id == self.local_machine_id:
+                continue
+            desired.add(device_id)
+            existing = self._machines.get(device_id)
+            if (
+                existing is not None
+                and existing.metadata.get("registry_source") != "device_pairing"
+            ):
+                # A static/operator machine always wins over dynamic materialization.
+                continue
+
+            capabilities = tuple(
+                dict.fromkeys(
+                    str(item).strip()
+                    for item in (raw.get("capabilities") or [])
+                    if str(item).strip()
+                )
+            )
+            providers: dict[str, dict[str, Any]] = {
+                "device_broker": {"mode": "broker"},
+            }
+            if any(item in {"filesystem", "process"} for item in capabilities):
+                providers["desktop_commander"] = {"mode": "broker"}
+
+            effective_policy = dict(_DYNAMIC_DEVICE_POLICY)
+            raw_policy = raw.get("policy")
+            if isinstance(raw_policy, dict):
+                for key in (*_MACHINE_PERMISSION_KEYS, "fail_closed_unknown"):
+                    if key in raw_policy and isinstance(raw_policy[key], bool):
+                        effective_policy[key] = raw_policy[key]
+
+            self.register_machine(
+                {
+                    "id": device_id,
+                    "name": str(raw.get("name") or device_id),
+                    "enabled": True,
+                    "local": False,
+                    "os": raw.get("platform"),
+                    "address": None,
+                    "capabilities": list(capabilities),
+                    "providers": providers,
+                    "workspace_map": {},
+                    "policy": effective_policy,
+                    "metadata": {
+                        "registry_source": "device_pairing",
+                        "dynamic": True,
+                        "device_id": device_id,
+                        "fingerprint": raw.get("fingerprint"),
+                        "runtime_version": raw.get("runtime_version"),
+                        "trust_state": raw.get("trust_state"),
+                        "paired_at": raw.get("paired_at"),
+                    },
+                },
+                source="device_pairing",
+                replace=True,
+            )
+
+        for machine_id, machine in list(self._machines.items()):
+            if (
+                machine.metadata.get("registry_source") == "device_pairing"
+                and machine_id not in desired
+            ):
+                self._machines.pop(machine_id, None)
 
     def machine_for_session(self, session: dict[str, Any]) -> MachineDescriptor:
         metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
@@ -277,6 +369,16 @@ class MachineRegistry:
             return {"configured": False, "ready": False, "mode": None}
         if mode == "local":
             return {"configured": True, "ready": True, "mode": "local"}
+        if mode == "broker":
+            if self.device_broker is None:
+                return {"configured": True, "ready": False, "mode": mode, "error": "device_broker_unavailable"}
+            status = await self.device_broker.connection_status(machine.machine_id)
+            return {
+                "configured": True,
+                "ready": bool(status.get("connected")),
+                "mode": mode,
+                "connection": status,
+            }
         if mode != "agent":
             return {"configured": True, "ready": False, "mode": mode, "error": "unsupported_provider_mode"}
         endpoint = str(provider.get("endpoint") or "").rstrip("/")
@@ -340,11 +442,14 @@ class MachineRegistry:
     ) -> dict[str, Any]:
         machine = self.get(machine_id)
         session = await db.get_managed_session(session_id)
-        self.workspace_root(
-            machine,
-            str(session.get("workspace_key") or ""),
-            str(session.get("project_path") or "") or None,
-        )
+        desktop_provider = dict(machine.providers.get("desktop_commander") or {})
+        broker_managed = str(desktop_provider.get("mode") or "") == "broker"
+        if not broker_managed:
+            self.workspace_root(
+                machine,
+                str(session.get("workspace_key") or ""),
+                str(session.get("project_path") or "") or None,
+            )
         metadata = dict(session.get("metadata") or {})
         metadata["machine_id"] = machine.machine_id
         metadata["machine_bound_at"] = _utcnow()
@@ -363,8 +468,38 @@ class MachineRegistry:
         session_id: str,
     ) -> dict[str, Any]:
         provider = dict(machine.providers.get("desktop_commander") or {})
-        if str(provider.get("mode") or "") != "agent":
-            raise MachineRegistryError(f"desktop commander agent is unavailable on {machine.machine_id}")
+        mode = str(provider.get("mode") or "").strip()
+
+        if mode == "broker":
+            if self.device_broker is None:
+                raise MachineRegistryError(
+                    f"device broker is unavailable for {machine.machine_id}"
+                )
+            try:
+                result = await self.device_broker.call_device(
+                    machine.machine_id,
+                    method="desktop_commander.call",
+                    payload={
+                        "name": tool_name,
+                        "arguments": dict(arguments or {}),
+                        "workspace_key": str(workspace_key or ""),
+                        "session_id": str(session_id or ""),
+                    },
+                    timeout_seconds=float(provider.get("timeout_seconds") or 20.0),
+                )
+            except Exception as exc:
+                raise MachineRegistryError(
+                    f"broker machine tool failed: {type(exc).__name__}: {exc}"
+                ) from exc
+            if not isinstance(result, dict):
+                raise MachineRegistryError("broker machine returned invalid tool result")
+            return result
+
+        if mode != "agent":
+            raise MachineRegistryError(
+                f"desktop commander agent is unavailable on {machine.machine_id}"
+            )
+
         endpoint = str(provider.get("endpoint") or "").rstrip("/")
         workspace_root = self.workspace_root(machine, workspace_key, project_path)
         timeout = float(provider.get("timeout_seconds") or 20.0)
@@ -385,7 +520,9 @@ class MachineRegistry:
             )
         payload = response.json()
         if not isinstance(payload, dict) or not payload.get("ok"):
-            raise MachineRegistryError(str((payload or {}).get("error") or "remote machine tool failed"))
+            raise MachineRegistryError(
+                str((payload or {}).get("error") or "remote machine tool failed")
+            )
         result = payload.get("result")
         if not isinstance(result, dict):
             raise MachineRegistryError("remote machine returned invalid tool result")

@@ -158,9 +158,51 @@ P2 removes the architectural requirement for inbound device listeners and
 firewall rules. Production clients must use WSS; Tailscale can remain as an
 optional transport optimization rather than an enrollment dependency.
 
-## P3 boundary
+## P3 dynamic Machine Registry
 
-P3 will materialize trusted/connected devices into the dynamic Machine Registry
-and route capability calls through the authenticated broker session. Until P3,
-the legacy machine registry and `:8765` agent remain available for migration and
-the new broker is intentionally disabled by default.
+P3 materializes trusted device identities into the Machine Registry without
+requiring static YAML entries or IP addresses. A paired device becomes a dynamic
+machine whose stable machine ID is its cryptographic device ID.
+
+Dynamic machines:
+
+- use the paired device name/platform/capabilities as registry metadata;
+- have no identity dependency on an IP address;
+- derive online/offline state from the authenticated Device Broker connection;
+- default to read-only, fail-closed machine policy unless the owner explicitly
+  grants broader permissions;
+- remain logically bindable to managed sessions while offline;
+- are removed from the dynamic registry immediately after trust is revoked.
+
+For broker-backed devices, managed-session binding no longer requires a
+control-plane `workspace_map`. HIRDA sends only the logical `workspace_key`
+over broker RPC. The cross-platform Device Runtime resolves that key to its own
+local path and must fail closed when the workspace is unknown. Host absolute
+paths are not leaked across machines.
+
+Desktop Commander calls use the authenticated broker channel:
+
+```text
+Managed Session
+   -> Machine Capability Router
+   -> Dynamic Machine Registry
+   -> Device Broker RPC: desktop_commander.call
+   -> HIRDA Device Runtime
+   -> local Desktop Commander
+```
+
+Broker RPC requests carry a unique request ID and are matched to the exact
+device connection generation. Pending calls fail if that connection closes,
+responses from an old/replaced connection are rejected, and RPC messages share
+the connection send lock with heartbeat/control traffic.
+
+Legacy static machine entries and the inbound `:8765` agent remain supported
+during migration. Static/operator registry entries always win on ID collision,
+so dynamic pairing cannot replace an explicitly configured machine.
+
+## P4 boundary
+
+P4 provides the shared cross-platform Device Runtime that consumes broker RPC,
+resolves workspace keys locally, owns Desktop Commander as a local backend, and
+implements the same runtime contract on Windows, Linux, macOS, CLI, and
+headless installations.

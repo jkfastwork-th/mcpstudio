@@ -252,7 +252,7 @@ class MachineCapabilityRouter:
                 if violation:
                     raise MachineRegistryError(f"workspace scope violation: {violation}")
             return await self.integrations.call_backend_tool(exposed_name, arguments, context=context)
-        if mode == "agent":
+        if mode in {"agent", "broker"}:
             return await self.registry.remote_call(
                 machine,
                 tool_name=raw_name,
@@ -266,6 +266,7 @@ class MachineCapabilityRouter:
         )
 
     async def machine_snapshot(self) -> dict[str, Any]:
+        self.registry.sync_trusted_devices()
         snapshot = await self.registry.snapshot()
         local_id = self.registry.local_machine_id
         for item in snapshot.get("machines", []):
