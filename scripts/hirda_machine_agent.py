@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
+import select
+import struct
 import json
 import os
 import platform
@@ -47,11 +51,29 @@ def _computer_use_config(config: dict[str, Any]) -> dict[str, Any]:
         raise AgentError("computer_use websocket_url_template must contain {session_id}")
     if not template.startswith(("ws://", "wss://")):
         raise AgentError("computer_use websocket_url_template must use ws:// or wss://")
+
+    vnc_proxy = raw.get("vnc_proxy") if isinstance(raw.get("vnc_proxy"), dict) else {}
+    normalized_vnc: dict[str, Any] = {}
+    if bool(vnc_proxy.get("enabled", False)):
+        host = str(vnc_proxy.get("host") or "127.0.0.1").strip()
+        if host not in {"127.0.0.1", "::1"}:
+            raise AgentError("computer_use vnc_proxy host must be loopback")
+        port = int(vnc_proxy.get("port") or 5900)
+        if not 1024 <= port <= 65535:
+            raise AgentError("computer_use vnc_proxy port must be between 1024 and 65535")
+        normalized_vnc = {
+            "enabled": True,
+            "host": host,
+            "port": port,
+            "connect_timeout_seconds": float(vnc_proxy.get("connect_timeout_seconds") or 3.0),
+        }
+
     descriptor = raw.get("descriptor") if isinstance(raw.get("descriptor"), dict) else {}
     return {
         "enabled": True,
         "websocket_url_template": template,
         "descriptor": dict(descriptor),
+        "vnc_proxy": normalized_vnc,
     }
 
 
@@ -62,8 +84,13 @@ def _computer_use_descriptor(config: dict[str, Any], session_id: str) -> dict[st
         raise AgentError("invalid_session_id")
     websocket_url = str(config["websocket_url_template"]).replace("{session_id}", session_id)
     advertised = config.get("descriptor") if isinstance(config.get("descriptor"), dict) else {}
+    default_runtime_mode = (
+        "machine-console-remote"
+        if bool((config.get("vnc_proxy") or {}).get("enabled"))
+        else "session-isolated-remote"
+    )
     descriptor: dict[str, Any] = {
-        "runtime_mode": "session-isolated-remote",
+        "runtime_mode": str(advertised.get("runtime_mode") or default_runtime_mode),
         "transport": "websocket",
     }
     for key in (
@@ -80,6 +107,69 @@ def _computer_use_descriptor(config: dict[str, Any], session_id: str) -> dict[st
 
 class AgentError(RuntimeError):
     pass
+
+
+_WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def _recv_exact(sock: socket.socket, size: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining:
+        chunk = sock.recv(remaining)
+        if not chunk:
+            raise ConnectionError("websocket_closed")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _recv_ws_frame(sock: socket.socket) -> tuple[int, bytes]:
+    head = _recv_exact(sock, 2)
+    opcode = head[0] & 0x0F
+    masked = bool(head[1] & 0x80)
+    length = head[1] & 0x7F
+    if length == 126:
+        length = struct.unpack("!H", _recv_exact(sock, 2))[0]
+    elif length == 127:
+        length = struct.unpack("!Q", _recv_exact(sock, 8))[0]
+    if length > 8 * 1024 * 1024:
+        raise AgentError("websocket_frame_too_large")
+    mask = _recv_exact(sock, 4) if masked else b""
+    payload = _recv_exact(sock, length) if length else b""
+    if masked:
+        payload = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+    return opcode, payload
+
+
+def _send_ws_frame(sock: socket.socket, payload: bytes, *, opcode: int = 0x2) -> None:
+    size = len(payload)
+    head = bytearray([0x80 | (opcode & 0x0F)])
+    if size < 126:
+        head.append(size)
+    elif size <= 0xFFFF:
+        head.append(126)
+        head.extend(struct.pack("!H", size))
+    else:
+        head.append(127)
+        head.extend(struct.pack("!Q", size))
+    sock.sendall(bytes(head) + payload)
+
+
+def _computer_use_ready(config: dict[str, Any]) -> bool:
+    if not config.get("enabled"):
+        return False
+    proxy = config.get("vnc_proxy") if isinstance(config.get("vnc_proxy"), dict) else {}
+    if not proxy.get("enabled"):
+        return True
+    try:
+        with socket.create_connection(
+            (str(proxy["host"]), int(proxy["port"])),
+            timeout=float(proxy.get("connect_timeout_seconds") or 3.0),
+        ):
+            return True
+    except OSError:
+        return False
 
 
 def _within(root: Path, candidate: Path) -> bool:
@@ -285,19 +375,96 @@ class Handler(BaseHTTPRequestHandler):
         supplied = self.headers.get("Authorization", "")
         return supplied == f"Bearer {expected}"
 
+    def _proxy_vnc_websocket(self, session_id: str) -> None:
+        if not _SESSION_ID_RE.fullmatch(session_id):
+            self._json(400, {"ok": False, "error": "invalid_session_id"})
+            return
+        config = self.server.computer_use  # type: ignore[attr-defined]
+        proxy = config.get("vnc_proxy") if isinstance(config.get("vnc_proxy"), dict) else {}
+        if not proxy.get("enabled"):
+            self._json(404, {"ok": False, "error": "vnc_proxy_unavailable"})
+            return
+        upgrade = str(self.headers.get("Upgrade") or "").strip().lower()
+        key = str(self.headers.get("Sec-WebSocket-Key") or "").strip()
+        if upgrade != "websocket" or not key:
+            self._json(426, {"ok": False, "error": "websocket_upgrade_required"})
+            return
+
+        try:
+            upstream = socket.create_connection(
+                (str(proxy["host"]), int(proxy["port"])),
+                timeout=float(proxy.get("connect_timeout_seconds") or 3.0),
+            )
+        except OSError as exc:
+            self._json(503, {"ok": False, "error": f"vnc_unavailable:{exc}"})
+            return
+
+        accept = base64.b64encode(
+            hashlib.sha1((key + _WS_GUID).encode("ascii")).digest()
+        ).decode("ascii")
+        self.send_response(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
+        self.end_headers()
+
+        client = self.connection
+        client.settimeout(None)
+        upstream.settimeout(None)
+        try:
+            while True:
+                readable, _, _ = select.select([client, upstream], [], [], 30.0)
+                if not readable:
+                    continue
+                if client in readable:
+                    opcode, payload = _recv_ws_frame(client)
+                    if opcode == 0x8:
+                        try:
+                            _send_ws_frame(client, payload, opcode=0x8)
+                        except OSError:
+                            pass
+                        return
+                    if opcode == 0x9:
+                        _send_ws_frame(client, payload, opcode=0xA)
+                    elif opcode in {0x0, 0x1, 0x2} and payload:
+                        upstream.sendall(payload)
+                if upstream in readable:
+                    chunk = upstream.recv(65536)
+                    if not chunk:
+                        return
+                    _send_ws_frame(client, chunk, opcode=0x2)
+        except (ConnectionError, OSError, AgentError):
+            return
+        finally:
+            try:
+                upstream.close()
+            except OSError:
+                pass
+
     def do_GET(self) -> None:
         if not self._authorized():
             self._json(401, {"ok": False, "error": "unauthorized"})
             return
         relay = self.server.relay  # type: ignore[attr-defined]
         computer_use = self.server.computer_use  # type: ignore[attr-defined]
-        if self.path not in {"/health", "/identity"}:
+        path = self.path.split("?", 1)[0]
+        ws_prefix = "/v1/computer/ws/"
+        if path.startswith(ws_prefix):
+            self._proxy_vnc_websocket(path[len(ws_prefix):])
+            return
+        if path not in {"/health", "/identity"}:
             self._json(404, {"ok": False, "error": "not_found"})
             return
         try:
             tools = relay.refresh_tools()
-            computer_ready = bool(computer_use.get("enabled"))
-            if self.path == "/identity":
+            computer_configured = bool(computer_use.get("enabled"))
+            computer_ready = _computer_use_ready(computer_use)
+            runtime_mode = None
+            if computer_configured:
+                runtime_mode = _computer_use_descriptor(
+                    computer_use, "identity"
+                )["descriptor"]["runtime_mode"]
+            if path == "/identity":
                 capabilities = ["filesystem", "process"]
                 providers: dict[str, Any] = {
                     "desktop_commander": {
@@ -305,11 +472,12 @@ class Handler(BaseHTTPRequestHandler):
                         "tool_count": len(tools),
                     }
                 }
-                if computer_ready:
+                if computer_configured:
                     capabilities.append("computer_use")
                     providers["computer_use"] = {
                         "available": True,
-                        "runtime_mode": "session-isolated-remote",
+                        "ready": computer_ready,
+                        "runtime_mode": runtime_mode,
                         "transport": "websocket",
                     }
                 self._json(
@@ -334,6 +502,8 @@ class Handler(BaseHTTPRequestHandler):
                     "platform": sys.platform,
                     "desktop_commander": True,
                     "computer_use": computer_ready,
+                    "computer_use_configured": computer_configured,
+                    "computer_use_runtime_mode": runtime_mode,
                     "tool_count": len(tools),
                     "tools": [tool.get("name") for tool in tools],
                 },

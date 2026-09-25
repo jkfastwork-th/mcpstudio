@@ -277,11 +277,13 @@ async def test_auto_discovery_loop_runs_immediately(tmp_path: Path, monkeypatch)
 
 def test_machine_agent_advertises_enrollment_identity() -> None:
     source = (Path(__file__).resolve().parents[1] / "scripts" / "hirda_machine_agent.py").read_text()
-    assert 'self.path not in {"/health", "/identity"}' in source
+    assert 'path not in {"/health", "/identity"}' in source
+    assert 'ws_prefix = "/v1/computer/ws/"' in source
     assert '"schema": "hirda-machine-agent-v1"' in source
     assert '"hostname": socket.gethostname()' in source
     assert '"architecture": platform.machine()' in source
     assert '"computer_use"' in source
     assert '"/v1/computer/descriptor"' in source
-    assert '"runtime_mode": "session-isolated-remote"' in source
+    assert '"machine-console-remote"' in source
+    assert 'else "session-isolated-remote"' in source
     assert 'if not self._authorized()' in source
