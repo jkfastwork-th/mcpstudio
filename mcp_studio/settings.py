@@ -94,7 +94,10 @@ class StudioConfig:
     managed_session_start_timeout_seconds: float = 30.0
     managed_session_stop_timeout_seconds: float = 8.0
     managed_session_monitor_interval_seconds: float = 5.0
-    managed_session_auto_restore: bool = True
+    # Cold-start invariant: service restart must not eagerly spawn every durable
+    # Serena worker. The first ordinary tools/call lazily reconciles the logical
+    # project pin and wakes only the managed session that is actually used.
+    managed_session_auto_restore: bool = False
     managed_session_auto_restart: bool = True
     managed_session_require_existing_path: bool = True
     managed_session_home: str = "/home/alfred"

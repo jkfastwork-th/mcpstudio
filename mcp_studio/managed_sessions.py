@@ -187,15 +187,11 @@ class ManagedSessionManager:
                     f"Managed workspace {key} could not be seeded: {exc}",
                     severity="warning",
                 )
-        if self.settings.studio.managed_session_auto_restore:
-            for item in await self.db.list_managed_sessions(limit=500):
-                if item.get("desired_state") == "running":
-                    try:
-                        await self.ensure_running(item["id"])
-                    except Exception as exc:
-                        await self.db.update_managed_session_runtime(
-                            item["id"], status="error", error=str(exc), pid=None,
-                        )
+        # Never spawn durable Serena workers during HIRDA service startup.
+        # Gateway tool execution is the demand signal: the first ordinary
+        # tools/call reconciles the logical project pin and calls ensure_running()
+        # only for the session actually being used. This remains true even when
+        # legacy config still sets managed_session_auto_restore=true.
         self._monitor_task = asyncio.create_task(self._monitor_loop(), name="managed-session-monitor")
 
     async def stop(self) -> None:

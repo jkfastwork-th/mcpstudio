@@ -286,6 +286,39 @@ async def test_config_seed_does_not_overwrite_runtime_workspace_registration(tmp
 
 
 @pytest.mark.asyncio
+async def test_manager_start_keeps_running_sessions_dormant_by_default(tmp_path: Path, monkeypatch):
+    settings = settings_for(tmp_path)
+    assert settings.studio.managed_session_auto_restore is False
+    # Legacy deployments may still explicitly carry the old eager-restore flag.
+    # Cold-start safety must win over that setting.
+    settings.studio.managed_session_auto_restore = True
+    db = Database(settings.studio.database); await db.init()
+    manager = ManagedSessionManager(settings, db)
+    project = tmp_path / "projects" / "cold-start"; project.mkdir()
+    await manager.register_workspace(key="cold-start", project_path=str(project))
+    raw = await db.create_managed_session(
+        name="Cold Start", workspace_key="cold-start", project_path=str(project.resolve()),
+        server_id="serena-8001", port=43110, desired_state="running",
+    )
+    ensure_calls = []
+
+    async def unexpected_ensure(session_id):
+        ensure_calls.append(session_id)
+        raise AssertionError("service startup must not eagerly wake managed Serena runtimes")
+
+    monkeypatch.setattr(manager, "ensure_running", unexpected_ensure)
+    await manager.start()
+    try:
+        assert ensure_calls == []
+        dormant = await db.get_managed_session(raw["id"])
+        assert dormant["desired_state"] == "running"
+        assert dormant["status"] == "stopped"
+        assert dormant["pid"] is None
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
 async def test_spawn_uses_certified_serena_template_and_project_pin(tmp_path: Path, monkeypatch):
     settings = settings_for(tmp_path)
     db = Database(settings.studio.database); await db.init()
