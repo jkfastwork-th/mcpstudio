@@ -783,6 +783,64 @@ class GatewaySessionManager:
     def _all_local_tools(self) -> list[dict[str, Any]]:
         return self._ordered_management_tools() + self._ordered_backend_tools()
 
+    def _tool_catalog_hash(self) -> str:
+        """Stable fingerprint for the locally injected HIRDA tool catalog."""
+        canonical = json.dumps(
+            self._all_local_tools(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _augment_initialize_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        """Advertise that HIRDA may change the effective tool catalog."""
+        result = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(result, dict):
+            return payload
+        capabilities = result.get("capabilities")
+        if not isinstance(capabilities, dict):
+            capabilities = {}
+            result["capabilities"] = capabilities
+        tools = capabilities.get("tools")
+        if not isinstance(tools, dict):
+            tools = {}
+            capabilities["tools"] = tools
+        tools["listChanged"] = True
+        return payload
+
+    def _augment_initialize_content(self, content: bytes, content_type: str) -> bytes:
+        """Rewrite initialize responses so clients know HIRDA owns a dynamic catalog."""
+        try:
+            if "text/event-stream" in content_type:
+                out: list[str] = []
+                for line in content.decode("utf-8").splitlines(keepends=True):
+                    core = line.rstrip("\r\n")
+                    ending = line[len(core):]
+                    if core.startswith("data:"):
+                        raw = core[5:].strip()
+                        try:
+                            payload = json.loads(raw)
+                            result = payload.get("result") if isinstance(payload, dict) else None
+                            if isinstance(result, dict):
+                                payload = self._augment_initialize_payload(payload)
+                                core = "data: " + json.dumps(
+                                    payload, ensure_ascii=False, separators=(",", ":")
+                                )
+                        except Exception:
+                            pass
+                    out.append(core + ending)
+                return "".join(out).encode("utf-8")
+            payload = json.loads(content.decode("utf-8"))
+            return json.dumps(
+                self._augment_initialize_payload(payload),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except Exception:
+            return content
+
     def _augment_tools_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         result = payload.get("result") if isinstance(payload, dict) else None
         tools = result.get("tools") if isinstance(result, dict) else None
@@ -1203,8 +1261,8 @@ class GatewaySessionManager:
                 raise RuntimeError(f"upstream initialized notification failed HTTP {initialized.status_code}")
         return upstream_id
 
-    @staticmethod
     def _initialize_response_cache(
+        self,
         content: bytes,
         *,
         status_code: int,
@@ -1214,16 +1272,19 @@ class GatewaySessionManager:
             "body_b64": base64.b64encode(content).decode("ascii"),
             "status_code": int(status_code),
             "content_type": str(content_type or "application/json"),
+            "tool_catalog_hash": self._tool_catalog_hash(),
         }
 
-    @staticmethod
     def _cached_initialize_response(
+        self,
         session: dict[str, Any],
         *,
         request_id: Any,
     ) -> tuple[bytes, int, str] | None:
         cache = (session.get("metadata") or {}).get("initialize_response")
         if not isinstance(cache, dict):
+            return None
+        if cache.get("tool_catalog_hash") != self._tool_catalog_hash():
             return None
         encoded = cache.get("body_b64")
         if not isinstance(encoded, str) or not encoded:
@@ -1266,19 +1327,26 @@ class GatewaySessionManager:
             return None
         return content, status_code, content_type
 
-    async def _close_upstream_session(self, server_url: str | None, upstream_id: str | None) -> None:
+    async def _close_upstream_session(
+        self,
+        server_url: str | None,
+        upstream_id: str | None,
+    ) -> bool:
         if not server_url or not upstream_id:
-            return
+            return True
         headers = {
             "Accept": "application/json, text/event-stream",
             "Content-Type": "application/json",
             "Mcp-Session-Id": upstream_id,
         }
         try:
-            async with httpx.AsyncClient(timeout=min(4.0, self.settings.studio.request_timeout_seconds)) as client:
-                await client.delete(server_url, headers=headers)
+            async with httpx.AsyncClient(
+                timeout=min(4.0, self.settings.studio.request_timeout_seconds)
+            ) as client:
+                response = await client.delete(server_url, headers=headers)
+            return response.status_code < 400 or response.status_code in {404, 410}
         except Exception:
-            pass
+            return False
 
     async def bind_managed_session(self, gateway_session_id: str, managed_session_id: str, *, actor: str = "mcp") -> dict[str, Any]:
         if not (self.managed_sessions and self.managed_sessions.enabled):
@@ -1679,45 +1747,46 @@ class GatewaySessionManager:
             )
             raise ManagedSessionError("target gateway is already attached to the handoff session")
 
-        target_bound = False
         try:
-            attached = await self.bind_managed_session(
-                gateway_session_id,
-                managed_id,
-                actor=f"{actor}/handoff-claim",
-            )
-            target_bound = True
-
-            source_gateway_id = str(reserved["source_gateway_session_id"])
+            managed = await self.managed_sessions.get_session(managed_id)
+            transferred = await self.db.transfer_session_handoff_ownership(handoff_id)
+        except Exception as exc:
             try:
-                source_gateway = await self.db.get_gateway_session(source_gateway_id)
-            except KeyError:
-                source_gateway = None
+                await self.db.release_session_handoff(handoff_id, error=str(exc))
+            except Exception:
+                pass
+            if isinstance(exc, ManagedSessionError):
+                raise
+            raise ManagedSessionError(f"session handoff claim failed: {exc}") from exc
 
-            source_closed = False
-            if source_gateway is not None:
-                source_studio_id = str(source_gateway.get("studio_session_id") or "")
-                if source_studio_id:
-                    await self.db.clear_logical_session_managed_pin(
-                        source_studio_id,
-                        expected_managed_session_id=managed_id,
-                    )
-                    try:
-                        await self.db.disconnect_session(source_studio_id)
-                    except KeyError:
-                        pass
-                old_url = source_gateway.get("upstream_url")
-                old_upstream_id = source_gateway.get("upstream_session_id")
-                await self.db.close_gateway_session(
-                    source_gateway_id,
-                    error="session handoff claimed by another conversation",
+        target_after = transferred["target_gateway"]
+        previous_target = transferred["previous_target"]
+        old_target_url = previous_target.get("upstream_url")
+        old_target_upstream_id = previous_target.get("upstream_session_id")
+        inherited_url = target_after.get("upstream_url")
+        inherited_upstream_id = target_after.get("upstream_session_id")
+
+        # The managed upstream belongs to the target now. Only retire the
+        # target transport's previous neutral/managed upstream; never DELETE
+        # the inherited source upstream session.
+        if old_target_url or old_target_upstream_id:
+            if (
+                old_target_url != inherited_url
+                or old_target_upstream_id != inherited_upstream_id
+            ):
+                await self._close_upstream_session(
+                    old_target_url,
+                    old_target_upstream_id,
                 )
-                await self.db.resolve_alert(f"session-context-rollover:{source_gateway_id}")
-                source_closed = True
-                if old_url or old_upstream_id:
-                    await self._close_upstream_session(old_url, old_upstream_id)
 
-            claimed = await self.db.complete_session_handoff(handoff_id)
+        source_gateway_id = str(transferred["source_gateway_session_id"])
+        try:
+            await self.db.resolve_alert(f"session-context-rollover:{source_gateway_id}")
+        except Exception:
+            pass
+
+        audit_recorded = True
+        try:
             await self.db.add_audit(
                 "managed.session.handoff.claim",
                 actor=actor,
@@ -1727,44 +1796,30 @@ class GatewaySessionManager:
                     "handoff_id": handoff_id,
                     "source_gateway_session_id": source_gateway_id,
                     "target_gateway_session_id": gateway_session_id,
-                    "source_gateway_closed": source_closed,
+                    "source_gateway_closed": True,
+                    "upstream_session_adopted": True,
                 },
             )
-            return {
-                "handoff": self._public_session_handoff(claimed),
-                "gateway_session": attached["gateway_session"],
-                "managed_session": attached["managed_session"],
-                "context": {
-                    "summary": claimed.get("summary") or "",
-                    "reason": claimed.get("reason"),
-                },
-                "ownership_transferred": True,
-                "source_gateway_closed": source_closed,
-                "claim_consumed": True,
-            }
-        except Exception as exc:
-            if target_bound:
-                try:
-                    if previous_target_managed:
-                        await self.bind_managed_session(
-                            gateway_session_id,
-                            previous_target_managed,
-                            actor=f"{actor}/handoff-rollback",
-                        )
-                    else:
-                        await self.detach_managed_session(
-                            gateway_session_id,
-                            actor=f"{actor}/handoff-rollback",
-                        )
-                except Exception:
-                    pass
-            try:
-                await self.db.release_session_handoff(handoff_id, error=str(exc))
-            except Exception:
-                pass
-            if isinstance(exc, ManagedSessionError):
-                raise
-            raise ManagedSessionError(f"session handoff claim failed: {exc}") from exc
+        except Exception:
+            # Ownership has already moved atomically. An audit write failure
+            # must not misreport the completed handoff as a failed claim.
+            audit_recorded = False
+
+        claimed = transferred["handoff"]
+        return {
+            "handoff": self._public_session_handoff(claimed),
+            "gateway_session": target_after,
+            "managed_session": managed,
+            "context": {
+                "summary": claimed.get("summary") or "",
+                "reason": claimed.get("reason"),
+            },
+            "ownership_transferred": True,
+            "source_gateway_closed": True,
+            "claim_consumed": True,
+            "upstream_session_adopted": True,
+            "audit_recorded": audit_recorded,
+        }
 
     async def world_authoring_audit(
         self,
@@ -2406,6 +2461,11 @@ class GatewaySessionManager:
         await client.aclose()
         if status_code >= 400:
             return Response(content=content, status_code=status_code, headers=response_headers)
+
+        # HIRDA injects management/backend tools on top of the upstream Serena
+        # catalog, so the effective catalog is dynamic even when Serena itself
+        # advertises tools.listChanged=false.
+        content = self._augment_initialize_content(content, content_type)
 
         params = jsonrpc.get("params") if isinstance(jsonrpc.get("params"), dict) else {}
         gateway_session = await self.db.create_gateway_session(

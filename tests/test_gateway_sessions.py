@@ -265,3 +265,111 @@ def test_tools_list_includes_hirda_backend_before_upstream(tmp_path: Path):
     result = manager._augment_tools_payload(payload)
     names = [tool["name"] for tool in result["result"]["tools"]]
     assert names == ["hirda__desktop_commander__read_file", "serena_tool"]
+
+
+def test_initialize_advertises_dynamic_tool_list_and_cache_hash(tmp_path: Path):
+    manager = GatewaySessionManager(
+        make_settings(tmp_path),
+        Database(str(tmp_path / "db.sqlite3")),
+    )
+    content = (
+        b'{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25",'
+        b'"capabilities":{"tools":{"listChanged":false}}}}'
+    )
+
+    augmented = manager._augment_initialize_content(content, "application/json")
+    payload = __import__("json").loads(augmented)
+    assert payload["result"]["capabilities"]["tools"]["listChanged"] is True
+
+    cache = manager._initialize_response_cache(
+        augmented,
+        status_code=200,
+        content_type="application/json",
+    )
+    assert cache["tool_catalog_hash"] == manager._tool_catalog_hash()
+
+
+def test_stale_initialize_cache_is_invalidated_when_local_tool_catalog_changes(tmp_path: Path):
+    class MutableIntegrations:
+        def __init__(self):
+            self.tools = [
+                {
+                    "name": "hirda__desktop_commander__read_file",
+                    "description": "read",
+                    "inputSchema": {"type": "object", "properties": {}},
+                }
+            ]
+
+        def backend_tools(self):
+            return list(self.tools)
+
+    integrations = MutableIntegrations()
+    manager = GatewaySessionManager(
+        make_settings(tmp_path),
+        Database(str(tmp_path / "db.sqlite3")),
+        integrations=integrations,
+    )
+    content = b'{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+    cache = manager._initialize_response_cache(
+        content,
+        status_code=200,
+        content_type="application/json",
+    )
+    session = {"metadata": {"initialize_response": cache}}
+
+    assert manager._cached_initialize_response(session, request_id=2) is not None
+
+    integrations.tools.append(
+        {
+            "name": "hirda__desktop_commander__execute",
+            "description": "execute",
+            "inputSchema": {"type": "object", "properties": {}},
+        }
+    )
+    assert manager._cached_initialize_response(session, request_id=3) is None
+
+
+def test_tools_list_prepends_machine_management_and_backend_tools(tmp_path: Path):
+    class FakeManagedPool:
+        enabled = True
+
+    class FakeIntegrations:
+        @staticmethod
+        def backend_tools():
+            return [
+                {
+                    "name": "hirda__desktop_commander__read_file",
+                    "description": "HIRDA backend read",
+                    "inputSchema": {"type": "object", "properties": {}},
+                }
+            ]
+
+    manager = GatewaySessionManager(
+        make_settings(tmp_path),
+        Database(str(tmp_path / "db.sqlite3")),
+        managed_sessions=FakeManagedPool(),
+        integrations=FakeIntegrations(),
+    )
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "tools": [
+                {
+                    "name": "serena_tool",
+                    "description": "upstream",
+                    "inputSchema": {"type": "object", "properties": {}},
+                }
+            ]
+        },
+    }
+
+    result = manager._augment_tools_payload(payload)
+    names = [tool["name"] for tool in result["result"]["tools"]]
+    assert "mcpstudio_list_machines" in names
+    assert "mcpstudio_discover_machines" in names
+    assert "mcpstudio_approve_machine" in names
+    assert "mcpstudio_bind_machine" in names
+    assert "hirda__desktop_commander__read_file" in names
+    assert names.index("mcpstudio_list_machines") < names.index("serena_tool")
+    assert names.index("hirda__desktop_commander__read_file") < names.index("serena_tool")
