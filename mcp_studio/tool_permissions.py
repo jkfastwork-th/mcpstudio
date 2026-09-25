@@ -160,6 +160,11 @@ def _segment_class(segment: str) -> ToolClass:
     if command in {"python", "python3"}:
         if len(tokens) >= 3 and tokens[1:3] in (["-m", "pytest"], ["-m", "unittest"], ["-m", "compileall"]):
             return "execute"
+        # Running a concrete Python script is execution, not an unknown shell
+        # mutation. Workspace-scope enforcement separately rejects absolute or
+        # parent-relative script paths that escape the pinned project.
+        if len(tokens) >= 2 and not tokens[1].startswith("-") and Path(tokens[1]).suffix == ".py":
+            return "execute"
         return "unknown"
     return "unknown"
 

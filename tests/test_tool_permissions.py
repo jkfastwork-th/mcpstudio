@@ -57,6 +57,7 @@ def test_shell_classifier_keeps_read_write_execute_separate():
     assert classify_shell_command("pytest -q tests") == "execute"
     assert classify_shell_command("uv run pytest -q tests") == "execute"
     assert classify_shell_command("python3 -m unittest -v tests.test_tool_permissions") == "execute"
+    assert classify_shell_command("./.venv/bin/python scripts/certify-live-session-handoff.py --help") == "execute"
     assert classify_shell_command("git add x.py && git commit -m test") == "write"
     assert classify_shell_command("git push origin review/remove-hca") == "execute"
     assert classify_shell_command("git reset --hard HEAD") == "destructive"
@@ -109,6 +110,18 @@ def test_workspace_scope_blocks_relative_escape(tmp_path):
 def test_shell_scope_blocks_absolute_operand_outside_workspace(tmp_path):
     decision = decide_tool_call(studio(), session(tmp_path), "execute_shell_command", {"command": "cat /etc/passwd"})
     assert decision.allowed is False
+    assert decision.code == "TOOL_SCOPE_VIOLATION"
+
+
+def test_python_script_outside_workspace_is_still_scope_blocked(tmp_path):
+    decision = decide_tool_call(
+        studio(),
+        session(tmp_path),
+        "execute_shell_command",
+        {"command": "python3 ../outside.py"},
+    )
+    assert decision.allowed is False
+    assert decision.category == "execute"
     assert decision.code == "TOOL_SCOPE_VIOLATION"
 
 
