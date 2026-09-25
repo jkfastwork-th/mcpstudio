@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import ipaddress
+import json
 import os
 from typing import Any
 
@@ -27,7 +28,7 @@ from .agent_runtimes import AgentRuntimeInventory
 from .models import (
     SessionCreate, SessionHeartbeat, WorkerBind, WorkerHeartbeat, WorkerStatePatch,
     WorkSubmit, WorkFinish, WorkFail, WorkDetach, AlertAcknowledge, RetryDispatch, FaultInject, BatchDispatch,
-    SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate, ManagedSessionMachineUpdate, MachineEnrollmentApprove, MachineEnrollmentReject,
+    SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate, ManagedSessionMachineUpdate, MachineEnrollmentApprove, MachineEnrollmentReject, DevicePairingStart, DevicePairingVerify, DevicePairingApprove, DevicePairingReject, DeviceRevoke,
     GraftConfigureRequest, GraftQueryRequest, GraftRollbackRequest, ComputerRepairRequest, ManagedGatewayAttach, GatewayContextUsageReport, SessionHandoffPrepareRequest,
     CapsuleCreate, CapsuleStageUpdate, CapsuleHandoff, CapsuleHandoffAck, CapsuleContractUpdate,
     CapsuleHandoffValidation, CapsuleHandoffApproval, CapsuleHandoffCompletion, LaneStateUpdate, CapsuleComplete,
@@ -45,6 +46,8 @@ from .graft import GraftManager, GraftError
 from .integrations import build_integration_manager
 from .machine_registry import MachineRegistry, MachineRegistryError
 from .machine_enrollment import MachineEnrollmentManager, MachineEnrollmentError
+from .device_pairing import DevicePairingManager, DevicePairingError
+from .device_broker import DeviceBroker, DeviceBrokerError
 from .machine_router import MachineCapabilityRouter
 from .reflex_metrics import ReflexMetrics
 from .action_adapter import evaluate_action_envelope
@@ -105,6 +108,10 @@ machine_registry = MachineRegistry(settings.studio, base_dir=settings.config_pat
 machine_enrollment = MachineEnrollmentManager(
     settings.studio, machine_registry, base_dir=settings.config_path.parent
 )
+device_pairing = DevicePairingManager(
+    settings.studio, base_dir=settings.config_path.parent
+)
+device_broker = DeviceBroker(settings.studio, device_pairing)
 machine_router = MachineCapabilityRouter(machine_registry, integration_manager, computer)
 gateway_sessions = GatewaySessionManager(
     settings,
@@ -1005,6 +1012,274 @@ async def managed_session_resume(session_id: str):
         raise HTTPException(status_code=404, detail="Unknown managed session")
     except ManagedSessionError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+
+
+def _require_device_owner(request: Request) -> None:
+    owner_token = request.headers.get("x-hirda-owner-token", "")
+    owner_session = request.cookies.get("mcpstudio_owner_session", "")
+    if oauth.verify_owner_token(owner_token) or oauth.verify_owner_session(owner_session):
+        return
+    raise HTTPException(status_code=403, detail="Owner approval is required")
+
+
+def _device_pairing_error(exc: DevicePairingError) -> HTTPException:
+    message = str(exc)
+    if message == "device_pairing_disabled":
+        return HTTPException(status_code=503, detail=message)
+    if message == "device_already_trusted":
+        return HTTPException(status_code=409, detail=message)
+    if message == "pairing_verification_failed":
+        return HTTPException(status_code=401, detail=message)
+    if message.startswith("pairing_session_not_"):
+        return HTTPException(status_code=409, detail=message)
+    return HTTPException(status_code=400, detail=message)
+
+
+def _device_broker_http_error(exc: DeviceBrokerError) -> HTTPException:
+    message = str(exc)
+    if message == "device_broker_disabled":
+        return HTTPException(status_code=503, detail=message)
+    if message in {"unknown_device", "device_not_trusted"}:
+        return HTTPException(status_code=403, detail="device_authentication_failed")
+    return HTTPException(status_code=400, detail=message)
+
+
+@app.get("/api/device-broker")
+async def device_broker_status(request: Request):
+    _require_device_owner(request)
+    return await device_broker.snapshot()
+
+
+@app.websocket("/api/device-broker/ws")
+async def device_broker_ws(websocket: WebSocket):
+    await websocket.accept()
+    device_id = str(websocket.query_params.get("device_id") or "").strip()
+    connection_id: str | None = None
+    try:
+        if not device_id:
+            await websocket.close(code=4400, reason="device_id required")
+            return
+        try:
+            challenge = device_broker.issue_challenge(device_id)
+        except DeviceBrokerError:
+            await websocket.close(code=4403, reason="Device authentication failed")
+            return
+
+        await websocket.send_json(challenge)
+        try:
+            raw = await asyncio.wait_for(
+                websocket.receive_text(),
+                timeout=device_broker.challenge_ttl_seconds,
+            )
+        except TimeoutError:
+            await websocket.close(code=4408, reason="Device challenge timeout")
+            return
+        if len(raw.encode("utf-8")) > device_broker.max_message_bytes:
+            await websocket.close(code=1009, reason="Device message too large")
+            return
+        try:
+            auth = json.loads(raw)
+        except json.JSONDecodeError:
+            await websocket.close(code=4400, reason="Invalid authentication payload")
+            return
+        if not isinstance(auth, dict) or auth.get("type") != "authenticate":
+            await websocket.close(code=4400, reason="Authentication message required")
+            return
+        try:
+            device_broker.verify_challenge(
+                str(auth.get("challenge_id") or ""),
+                str(auth.get("signature") or ""),
+            )
+        except DeviceBrokerError:
+            await websocket.close(code=4401, reason="Device authentication failed")
+            return
+
+        remote = websocket.client.host if websocket.client else None
+        connection = await device_broker.register_connection(
+            device_id,
+            websocket,
+            remote=remote,
+        )
+        connection_id = str(connection["connection_id"])
+        await websocket.send_json(
+            {
+                "schema": device_broker.SCHEMA,
+                "type": "authenticated",
+                **connection,
+            }
+        )
+
+        while True:
+            remaining = await device_broker.remaining_seconds(device_id, connection_id)
+            if remaining <= 0:
+                await websocket.close(code=4408, reason="Device session expired")
+                return
+            timeout = min(float(device_broker.heartbeat_timeout_seconds), remaining)
+            try:
+                raw = await asyncio.wait_for(websocket.receive_text(), timeout=timeout)
+            except TimeoutError:
+                await websocket.close(code=4408, reason="Device heartbeat timeout")
+                return
+            if len(raw.encode("utf-8")) > device_broker.max_message_bytes:
+                await websocket.close(code=1009, reason="Device message too large")
+                return
+            try:
+                message = json.loads(raw)
+            except json.JSONDecodeError:
+                await websocket.send_json(
+                    {"schema": device_broker.SCHEMA, "type": "error", "error": "invalid_json"}
+                )
+                continue
+            if not isinstance(message, dict):
+                await websocket.send_json(
+                    {"schema": device_broker.SCHEMA, "type": "error", "error": "message_must_be_object"}
+                )
+                continue
+            kind = str(message.get("type") or "")
+            if kind not in {"heartbeat", "ping"}:
+                await websocket.send_json(
+                    {
+                        "schema": device_broker.SCHEMA,
+                        "type": "error",
+                        "error": "unsupported_message",
+                    }
+                )
+                continue
+            try:
+                current = await device_broker.touch_connection(device_id, connection_id)
+            except DeviceBrokerError:
+                await websocket.close(code=4403, reason="Device trust revoked or session expired")
+                return
+            await websocket.send_json(
+                {
+                    "schema": device_broker.SCHEMA,
+                    "type": "heartbeat_ack" if kind == "heartbeat" else "pong",
+                    "connection_id": connection_id,
+                    "last_seen_at": current["last_seen_at"],
+                    "expires_at": current["expires_at"],
+                }
+            )
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if connection_id:
+            await device_broker.unregister_connection(device_id, connection_id)
+
+
+@app.post("/api/device-pairing/sessions")
+async def device_pairing_start(payload: DevicePairingStart):
+    try:
+        result = device_pairing.start(
+            name=payload.name,
+            platform=payload.platform,
+            architecture=payload.architecture,
+            public_key=payload.public_key,
+            capabilities=payload.capabilities,
+            runtime_version=payload.runtime_version,
+        )
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+    except DevicePairingError as exc:
+        raise _device_pairing_error(exc)
+
+
+@app.get("/api/device-pairing/sessions/{session_id}")
+async def device_pairing_status(session_id: str):
+    try:
+        return JSONResponse(
+            device_pairing.status(session_id),
+            headers={"Cache-Control": "no-store"},
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown pairing session")
+    except DevicePairingError as exc:
+        raise _device_pairing_error(exc)
+
+
+@app.post("/api/device-pairing/sessions/{session_id}/verify")
+async def device_pairing_verify(session_id: str, payload: DevicePairingVerify):
+    try:
+        result = device_pairing.verify(
+            session_id,
+            code=payload.code,
+            nonce=payload.nonce,
+        )
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown pairing session")
+    except DevicePairingError as exc:
+        raise _device_pairing_error(exc)
+
+
+@app.post("/api/device-pairing/sessions/{session_id}/approve")
+async def device_pairing_approve(
+    session_id: str,
+    payload: DevicePairingApprove,
+    request: Request,
+):
+    _require_device_owner(request)
+    try:
+        result = device_pairing.approve(
+            session_id,
+            actor="owner/api",
+            policy=payload.policy,
+        )
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown pairing session")
+    except DevicePairingError as exc:
+        raise _device_pairing_error(exc)
+
+
+@app.post("/api/device-pairing/sessions/{session_id}/reject")
+async def device_pairing_reject(
+    session_id: str,
+    payload: DevicePairingReject,
+    request: Request,
+):
+    _require_device_owner(request)
+    try:
+        result = device_pairing.reject(
+            session_id,
+            actor="owner/api",
+            reason=payload.reason,
+        )
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown pairing session")
+    except DevicePairingError as exc:
+        raise _device_pairing_error(exc)
+
+
+@app.get("/api/device-pairing/devices")
+async def device_pairing_devices(request: Request):
+    _require_device_owner(request)
+    try:
+        return JSONResponse(
+            device_pairing.list_devices(),
+            headers={"Cache-Control": "no-store"},
+        )
+    except DevicePairingError as exc:
+        raise _device_pairing_error(exc)
+
+
+@app.post("/api/device-pairing/devices/{device_id}/revoke")
+async def device_pairing_revoke(
+    device_id: str,
+    payload: DeviceRevoke,
+    request: Request,
+):
+    _require_device_owner(request)
+    try:
+        result = device_pairing.revoke(
+            device_id,
+            actor="owner/api",
+            reason=payload.reason,
+        )
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown trusted device")
+    except DevicePairingError as exc:
+        raise _device_pairing_error(exc)
 
 
 @app.get("/api/machines")

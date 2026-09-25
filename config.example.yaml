@@ -173,6 +173,22 @@ studio:
   #  destructive: false
   #  fail_closed_unknown: true
 
+  # HIRDA Device Platform P1: transport-independent QR + 8-digit pairing.
+  # Device runtimes on Windows/Linux/macOS/CLI/headless all use this contract.
+  # Pairing and broker gates are independent so an operator can stop admitting
+  # new devices without disconnecting devices that are already trusted.
+  #device_pairing_enabled: false
+  #device_pairing_state_path: data/device-pairing.json
+  #device_pairing_secret_path: data/device-pairing.key
+  #device_pairing_base_url: https://hirda.example/pair
+  #device_pairing_ttl_seconds: 300
+  #device_pairing_max_attempts: 5
+  #device_broker_enabled: false
+  #device_broker_challenge_ttl_seconds: 30
+  #device_broker_session_ttl_seconds: 900
+  #device_broker_heartbeat_timeout_seconds: 45
+  #device_broker_max_message_bytes: 262144
+
   # P8 deterministic pixel-art candidate provider.
   # Install/pin upstream with: uv run python scripts/bootstrap-pixel-art-studio.py
   #pixel_art_studio_enabled: false

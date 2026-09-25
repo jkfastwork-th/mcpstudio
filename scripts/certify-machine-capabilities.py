@@ -19,7 +19,10 @@ from mcp_studio.tool_permissions import decide_tool_call
 
 
 def production_machine_snapshot(url: str) -> dict:
-    with urlopen(url, timeout=5) as response:
+    # The production machine snapshot performs live provider probes. Remote
+    # providers may legitimately use a timeout above five seconds (JKFASTDEV
+    # currently uses 20s), so the certification client must not expire first.
+    with urlopen(url, timeout=30) as response:
         payload = json.load(response)
     if not isinstance(payload, dict):
         raise RuntimeError("production machine snapshot is not an object")

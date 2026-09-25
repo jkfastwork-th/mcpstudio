@@ -192,6 +192,58 @@ class MachineEnrollmentReject(BaseModel):
     reason: str = Field(default="operator-rejected", min_length=1, max_length=500)
 
 
+class DevicePairingStart(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    platform: str = Field(min_length=1, max_length=32)
+    architecture: str = Field(min_length=1, max_length=32)
+    public_key: str = Field(min_length=1, max_length=256)
+    capabilities: list[str] = Field(default_factory=list, max_length=32)
+    runtime_version: str | None = Field(default=None, max_length=64)
+
+
+class DevicePairingVerify(BaseModel):
+    code: str = Field(min_length=8, max_length=16)
+    nonce: str = Field(min_length=16, max_length=256)
+
+
+class DevicePairingApprove(BaseModel):
+    policy: dict[str, bool] = Field(default_factory=dict)
+
+
+class DevicePairingReject(BaseModel):
+    reason: str = Field(default="owner-rejected", min_length=1, max_length=500)
+
+
+class DeviceRevoke(BaseModel):
+    reason: str = Field(default="owner-revoked", min_length=1, max_length=500)
+
+
+class DevicePairingStart(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    platform: str = Field(min_length=1, max_length=32)
+    architecture: str = Field(min_length=1, max_length=32)
+    public_key: str = Field(min_length=1, max_length=256)
+    capabilities: list[str] = Field(default_factory=list, max_length=32)
+    runtime_version: str | None = Field(default=None, max_length=64)
+
+
+class DevicePairingVerify(BaseModel):
+    code: str = Field(min_length=8, max_length=16)
+    nonce: str = Field(min_length=16, max_length=256)
+
+
+class DevicePairingApprove(BaseModel):
+    policy: dict[str, bool] = Field(default_factory=dict)
+
+
+class DevicePairingReject(BaseModel):
+    reason: str = Field(default="owner-rejected", min_length=1, max_length=500)
+
+
+class DeviceRevoke(BaseModel):
+    reason: str = Field(default="owner-revoked", min_length=1, max_length=500)
+
+
 class ManagedSessionPermissionsUpdate(BaseModel):
     read: bool | None = None
     write: bool | None = None

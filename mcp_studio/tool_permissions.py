@@ -148,10 +148,18 @@ def _segment_class(segment: str) -> ToolClass:
         sub = args[0]
         if sub in {"status", "is-active", "is-enabled", "show", "list-units", "list-unit-files"}:
             return "read"
-        if sub in {"restart", "start", "reload", "try-restart"}:
+        if sub in {"restart", "start", "reload", "try-restart", "enable", "reenable", "daemon-reload", "unmask"}:
             return "execute"
         if sub in {"stop", "disable", "mask"}:
             return "destructive"
+        return "unknown"
+    if command == "tailscale":
+        args = tokens[1:]
+        if not args:
+            return "unknown"
+        sub = args[0]
+        if sub in {"status", "ip", "ping", "netcheck"}:
+            return "read"
         return "unknown"
     if command in _READ_COMMANDS:
         return "read"

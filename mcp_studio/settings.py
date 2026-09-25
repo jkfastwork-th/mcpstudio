@@ -203,6 +203,24 @@ class StudioConfig:
         }
     )
 
+    # HIRDA Device Platform P1. Pairing is transport-independent and shared by
+    # Windows, Linux, macOS, CLI, and headless runtimes. QR carries a one-time
+    # nonce while the human confirms the same session with an 8-digit code.
+    device_pairing_enabled: bool = False
+    device_pairing_state_path: str = "data/device-pairing.json"
+    device_pairing_secret_path: str = "data/device-pairing.key"
+    device_pairing_base_url: str = "https://localhost/pair"
+    device_pairing_ttl_seconds: int = 300
+    device_pairing_max_attempts: int = 5
+
+    # P2 outbound Device Broker. Trusted devices initiate the connection; HIRDA
+    # authenticates them with an Ed25519 challenge before admitting a session.
+    device_broker_enabled: bool = False
+    device_broker_challenge_ttl_seconds: int = 30
+    device_broker_session_ttl_seconds: int = 900
+    device_broker_heartbeat_timeout_seconds: int = 45
+    device_broker_max_message_bytes: int = 262144
+
     # P8 deterministic pixel-art provider. HIRDA imports only a pinned local
     # Gamezxz/pixel-art-studio checkout and exposes bounded candidate generation.
     pixel_art_studio_enabled: bool = False
