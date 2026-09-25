@@ -107,6 +107,28 @@ def test_workspace_scope_blocks_relative_escape(tmp_path):
     assert decision.code == "TOOL_SCOPE_VIOLATION"
 
 
+def test_workspace_scope_blocks_windows_style_relative_escape(tmp_path):
+    decision = decide_tool_call(
+        studio(),
+        session(tmp_path),
+        "read_file",
+        {"relative_path": "..\\\\..\\\\outside.txt"},
+    )
+    assert decision.allowed is False
+    assert decision.code == "TOOL_SCOPE_VIOLATION"
+
+
+def test_workspace_scope_blocks_windows_drive_path(tmp_path):
+    decision = decide_tool_call(
+        studio(),
+        session(tmp_path),
+        "read_file",
+        {"relative_path": "C:\\\\outside\\\\secret.txt"},
+    )
+    assert decision.allowed is False
+    assert decision.code == "TOOL_SCOPE_VIOLATION"
+
+
 def test_shell_scope_blocks_absolute_operand_outside_workspace(tmp_path):
     decision = decide_tool_call(studio(), session(tmp_path), "execute_shell_command", {"command": "cat /etc/passwd"})
     assert decision.allowed is False

@@ -45,3 +45,4 @@ graft/.cache/
 /scripts/restart-oriverse-chrome-tieroff.cjs
 /scripts/test-webgpu-tier-off.cjs
 .hirda-cache/
+hirda-machine-certification.txt

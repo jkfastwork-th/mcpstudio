@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import shlex
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Literal, cast
 
 from .git_worktrees import is_registered_git_worktree_path
@@ -320,7 +320,11 @@ def _argument_scope_violation(
             return None
         if "://" in value:
             return f"argument {key} is a URL outside workspace scope: {value}"
-        raw = Path(value).expanduser()
+        raw_text = value.strip()
+        windows_path = PureWindowsPath(raw_text)
+        if windows_path.drive:
+            return f"argument {key} uses a Windows drive or UNC path outside workspace scope: {value}"
+        raw = Path(raw_text.replace("\\", "/")).expanduser()
         candidate = raw if raw.is_absolute() else workspace_root / raw
         if not _within_scope(
             workspace_root,
@@ -343,6 +347,20 @@ def _argument_scope_violation(
             if violation:
                 return violation
     return None
+
+
+def workspace_scope_violation(
+    arguments: dict[str, Any],
+    workspace_root: Path,
+    *,
+    allow_git_worktree_siblings: bool = False,
+) -> str | None:
+    """Validate path-bearing tool arguments against a local workspace root."""
+    return _argument_scope_violation(
+        arguments,
+        workspace_root,
+        allow_git_worktree_siblings=allow_git_worktree_siblings,
+    )
 
 
 def _shell_scope_violation(

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from .computer import ComputerUseManager
 from .integrations import IntegrationManager, IntegrationError
 from .machine_registry import MachineRegistry, MachineRegistryError
+from .tool_permissions import workspace_scope_violation
 
 
 _BROWSER_VISUAL_FALLBACK_TOOL = "hirda__browser__visual_fallback"
@@ -239,6 +241,16 @@ class MachineCapabilityRouter:
         if mode == "local":
             if not machine.local:
                 raise MachineRegistryError("non-local machine cannot use local desktop commander")
+            policy = context.get("policy") if isinstance(context.get("policy"), dict) else {}
+            if policy.get("scope") == "workspace":
+                workspace_root = self.registry.workspace_root(
+                    machine,
+                    str(context.get("workspace_key") or ""),
+                    str(context.get("project_path") or "") or None,
+                )
+                violation = workspace_scope_violation(arguments, Path(workspace_root))
+                if violation:
+                    raise MachineRegistryError(f"workspace scope violation: {violation}")
             return await self.integrations.call_backend_tool(exposed_name, arguments, context=context)
         if mode == "agent":
             return await self.registry.remote_call(

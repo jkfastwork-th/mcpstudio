@@ -47,6 +47,20 @@ def test_computer_use_proxy_rejects_non_loopback_vnc_target():
         )
 
 
+def test_machine_agent_rejects_windows_style_workspace_escape(tmp_path):
+    relay = agent.DesktopCommanderRelay(["desktop-commander"], "test-machine")
+    with pytest.raises(agent.AgentError, match="workspace_scope_violation"):
+        relay._normalize_path(tmp_path, "..\\\\..\\\\outside.txt")
+
+
+def test_machine_agent_rejects_foreign_windows_drive_on_posix(tmp_path):
+    if agent.os.name == "nt":
+        pytest.skip("foreign Windows-drive check is POSIX-specific")
+    relay = agent.DesktopCommanderRelay(["desktop-commander"], "test-machine")
+    with pytest.raises(agent.AgentError, match="workspace_scope_violation"):
+        relay._normalize_path(tmp_path, "C:\\\\outside\\\\secret.txt")
+
+
 def test_computer_use_descriptor_rejects_invalid_session_id():
     config = agent._computer_use_config(
         {

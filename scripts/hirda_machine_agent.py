@@ -16,7 +16,7 @@ import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 EXPOSED_TOOLS = {
@@ -277,7 +277,10 @@ class DesktopCommanderRelay:
             return raw
         if "://" in raw:
             raise AgentError("url_outside_workspace")
-        candidate = Path(raw).expanduser()
+        windows_path = PureWindowsPath(raw)
+        if os.name != "nt" and windows_path.drive:
+            raise AgentError(f"workspace_scope_violation:{value}")
+        candidate = Path(raw.replace("\\", os.sep).replace("/", os.sep)).expanduser()
         if not candidate.is_absolute():
             candidate = root / candidate
         candidate = Path(os.path.abspath(candidate))

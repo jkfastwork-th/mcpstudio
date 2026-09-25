@@ -172,6 +172,26 @@ async def test_router_uses_local_backend_for_local_machine(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_router_local_backend_rejects_cross_platform_scope_escape(tmp_path: Path):
+    registry = MachineRegistry(studio(machine_config()), base_dir=tmp_path)
+    integrations = FakeIntegrations()
+    router = MachineCapabilityRouter(registry, integrations, FakeComputer())
+    with pytest.raises(MachineRegistryError, match="workspace scope violation"):
+        await router.call_backend_tool(
+            "hirda__desktop_commander__read_file",
+            {"path": "..\\\\..\\\\outside.txt"},
+            context={
+                "machine_id": "openclaw",
+                "managed_session_id": "ms-1",
+                "workspace_key": "mcp-studio",
+                "project_path": str(tmp_path),
+                "policy": {"scope": "workspace"},
+            },
+        )
+    assert integrations.local_calls == []
+
+
+@pytest.mark.asyncio
 async def test_router_uses_remote_agent_for_remote_machine(tmp_path: Path, monkeypatch):
     registry = MachineRegistry(studio(machine_config()), base_dir=tmp_path)
     integrations = FakeIntegrations()
