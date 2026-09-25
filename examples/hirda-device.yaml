@@ -1,0 +1,26 @@
+# Shared HIRDA Device Runtime (P4)
+# Same core config shape is used on Windows, Linux, macOS, CLI, and headless.
+control_plane_url: https://serena.jkfast.work
+name: my-device
+
+# P4 portable fallback. P5/P6/P7 may replace storage with platform key stores.
+identity_path: .hirda/device-key.pem
+
+capabilities:
+  - filesystem
+  - process
+
+# Local Desktop Commander backend. Nothing here listens on the network.
+desktop_commander_command:
+  - desktop-commander
+desktop_commander_timeout_seconds: 15
+
+# Logical HIRDA workspace key -> local path on THIS device.
+# The control plane sends only the key, never its own absolute path.
+workspaces:
+  mcp-studio: ./workspaces/mcp-studio
+
+heartbeat_seconds: 15
+reconnect_min_seconds: 1
+reconnect_max_seconds: 30
+runtime_version: "0.1"

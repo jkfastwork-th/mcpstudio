@@ -47,6 +47,7 @@ from .integrations import build_integration_manager
 from .machine_registry import MachineRegistry, MachineRegistryError
 from .machine_enrollment import MachineEnrollmentManager, MachineEnrollmentError
 from .device_pairing import DevicePairingManager, DevicePairingError
+from .device_pairing_web import render_pairing_page
 from .device_broker import DeviceBroker, DeviceBrokerError
 from .machine_router import MachineCapabilityRouter
 from .reflex_metrics import ReflexMetrics
@@ -314,6 +315,7 @@ async def oauth_authorize_submit(request: Request):
             headers={"Cache-Control": "no-store"},
         )
         if owner_session_token and not oauth.verify_owner_session(owner_session_token):
+            response.delete_cookie("mcpstudio_owner_session", path="/")
             response.delete_cookie("mcpstudio_owner_session", path="/oauth")
         return response
     await db.add_event(
@@ -327,7 +329,7 @@ async def oauth_authorize_submit(request: Request):
             "mcpstudio_owner_session",
             oauth.issue_owner_session(),
             max_age=settings.studio.oauth_owner_session_ttl_seconds,
-            path="/oauth",
+            path="/",
             secure=True,
             httponly=True,
             samesite="lax",
@@ -1038,6 +1040,113 @@ def _device_pairing_error(exc: DevicePairingError) -> HTTPException:
     if message.startswith("pairing_session_not_"):
         return HTTPException(status_code=409, detail=message)
     return HTTPException(status_code=400, detail=message)
+
+
+
+@app.get("/pair/{session_id}")
+async def device_pairing_page(
+    request: Request,
+    session_id: str,
+    nonce: str = "",
+):
+    try:
+        session = device_pairing.status(session_id)
+    except KeyError:
+        return HTMLResponse("<h1>Pairing session not found</h1>", status_code=404)
+    except DevicePairingError as exc:
+        raise _device_pairing_error(exc)
+    if session.get("state") == "pairing" and not nonce:
+        return HTMLResponse(
+            render_pairing_page(
+                session,
+                error="Open the QR code again. Its one-time pairing nonce is missing.",
+            ),
+            status_code=400,
+            headers={"Cache-Control": "no-store"},
+        )
+    return HTMLResponse(
+        render_pairing_page(
+            session,
+            nonce=nonce,
+            owner_session_valid=oauth.verify_owner_session(
+                request.cookies.get("mcpstudio_owner_session", "")
+            ),
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/pair/{session_id}/verify")
+async def device_pairing_page_verify(request: Request, session_id: str):
+    body = await request.body()
+    if len(body) > 4096:
+        raise HTTPException(status_code=413, detail="Pairing form too large")
+    parsed = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+    code = (parsed.get("code") or [""])[-1].replace(" ", "")
+    nonce = (parsed.get("nonce") or [""])[-1]
+    try:
+        device_pairing.verify(session_id, code=code, nonce=nonce)
+    except KeyError:
+        return HTMLResponse("<h1>Pairing session not found</h1>", status_code=404)
+    except DevicePairingError:
+        try:
+            session = device_pairing.status(session_id)
+        except Exception:
+            return HTMLResponse("<h1>Pairing failed</h1>", status_code=401)
+        return HTMLResponse(
+            render_pairing_page(
+                session,
+                nonce=nonce,
+                error="The code or QR session did not match.",
+            ),
+            status_code=401,
+            headers={"Cache-Control": "no-store"},
+        )
+    return RedirectResponse(f"/pair/{session_id}", status_code=303)
+
+
+@app.post("/pair/{session_id}/approve")
+async def device_pairing_page_approve(request: Request, session_id: str):
+    body = await request.body()
+    if len(body) > 4096:
+        raise HTTPException(status_code=413, detail="Pairing form too large")
+    parsed = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+    owner_token = (parsed.get("owner_token") or [""])[-1]
+    owner_session = request.cookies.get("mcpstudio_owner_session", "")
+    approved_by_token = oauth.verify_owner_token(owner_token)
+    if not (approved_by_token or oauth.verify_owner_session(owner_session)):
+        try:
+            session = device_pairing.status(session_id)
+        except KeyError:
+            return HTMLResponse("<h1>Pairing session not found</h1>", status_code=404)
+        return HTMLResponse(
+            render_pairing_page(
+                session,
+                error="Owner approval is required.",
+            ),
+            status_code=403,
+            headers={"Cache-Control": "no-store"},
+        )
+    try:
+        device_pairing.approve(session_id, actor="owner/web", policy={})
+        machine_registry.sync_trusted_devices()
+    except KeyError:
+        return HTMLResponse("<h1>Pairing session not found</h1>", status_code=404)
+    except DevicePairingError as exc:
+        raise _device_pairing_error(exc)
+    response = RedirectResponse(f"/pair/{session_id}", status_code=303)
+    response.headers["Cache-Control"] = "no-store"
+    if approved_by_token:
+        response.set_cookie(
+            "mcpstudio_owner_session",
+            oauth.issue_owner_session(),
+            max_age=settings.studio.oauth_owner_session_ttl_seconds,
+            path="/",
+            secure=True,
+            httponly=True,
+            samesite="lax",
+        )
+    return response
 
 
 def _device_broker_http_error(exc: DeviceBrokerError) -> HTTPException:

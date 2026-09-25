@@ -200,9 +200,73 @@ Legacy static machine entries and the inbound `:8765` agent remain supported
 during migration. Static/operator registry entries always win on ID collision,
 so dynamic pairing cannot replace an explicitly configured machine.
 
-## P4 boundary
+## P4 shared Device Runtime
 
-P4 provides the shared cross-platform Device Runtime that consumes broker RPC,
-resolves workspace keys locally, owns Desktop Commander as a local backend, and
-implements the same runtime contract on Windows, Linux, macOS, CLI, and
-headless installations.
+P4 implements the cross-platform runtime core used by Windows, Linux, macOS,
+CLI, and headless installations.
+
+The runtime owns the complete device-side lifecycle:
+
+```text
+Persistent Ed25519 identity
+        |
+        v
+QR + 8-digit pairing client
+        |
+        v
+Outbound WSS Device Broker session
+        |
+        v
+Heartbeat / reconnect
+        |
+        v
+Broker RPC dispatch
+        |
+        v
+Local workspace resolver
+        |
+        v
+Shared Desktop Commander relay
+```
+
+The portable P4 identity store writes the Ed25519 private key to an owner-only
+file and never sends it to HIRDA. P5/P6/P7 may replace only this storage adapter
+with DPAPI/TPM, Secret Service, or Keychain while keeping the same public-key
+identity contract.
+
+The runtime loads one YAML configuration on every supported platform. It maps
+logical HIRDA workspace keys to local paths, launches Desktop Commander as a
+local stdio child process, and never exposes Desktop Commander on a network
+listener.
+
+The shared relay now uses a background response reader and bounded request
+timeouts. A stuck Desktop Commander child therefore fails fast instead of
+blocking an HTTP health endpoint or device RPC indefinitely. The legacy
+`hirda_machine_agent.py` also imports this relay during migration.
+
+The `hirda-device` CLI exposes:
+
+```text
+hirda-device --config <path> pair
+hirda-device --config <path> run
+hirda-device --config <path> identity
+```
+
+`pair` renders the server-provided QR payload and 8-digit code, then waits for
+the control plane to report the cryptographic identity as trusted. The QR URL
+lands on HIRDA's `/pair/{session_id}` page where the human code is verified
+before the separate owner-approval step.
+
+`run` keeps an outbound broker connection alive, signs each fresh server
+challenge, reconnects with bounded exponential backoff, sends heartbeat traffic,
+and handles `desktop_commander.call` requests without blocking the network event
+loop.
+
+An example device config lives at `examples/hirda-device.yaml`.
+
+## P5 boundary
+
+P5 packages this shared runtime for Windows and replaces the portable pieces
+that benefit from native integration: secure private-key storage, autostart,
+installer/update lifecycle, Desktop UI, and local workspace selection. The
+pairing/broker/RPC contracts remain unchanged.

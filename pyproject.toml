@@ -17,8 +17,12 @@ dependencies = [
   "jinja2>=3.1,<4",
   "websockets>=13,<15",
   "cryptography>=45,<51",
+  "qrcode>=8,<9",
   "Pillow>=9,<13",
 ]
+
+[project.scripts]
+hirda-device = "mcp_studio.device_cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<9", "pytest-asyncio>=0.25,<1"]
