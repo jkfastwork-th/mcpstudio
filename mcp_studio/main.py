@@ -44,7 +44,8 @@ from .observability import ObservabilityManager
 from .computer import ComputerUseManager
 from .graft import GraftManager, GraftError
 from .integrations import build_integration_manager
-from .machine_registry import MachineRegistry, MachineRegistryError
+from .machine_registry import MachineRegistryError
+from .node_registry import NodeRegistry
 from .machine_enrollment import MachineEnrollmentManager, MachineEnrollmentError
 from .device_pairing import DevicePairingManager, DevicePairingError
 from .device_pairing_web import render_pairing_page
@@ -109,7 +110,7 @@ device_pairing = DevicePairingManager(
     settings.studio, base_dir=settings.config_path.parent
 )
 device_broker = DeviceBroker(settings.studio, device_pairing)
-machine_registry = MachineRegistry(
+machine_registry = NodeRegistry(
     settings.studio,
     base_dir=settings.config_path.parent,
     device_pairing=device_pairing,
