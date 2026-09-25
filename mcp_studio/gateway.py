@@ -2315,23 +2315,18 @@ class GatewaySessionManager:
         else:
             studio_session, reclaimed = await self.db.create_session(session_payload), False
 
-        # A durable Studio session owns its project pin. When a transport is
-        # reclaimed, initialize it directly against the same dedicated Serena
-        # process instead of briefly falling back to the neutral/base Serena.
-        managed_session_id = studio_session.get("managed_session_id")
+        # Reclaim restores logical identity/project continuity only. MCP
+        # initialize/reconnect is transport lifecycle traffic and must never
+        # wake a managed Serena runtime. The durable project pin remains on the
+        # Studio logical session; this transport starts unbound on the neutral
+        # base upstream and activates the pinned runtime lazily on real Serena
+        # tool execution (or via an explicit management bind/use operation).
+        managed_session_id = None
         target_url = server.url
-        if managed_session_id:
-            if not (self.managed_sessions and self.managed_sessions.enabled):
-                raise HTTPException(
-                    status_code=503,
-                    detail="Managed project pin cannot be restored while managed sessions are disabled",
-                )
-            managed = await self.managed_sessions.ensure_running(str(managed_session_id))
-            target_url = managed.get("endpoint") or f"http://127.0.0.1:{managed['port']}/mcp"
-
         # ChatGPT may create a fresh external Streamable-HTTP transport for each
-        # tool call. Reclaimed logical sessions must keep the same gateway/upstream
-        # Serena session or Serena's workspace lease becomes stale immediately.
+        # tool call. Reclaim may reuse an existing neutral/base gateway transport,
+        # but it deliberately does not reactivate a previously pinned Serena
+        # runtime during initialize.
         if reclaimed:
             reusable = await self.db.find_reusable_gateway_session(
                 studio_session_id=studio_session["id"],
@@ -2508,7 +2503,10 @@ class GatewaySessionManager:
             pass
         await self.db.touch_gateway_session(gateway_session_id)
         session = await self.db.get_gateway_session(gateway_session_id)
-        session = await self._reconcile_gateway_managed_binding(gateway_session_id, session)
+
+        # Do not reconcile/wake a managed runtime merely because a transport
+        # reconnected. Runtime activation is decided after the JSON-RPC request
+        # has been classified below.
         header_context = self.context_usage_from_request(request)
         context_report: dict[str, Any] | None = None
         if header_context is not None and session.get("managed_session_id"):
@@ -2528,9 +2526,43 @@ class GatewaySessionManager:
 
         jsonrpc = self.parse_jsonrpc(body)
         rpc_method = jsonrpc.get("method") if jsonrpc else None
-        params = jsonrpc.get("params") if jsonrpc and isinstance(jsonrpc.get("params"), dict) else {}
-        tool_name = str(params.get("name") or "") if rpc_method == "tools/call" else ""
-        tool_args = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+        params = (
+            jsonrpc.get("params")
+            if jsonrpc and isinstance(jsonrpc.get("params"), dict)
+            else {}
+        )
+        tool_name = (
+            str(params.get("name") or "")
+            if rpc_method == "tools/call"
+            else ""
+        )
+        tool_args = (
+            params.get("arguments")
+            if isinstance(params.get("arguments"), dict)
+            else {}
+        )
+
+        # Lazy managed-runtime activation:
+        #
+        # Transport lifecycle traffic such as initialize, notifications, ping,
+        # tools/list and HIRDA's own control tools must remain on the neutral
+        # control plane and must not wake a Serena worker.
+        #
+        # Ordinary Serena tool execution is the point where the durable logical
+        # project pin becomes an active runtime binding.
+        needs_managed_runtime = (
+            request.method == "POST"
+            and rpc_method == "tools/call"
+            and bool(tool_name)
+            and not tool_name.startswith("mcpstudio_")
+        )
+
+        if needs_managed_runtime:
+            session = await self._reconcile_gateway_managed_binding(
+                gateway_session_id,
+                session,
+            )
+
         reflex_id: str | None = None
 
         def _decorate_local_response(response: Response) -> Response:
