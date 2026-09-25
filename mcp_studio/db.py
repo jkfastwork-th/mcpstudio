@@ -3347,6 +3347,210 @@ class Database:
 
         return await self._run(op)
 
+
+    async def transfer_session_handoff_ownership(self, handoff_id: str) -> dict[str, Any]:
+        """Atomically move a managed upstream session from source gateway to target gateway."""
+        now = _now()
+
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                handoff_row = db.execute(
+                    "SELECT * FROM session_handoffs WHERE id=?",
+                    (handoff_id,),
+                ).fetchone()
+                if handoff_row is None:
+                    raise KeyError(handoff_id)
+                handoff = self._session_handoff_item(handoff_row)
+                if handoff["state"] != "claiming":
+                    raise ValueError("session handoff is not being claimed")
+
+                source_gateway_id = str(handoff.get("source_gateway_session_id") or "")
+                target_gateway_id = str(handoff.get("target_gateway_session_id") or "")
+                managed_session_id = str(handoff.get("managed_session_id") or "")
+                if not source_gateway_id or not target_gateway_id or not managed_session_id:
+                    raise ValueError("session handoff ownership metadata is incomplete")
+
+                source = db.execute(
+                    "SELECT * FROM gateway_sessions WHERE id=?",
+                    (source_gateway_id,),
+                ).fetchone()
+                target = db.execute(
+                    "SELECT * FROM gateway_sessions WHERE id=?",
+                    (target_gateway_id,),
+                ).fetchone()
+                if source is None:
+                    raise KeyError(source_gateway_id)
+                if target is None:
+                    raise KeyError(target_gateway_id)
+                if source["status"] != "connected":
+                    raise ValueError("source gateway is no longer connected")
+                if target["status"] != "connected":
+                    raise ValueError("target gateway is no longer connected")
+                if str(source["managed_session_id"] or "") != managed_session_id:
+                    raise ValueError("source gateway no longer owns the handoff managed session")
+                if not source["upstream_session_id"] or not source["upstream_url"]:
+                    raise ValueError("source gateway has no transferable upstream session")
+                if source["server_id"] != target["server_id"]:
+                    raise ValueError("source and target gateways use different MCP servers")
+                if handoff.get("source_studio_session_id") and (
+                    str(handoff["source_studio_session_id"]) != str(source["studio_session_id"])
+                ):
+                    raise ValueError("source logical session no longer matches handoff")
+                if handoff.get("target_studio_session_id") and (
+                    str(handoff["target_studio_session_id"]) != str(target["studio_session_id"])
+                ):
+                    raise ValueError("target logical session no longer matches handoff")
+
+                previous_target = {
+                    "managed_session_id": target["managed_session_id"],
+                    "upstream_url": target["upstream_url"],
+                    "upstream_session_id": target["upstream_session_id"],
+                }
+
+                db.execute(
+                    """UPDATE gateway_sessions
+                       SET managed_session_id=?, upstream_url=?, upstream_session_id=?,
+                           status='connected', closed_at=NULL, generation=generation+1,
+                           last_seen_at=?, error=NULL
+                       WHERE id=?""",
+                    (
+                        managed_session_id,
+                        source["upstream_url"],
+                        source["upstream_session_id"],
+                        now,
+                        target_gateway_id,
+                    ),
+                )
+                db.execute(
+                    """UPDATE sessions
+                       SET managed_session_id=?, status='connected', last_seen_at=?
+                       WHERE id=?""",
+                    (managed_session_id, now, target["studio_session_id"]),
+                )
+
+                db.execute(
+                    """UPDATE gateway_sessions
+                       SET managed_session_id=NULL, upstream_session_id=NULL,
+                           status='closed', generation=generation+1,
+                           last_seen_at=?, closed_at=?,
+                           error='session handoff claimed by another conversation'
+                       WHERE id=?""",
+                    (now, now, source_gateway_id),
+                )
+                db.execute(
+                    """UPDATE sessions
+                       SET managed_session_id=NULL, status='disconnected', last_seen_at=?
+                       WHERE id=?""",
+                    (now, source["studio_session_id"]),
+                )
+
+                cur = db.execute(
+                    """UPDATE session_handoffs
+                       SET state='claimed', claimed_at=?, error=NULL
+                       WHERE id=? AND state='claiming'""",
+                    (now, handoff_id),
+                )
+                if cur.rowcount != 1:
+                    raise ValueError("session handoff is not being claimed")
+                claimed_row = db.execute(
+                    "SELECT * FROM session_handoffs WHERE id=?",
+                    (handoff_id,),
+                ).fetchone()
+                return {
+                    "handoff": self._session_handoff_item(claimed_row),
+                    "source_gateway_session_id": source_gateway_id,
+                    "target_gateway_session_id": target_gateway_id,
+                    "previous_target": previous_target,
+                }
+
+        result = await self._run(op)
+        result["source_gateway"] = await self.get_gateway_session(
+            result["source_gateway_session_id"]
+        )
+        result["target_gateway"] = await self.get_gateway_session(
+            result["target_gateway_session_id"]
+        )
+        return result
+
+
+    async def finalize_session_handoff_transfer(
+        self,
+        handoff_id: str,
+        *,
+        source_gateway_session_id: str,
+        source_studio_session_id: str | None,
+        managed_session_id: str,
+    ) -> dict[str, Any]:
+        """Atomically commit logical ownership after the target runtime is bound."""
+        now = _now()
+
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT * FROM session_handoffs WHERE id=?",
+                    (handoff_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(handoff_id)
+                item = self._session_handoff_item(row)
+                if item["state"] != "claiming":
+                    raise ValueError("session handoff is not being claimed")
+                if str(item.get("source_gateway_session_id") or "") != source_gateway_session_id:
+                    raise ValueError("session handoff source gateway changed")
+                if str(item.get("managed_session_id") or "") != managed_session_id:
+                    raise ValueError("session handoff managed session changed")
+
+                if source_studio_session_id:
+                    source_session = db.execute(
+                        "SELECT id, managed_session_id FROM sessions WHERE id=?",
+                        (source_studio_session_id,),
+                    ).fetchone()
+                    if source_session is None:
+                        raise KeyError(source_studio_session_id)
+                    if str(source_session["managed_session_id"] or "") != managed_session_id:
+                        raise ValueError("source logical session no longer owns managed session")
+
+                source_gateway = db.execute(
+                    "SELECT id, status, managed_session_id FROM gateway_sessions WHERE id=?",
+                    (source_gateway_session_id,),
+                ).fetchone()
+                if source_gateway is None:
+                    raise KeyError(source_gateway_session_id)
+                if source_gateway["status"] != "connected":
+                    raise ValueError("source gateway is no longer connected")
+                if str(source_gateway["managed_session_id"] or "") != managed_session_id:
+                    raise ValueError("source gateway no longer owns managed session")
+
+                if source_studio_session_id:
+                    db.execute(
+                        """UPDATE sessions
+                           SET managed_session_id=NULL, status='disconnected', last_seen_at=?
+                           WHERE id=?""",
+                        (now, source_studio_session_id),
+                    )
+                db.execute(
+                    """UPDATE gateway_sessions
+                       SET status='closed', last_seen_at=?, closed_at=?,
+                           error='session handoff claimed by another conversation'
+                       WHERE id=?""",
+                    (now, now, source_gateway_session_id),
+                )
+                cur = db.execute(
+                    """UPDATE session_handoffs
+                       SET state='claimed', claimed_at=?, error=NULL
+                       WHERE id=? AND state='claiming'""",
+                    (now, handoff_id),
+                )
+                if cur.rowcount != 1:
+                    raise ValueError("session handoff is not being claimed")
+                claimed = db.execute(
+                    "SELECT * FROM session_handoffs WHERE id=?",
+                    (handoff_id,),
+                ).fetchone()
+                return self._session_handoff_item(claimed)
+
+        return await self._run(op)
+
     async def record_session_handoff_event(
         self,
         *,

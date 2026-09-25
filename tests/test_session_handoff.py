@@ -407,20 +407,21 @@ async def test_new_handoff_supersedes_old_pending_token_and_audit_never_stores_r
 
 
 @pytest.mark.asyncio
+
 async def test_claim_handoff_binds_target_closes_source_and_consumes_token(tmp_path: Path, monkeypatch):
     _, db, manager, managed, source_gateway, target_gateway, source_studio, target_studio = await setup_pair(tmp_path)
 
     opened: list[tuple[str, str]] = []
     closed: list[tuple[str | None, str | None]] = []
 
-    async def fake_open(gateway, url):
+    async def must_not_open(gateway, url):
         opened.append((gateway["id"], url))
-        return "target-managed-up"
+        raise AssertionError("handoff must adopt the source upstream instead of opening a new one")
 
     async def fake_close(url, upstream_session_id):
         closed.append((url, upstream_session_id))
 
-    monkeypatch.setattr(manager, "_open_upstream_session", fake_open)
+    monkeypatch.setattr(manager, "_open_upstream_session", must_not_open)
     monkeypatch.setattr(manager, "_close_upstream_session", fake_close)
 
     prepared = await manager.prepare_session_handoff(
@@ -436,6 +437,7 @@ async def test_claim_handoff_binds_target_closes_source_and_consumes_token(tmp_p
     assert claimed["ownership_transferred"] is True
     assert claimed["claim_consumed"] is True
     assert claimed["source_gateway_closed"] is True
+    assert claimed["upstream_session_adopted"] is True
     assert claimed["context"]["summary"].startswith("Resume from the session handoff")
     assert claimed["managed_session"]["id"] == managed["id"]
 
@@ -445,13 +447,19 @@ async def test_claim_handoff_binds_target_closes_source_and_consumes_token(tmp_p
     source_logical = await db.get_session(source_studio["id"])
 
     assert target_after["managed_session_id"] == managed["id"]
-    assert target_after["upstream_session_id"] == "target-managed-up"
+    assert target_after["upstream_url"] == "http://127.0.0.1:43110/mcp"
+    assert target_after["upstream_session_id"] == "source-managed-up"
     assert target_logical["managed_session_id"] == managed["id"]
+
     assert source_after["status"] == "closed"
+    assert source_after["managed_session_id"] is None
+    assert source_after["upstream_session_id"] is None
     assert source_logical["managed_session_id"] is None
     assert source_logical["status"] == "disconnected"
-    assert opened == [(target_gateway["id"], "http://127.0.0.1:43110/mcp")]
-    assert ("http://127.0.0.1:43110/mcp", "source-managed-up") in closed
+
+    assert opened == []
+    assert closed == [("http://127.0.0.1:8001/mcp", "target-base-up")]
+    assert ("http://127.0.0.1:43110/mcp", "source-managed-up") not in closed
 
     handoff = await db.get_session_handoff(claimed["handoff"]["id"])
     assert handoff["state"] == "claimed"
@@ -459,6 +467,45 @@ async def test_claim_handoff_binds_target_closes_source_and_consumes_token(tmp_p
 
     with pytest.raises(ManagedSessionError, match="session handoff is claimed"):
         await manager.accept_session_handoff(target_gateway["id"], token=token)
+
+
+@pytest.mark.asyncio
+async def test_claim_handoff_transfer_failure_keeps_source_owner_and_releases_token(tmp_path: Path, monkeypatch):
+    _, db, manager, managed, source_gateway, target_gateway, source_studio, target_studio = await setup_pair(tmp_path)
+
+    prepared = await manager.prepare_session_handoff(
+        source_gateway["id"],
+        summary="Keep source ownership if the atomic transfer cannot commit.",
+    )
+
+    async def fail_transfer(handoff_id: str):
+        raise RuntimeError("simulated atomic transfer failure")
+
+    monkeypatch.setattr(db, "transfer_session_handoff_ownership", fail_transfer)
+
+    with pytest.raises(ManagedSessionError, match="simulated atomic transfer failure"):
+        await manager.accept_session_handoff(
+            target_gateway["id"],
+            token=prepared["claim_token"],
+        )
+
+    source_after = await db.get_gateway_session(source_gateway["id"])
+    target_after = await db.get_gateway_session(target_gateway["id"])
+    source_logical = await db.get_session(source_studio["id"])
+    target_logical = await db.get_session(target_studio["id"])
+    handoff = await db.get_session_handoff(prepared["handoff"]["id"])
+
+    assert source_after["status"] == "connected"
+    assert source_after["managed_session_id"] == managed["id"]
+    assert source_after["upstream_session_id"] == "source-managed-up"
+    assert source_logical["managed_session_id"] == managed["id"]
+
+    assert target_after["managed_session_id"] is None
+    assert target_after["upstream_session_id"] == "target-base-up"
+    assert target_logical["managed_session_id"] is None
+
+    assert handoff["state"] == "pending"
+    assert "simulated atomic transfer failure" in str(handoff.get("error") or "")
 
 
 @pytest.mark.asyncio
