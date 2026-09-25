@@ -90,7 +90,10 @@ class MachineCapabilityRouter:
         automatic: bool,
     ) -> dict[str, Any] | None:
         provider = dict(machine.providers.get("computer_use") or {})
-        if not machine.local or str(provider.get("mode") or "").strip() != "local":
+        mode = str(provider.get("mode") or "").strip()
+        if mode not in {"local", "agent"}:
+            return None
+        if mode == "local" and not machine.local:
             return None
         managed_session_id = str(context.get("managed_session_id") or "").strip()
         if not managed_session_id:
@@ -124,7 +127,10 @@ class MachineCapabilityRouter:
             }
 
         try:
-            descriptor = await self.computer.descriptor(managed_session_id)
+            descriptor = await self._computer_descriptor_for_machine(
+                machine,
+                managed_session_id,
+            )
         except Exception:
             return None
 
@@ -306,6 +312,37 @@ class MachineCapabilityRouter:
             "policy": dict(machine.policy),
         }
 
+    async def _computer_descriptor_for_machine(
+        self,
+        machine: Any,
+        managed_session_id: str,
+    ) -> dict[str, Any]:
+        provider = dict(machine.providers.get("computer_use") or {})
+        mode = str(provider.get("mode") or "").strip()
+        if mode == "local":
+            if not machine.local:
+                raise MachineRegistryError("non-local machine cannot use local Computer Use")
+            return await self.computer.descriptor(managed_session_id)
+        if mode == "agent":
+            remote = await self.registry.remote_computer_descriptor(
+                machine,
+                session_id=managed_session_id,
+            )
+            status = await self.computer.status()
+            descriptor = dict(remote["descriptor"])
+            descriptor.update(
+                {
+                    "viewer_url": "/computer/novnc/vnc.html",
+                    "websocket_path": f"/api/computer/vnc/ws/{managed_session_id}",
+                    "novnc_available": bool(status.get("novnc_available")),
+                    "auth_required": bool(status.get("auth_required")),
+                }
+            )
+            return descriptor
+        raise MachineRegistryError(
+            f"Computer Use backend is unavailable for machine {machine.machine_id}"
+        )
+
     def require_local_computer(self, session: dict[str, Any]) -> dict[str, Any]:
         machine = self.registry.machine_for_session(session)
         provider = dict(machine.providers.get("computer_use") or {})
@@ -316,7 +353,46 @@ class MachineCapabilityRouter:
         return machine.public()
 
     async def computer_descriptor(self, managed_session_id: str, session: dict[str, Any]) -> dict[str, Any]:
-        machine = self.require_local_computer(session)
-        descriptor = await self.computer.descriptor(managed_session_id)
-        descriptor["machine"] = machine
+        machine = self.registry.machine_for_session(session)
+        descriptor = await self._computer_descriptor_for_machine(machine, managed_session_id)
+        descriptor["machine"] = machine.public()
         return descriptor
+
+
+    async def computer_transport(
+        self,
+        managed_session_id: str,
+        session: dict[str, Any],
+    ) -> dict[str, Any]:
+        machine = self.registry.machine_for_session(session)
+        provider = dict(machine.providers.get("computer_use") or {})
+        mode = str(provider.get("mode") or "").strip()
+        if mode == "local":
+            if not machine.local:
+                raise MachineRegistryError("non-local machine cannot use local Computer Use")
+            if self.computer.session_isolation_enabled:
+                host, port = await self.computer.tcp_target(managed_session_id)
+                return {
+                    "mode": "tcp",
+                    "host": host,
+                    "port": port,
+                    "machine_id": machine.machine_id,
+                }
+            return {
+                "mode": "websocket",
+                "url": self.computer.websocket_target(),
+                "machine_id": machine.machine_id,
+            }
+        if mode == "agent":
+            remote = await self.registry.remote_computer_descriptor(
+                machine,
+                session_id=managed_session_id,
+            )
+            return {
+                "mode": "websocket",
+                "url": remote["websocket_url"],
+                "machine_id": machine.machine_id,
+            }
+        raise MachineRegistryError(
+            f"Computer Use backend is unavailable for machine {machine.machine_id}"
+        )

@@ -1959,6 +1959,7 @@ async def computer_vnc_ws(websocket: WebSocket, managed_session_id: str):
         session = await managed_sessions.get_session(managed_session_id)
         _require_machine_permission(session, "execute")
         await machine_router.computer_descriptor(managed_session_id, session)
+        transport = await machine_router.computer_transport(managed_session_id, session)
     except KeyError:
         await websocket.accept(subprotocol=_computer_ws_subprotocol(websocket))
         await websocket.close(code=4404, reason="Unknown managed session")
@@ -1970,9 +1971,10 @@ async def computer_vnc_ws(websocket: WebSocket, managed_session_id: str):
 
     await websocket.accept(subprotocol=_computer_ws_subprotocol(websocket))
 
-    if computer.session_isolation_enabled:
+    if transport.get("mode") == "tcp":
         try:
-            host, port = await computer.tcp_target(managed_session_id)
+            host = str(transport["host"])
+            port = int(transport["port"])
             reader, writer = await asyncio.open_connection(host, port)
 
             async def client_to_vnc() -> None:
@@ -2022,7 +2024,20 @@ async def computer_vnc_ws(websocket: WebSocket, managed_session_id: str):
                 pass
         return
 
-    target = computer.websocket_target()
+    if transport.get("mode") != "websocket":
+        try:
+            await websocket.close(code=1011, reason="Unsupported Computer Use transport")
+        except Exception:
+            pass
+        return
+
+    target = str(transport.get("url") or "")
+    if not target:
+        try:
+            await websocket.close(code=1011, reason="Computer websocket unavailable")
+        except Exception:
+            pass
+        return
 
     async def client_to_upstream(upstream):
         try:

@@ -50,8 +50,15 @@ def candidate(address: str = "100.100.10.20") -> dict:
         "platform": "linux",
         "architecture": "x86_64",
         "agent_version": "1",
-        "capabilities": ["filesystem", "process"],
-        "providers": {"desktop_commander": {"available": True, "tool_count": 13}},
+        "capabilities": ["filesystem", "process", "computer_use"],
+        "providers": {
+            "desktop_commander": {"available": True, "tool_count": 13},
+            "computer_use": {
+                "available": True,
+                "runtime_mode": "session-isolated-remote",
+                "transport": "websocket",
+            },
+        },
         "address": address,
         "endpoint": f"http://{address}:8765",
         "fingerprint": "f" * 64,
@@ -122,6 +129,9 @@ def test_approval_is_explicit_restrictive_and_persistent(tmp_path: Path) -> None
     assert node.workspace_map == {"demo": "/srv/demo"}
     assert node.providers["desktop_commander"]["mode"] == "agent"
     assert node.providers["desktop_commander"]["auth_mode"] == "tailnet_ip"
+    assert node.providers["computer_use"]["mode"] == "agent"
+    assert node.providers["computer_use"]["auth_mode"] == "tailnet_ip"
+    assert "computer_use" in node.capabilities
 
     # Rebuild from config + sidecar to prove approval survives HIRDA restart.
     registry2 = MachineRegistry(cfg, base_dir=tmp_path)
@@ -271,5 +281,7 @@ def test_machine_agent_advertises_enrollment_identity() -> None:
     assert '"schema": "hirda-machine-agent-v1"' in source
     assert '"hostname": socket.gethostname()' in source
     assert '"architecture": platform.machine()' in source
-    assert '"capabilities": ["filesystem", "process"]' in source
+    assert '"computer_use"' in source
+    assert '"/v1/computer/descriptor"' in source
+    assert '"runtime_mode": "session-isolated-remote"' in source
     assert 'if not self._authorized()' in source

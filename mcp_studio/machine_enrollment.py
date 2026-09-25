@@ -350,6 +350,14 @@ class MachineEnrollmentManager:
                 "auth_mode": "tailnet_ip",
                 "timeout_seconds": 20.0,
             }
+        cu = advertised.get("computer_use") if isinstance(advertised.get("computer_use"), dict) else {}
+        if cu.get("available"):
+            providers["computer_use"] = {
+                "mode": "agent",
+                "endpoint": str(candidate["endpoint"]),
+                "auth_mode": "tailnet_ip",
+                "timeout_seconds": 10.0,
+            }
         if not providers:
             raise MachineEnrollmentError("candidate has no approved HIRDA backend provider")
         record = {

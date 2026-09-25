@@ -49,8 +49,19 @@ class FakeIntegrations:
 
 
 class FakeComputer:
+    session_isolation_enabled = True
+
     async def descriptor(self, session_id):
         return {"session_id": session_id, "desktop_display": ":5"}
+
+    async def status(self):
+        return {"novnc_available": True, "auth_required": False}
+
+    async def tcp_target(self, session_id):
+        return ("127.0.0.1", 15900)
+
+    def websocket_target(self):
+        return "ws://127.0.0.1:6080"
 
 
 def studio(machine_registry, local_id="openclaw"):
@@ -99,6 +110,19 @@ def machine_config():
             "workspace_map": {"mcp-studio": r"C:\Users\itpla\HIRDA\workspaces\mcp-studio"},
         },
     ]
+
+
+def machine_config_with_remote_computer():
+    config = machine_config()
+    remote = config[1]
+    remote["capabilities"] = ["filesystem", "process", "computer_use"]
+    remote["providers"]["computer_use"] = {
+        "mode": "agent",
+        "endpoint": "http://100.85.206.7:8765",
+        "auth_mode": "tailnet_ip",
+    }
+    remote["policy"]["execute"] = True
+    return config
 
 
 def test_registry_resolves_local_and_remote_workspace(tmp_path: Path):
@@ -183,6 +207,104 @@ async def test_remote_machine_cannot_fall_through_to_local_computer_use(tmp_path
     session = {"metadata": {"machine_id": "JKFASTDEV"}}
     with pytest.raises(MachineRegistryError, match="Computer Use backend is unavailable"):
         await router.computer_descriptor("ms-2", session)
+
+
+@pytest.mark.asyncio
+async def test_remote_computer_descriptor_is_machine_bound_and_hides_upstream(tmp_path: Path, monkeypatch):
+    registry = MachineRegistry(studio(machine_config_with_remote_computer()), base_dir=tmp_path)
+    router = MachineCapabilityRouter(registry, FakeIntegrations(), FakeComputer())
+    calls = []
+
+    async def remote_descriptor(machine, *, session_id):
+        calls.append((machine.machine_id, session_id))
+        return {
+            "descriptor": {
+                "runtime_mode": "session-isolated-remote",
+                "transport": "websocket",
+                "desktop_display": "remote:7",
+            },
+            "websocket_url": f"ws://100.85.206.7:6080/session/{session_id}",
+        }
+
+    monkeypatch.setattr(registry, "remote_computer_descriptor", remote_descriptor)
+    session = {"metadata": {"machine_id": "JKFASTDEV"}}
+
+    descriptor = await router.computer_descriptor("ms-remote-gui", session)
+    transport = await router.computer_transport("ms-remote-gui", session)
+
+    assert descriptor["machine"]["id"] == "JKFASTDEV"
+    assert descriptor["websocket_path"] == "/api/computer/vnc/ws/ms-remote-gui"
+    assert descriptor["runtime_mode"] == "session-isolated-remote"
+    assert "websocket_url" not in descriptor
+    assert transport == {
+        "mode": "websocket",
+        "url": "ws://100.85.206.7:6080/session/ms-remote-gui",
+        "machine_id": "JKFASTDEV",
+    }
+    assert calls == [
+        ("JKFASTDEV", "ms-remote-gui"),
+        ("JKFASTDEV", "ms-remote-gui"),
+    ]
+
+
+def test_remote_computer_websocket_must_match_machine_address(tmp_path: Path):
+    registry = MachineRegistry(studio(machine_config_with_remote_computer()), base_dir=tmp_path)
+    machine = registry.get("JKFASTDEV")
+
+    valid = registry._validate_remote_computer_websocket_url(
+        machine,
+        "ws://100.85.206.7:6080/session/ms-safe",
+    )
+    assert valid == "ws://100.85.206.7:6080/session/ms-safe"
+
+    with pytest.raises(MachineRegistryError, match="host mismatch"):
+        registry._validate_remote_computer_websocket_url(
+            machine,
+            "ws://100.73.1.126:6080/session/ms-safe",
+        )
+
+    with pytest.raises(MachineRegistryError, match="must not contain credentials"):
+        registry._validate_remote_computer_websocket_url(
+            machine,
+            "ws://user:secret@100.85.206.7:6080/session/ms-safe",
+        )
+
+
+@pytest.mark.asyncio
+async def test_remote_visual_fallback_uses_bound_machine_not_local_vnc(tmp_path: Path, monkeypatch):
+    registry = MachineRegistry(studio(machine_config_with_remote_computer()), base_dir=tmp_path)
+    computer = TrackingComputer()
+    router = MachineCapabilityRouter(
+        registry,
+        FakeBrowserIntegrations(error=RuntimeError("canvas-only remote UI")),
+        computer,
+    )
+
+    async def remote_descriptor(machine, *, session_id):
+        return {
+            "descriptor": {
+                "runtime_mode": "session-isolated-remote",
+                "transport": "websocket",
+                "desktop_display": "remote:9",
+            },
+            "websocket_url": f"ws://100.85.206.7:6080/session/{session_id}",
+        }
+
+    monkeypatch.setattr(registry, "remote_computer_descriptor", remote_descriptor)
+    result = await router.call_backend_tool(
+        "hirda__openbrowser__click",
+        {"index": 1},
+        context={
+            "machine_id": "JKFASTDEV",
+            "managed_session_id": "ms-remote-browser",
+            "permission_class": "execute",
+        },
+    )
+    payload = __import__("json").loads(result["content"][0]["text"])
+    assert payload["machine_id"] == "JKFASTDEV"
+    assert payload["computer_use"]["websocket_path"].endswith("/ms-remote-browser")
+    assert payload["computer_use"]["runtime_mode"] == "session-isolated-remote"
+    assert computer.calls == []
 
 def test_machine_policy_is_hard_ceiling_for_remote_machine(tmp_path: Path):
     registry = MachineRegistry(studio(machine_config()), base_dir=tmp_path)

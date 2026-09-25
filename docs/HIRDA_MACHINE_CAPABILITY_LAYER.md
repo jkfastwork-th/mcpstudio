@@ -14,6 +14,7 @@ Provider modes currently supported:
 - `desktop_commander.mode: local` — use HIRDA's local Desktop Commander backend.
 - `desktop_commander.mode: agent` — use the bounded HIRDA machine agent over a private network.
 - `computer_use.mode: local` — use HIRDA's existing session-isolated VNC/Chrome runtime.
+- `computer_use.mode: agent` — ask the bound HIRDA Machine Agent for a session-specific remote WebSocket target; HIRDA keeps that target private and proxies it through the existing `/api/computer/vnc/ws/{session_id}` route.
 
 Machine snapshots combine declared inventory with live provider health. Remote agent health is probed over its
 configured endpoint. Local Desktop Commander readiness comes from the integration lifecycle; local Computer Use
@@ -103,6 +104,27 @@ The initial Windows node uses its Tailscale address and runs `scripts/hirda_mach
 to the machine's Tailscale IP and accepts requests only from the declared openclaw Tailscale IP. No public interface is
 opened and no shared bearer secret is copied between machines. A limited current-user Startup launcher starts the agent on Windows logon.
 
-Computer Use is intentionally not advertised for JKFASTDEV in this phase. A session bound to JKFASTDEV will therefore
-reject Computer Use instead of opening openclaw's VNC desktop. Remote GUI transport can be added as a later provider
-without changing the machine/session contract.
+Remote Computer Use uses the same machine/session contract. The Machine Agent advertises `computer_use` only when its
+local config contains an enabled, session-specific `websocket_url_template`. The template must contain
+`{session_id}`; HIRDA validates that the resulting `ws://` or `wss://` target resolves to the bound machine's
+registered address and rejects embedded credentials or cross-machine targets.
+
+Example Machine Agent config fragment:
+
+```json
+{
+  "computer_use": {
+    "enabled": true,
+    "websocket_url_template": "ws://100.85.206.7:6080/session/{session_id}",
+    "descriptor": {
+      "desktop_display": "remote",
+      "gpu_mode": "hardware"
+    }
+  }
+}
+```
+
+The raw remote WebSocket URL is never returned to the browser. The browser continues to connect only to HIRDA's
+`/api/computer/vnc/ws/{managed_session_id}`, and HIRDA bridges that socket to the machine selected by the managed
+session. A remote machine without an advertised/configured Computer Use provider still fails closed and cannot fall
+through to openclaw's VNC runtime.

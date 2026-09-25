@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -290,9 +291,14 @@ class MachineRegistry:
                 )
                 response.raise_for_status()
                 body = response.json()
+            ready = bool(body.get("ok"))
+            if provider_name == "computer_use":
+                ready = bool(ready and body.get("computer_use"))
+            elif provider_name == "desktop_commander":
+                ready = bool(ready and body.get("desktop_commander", True))
             return {
                 "configured": True,
-                "ready": bool(body.get("ok")),
+                "ready": ready,
                 "mode": mode,
                 "endpoint": endpoint,
                 "agent": body,
@@ -384,3 +390,77 @@ class MachineRegistry:
         if not isinstance(result, dict):
             raise MachineRegistryError("remote machine returned invalid tool result")
         return result
+
+
+    @staticmethod
+    def _validate_remote_computer_websocket_url(
+        machine: MachineDescriptor,
+        websocket_url: str,
+    ) -> str:
+        value = str(websocket_url or "").strip()
+        parsed = urlparse(value)
+        if parsed.scheme not in {"ws", "wss"} or not parsed.hostname:
+            raise MachineRegistryError("remote computer websocket URL is invalid")
+        if parsed.username or parsed.password:
+            raise MachineRegistryError("remote computer websocket URL must not contain credentials")
+        machine_host = str(machine.address or "").strip().strip("[]").lower()
+        if not machine_host or parsed.hostname.lower() != machine_host:
+            raise MachineRegistryError(
+                f"remote computer websocket host mismatch for machine {machine.machine_id}"
+            )
+        return value
+
+    async def remote_computer_descriptor(
+        self,
+        machine: MachineDescriptor,
+        *,
+        session_id: str,
+    ) -> dict[str, Any]:
+        provider = dict(machine.providers.get("computer_use") or {})
+        if str(provider.get("mode") or "") != "agent":
+            raise MachineRegistryError(f"computer use agent is unavailable on {machine.machine_id}")
+        endpoint = str(provider.get("endpoint") or "").rstrip("/")
+        if not endpoint:
+            raise MachineRegistryError("computer use endpoint is unavailable")
+        if not session_id:
+            raise MachineRegistryError("managed session id is required for remote computer use")
+        timeout = float(provider.get("timeout_seconds") or 10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                endpoint + "/v1/computer/descriptor",
+                headers=self._provider_headers(provider),
+                json={"session_id": session_id},
+            )
+        if response.status_code >= 400:
+            raise MachineRegistryError(
+                f"remote computer descriptor failed ({response.status_code}): {response.text[:500]}"
+            )
+        payload = response.json()
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            raise MachineRegistryError(
+                str((payload or {}).get("error") or "remote computer descriptor failed")
+            )
+        descriptor = payload.get("descriptor")
+        if not isinstance(descriptor, dict):
+            raise MachineRegistryError("remote computer descriptor is invalid")
+        websocket_url = self._validate_remote_computer_websocket_url(
+            machine,
+            str(payload.get("websocket_url") or ""),
+        )
+        safe_descriptor = {
+            key: descriptor.get(key)
+            for key in (
+                "runtime_mode",
+                "transport",
+                "desktop_display",
+                "cdp_port",
+                "gpu_mode",
+                "gpu_hardware_available",
+                "gpu_presentation_mode",
+            )
+            if key in descriptor
+        }
+        return {
+            "descriptor": safe_descriptor,
+            "websocket_url": websocket_url,
+        }

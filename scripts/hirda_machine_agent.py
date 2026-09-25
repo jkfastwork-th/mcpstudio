@@ -35,6 +35,49 @@ PID_TOOLS = {"read_process_output", "interact_with_process", "force_terminate"}
 PID_RE = re.compile(r"Process started with PID\s+(\d+)")
 
 
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
+
+
+def _computer_use_config(config: dict[str, Any]) -> dict[str, Any]:
+    raw = config.get("computer_use")
+    if not isinstance(raw, dict) or not bool(raw.get("enabled", False)):
+        return {}
+    template = str(raw.get("websocket_url_template") or "").strip()
+    if "{session_id}" not in template:
+        raise AgentError("computer_use websocket_url_template must contain {session_id}")
+    if not template.startswith(("ws://", "wss://")):
+        raise AgentError("computer_use websocket_url_template must use ws:// or wss://")
+    descriptor = raw.get("descriptor") if isinstance(raw.get("descriptor"), dict) else {}
+    return {
+        "enabled": True,
+        "websocket_url_template": template,
+        "descriptor": dict(descriptor),
+    }
+
+
+def _computer_use_descriptor(config: dict[str, Any], session_id: str) -> dict[str, Any]:
+    if not config.get("enabled"):
+        raise AgentError("computer_use_unavailable")
+    if not _SESSION_ID_RE.fullmatch(session_id):
+        raise AgentError("invalid_session_id")
+    websocket_url = str(config["websocket_url_template"]).replace("{session_id}", session_id)
+    advertised = config.get("descriptor") if isinstance(config.get("descriptor"), dict) else {}
+    descriptor: dict[str, Any] = {
+        "runtime_mode": "session-isolated-remote",
+        "transport": "websocket",
+    }
+    for key in (
+        "desktop_display",
+        "cdp_port",
+        "gpu_mode",
+        "gpu_hardware_available",
+        "gpu_presentation_mode",
+    ):
+        if key in advertised:
+            descriptor[key] = advertised[key]
+    return {"descriptor": descriptor, "websocket_url": websocket_url}
+
+
 class AgentError(RuntimeError):
     pass
 
@@ -247,12 +290,28 @@ class Handler(BaseHTTPRequestHandler):
             self._json(401, {"ok": False, "error": "unauthorized"})
             return
         relay = self.server.relay  # type: ignore[attr-defined]
+        computer_use = self.server.computer_use  # type: ignore[attr-defined]
         if self.path not in {"/health", "/identity"}:
             self._json(404, {"ok": False, "error": "not_found"})
             return
         try:
             tools = relay.refresh_tools()
+            computer_ready = bool(computer_use.get("enabled"))
             if self.path == "/identity":
+                capabilities = ["filesystem", "process"]
+                providers: dict[str, Any] = {
+                    "desktop_commander": {
+                        "available": True,
+                        "tool_count": len(tools),
+                    }
+                }
+                if computer_ready:
+                    capabilities.append("computer_use")
+                    providers["computer_use"] = {
+                        "available": True,
+                        "runtime_mode": "session-isolated-remote",
+                        "transport": "websocket",
+                    }
                 self._json(
                     200,
                     {
@@ -262,13 +321,8 @@ class Handler(BaseHTTPRequestHandler):
                         "platform": sys.platform,
                         "architecture": platform.machine() or "unknown",
                         "agent_version": self.agent_version,
-                        "capabilities": ["filesystem", "process"],
-                        "providers": {
-                            "desktop_commander": {
-                                "available": True,
-                                "tool_count": len(tools),
-                            }
-                        },
+                        "capabilities": capabilities,
+                        "providers": providers,
                     },
                 )
                 return
@@ -279,6 +333,7 @@ class Handler(BaseHTTPRequestHandler):
                     "machine_id": relay.machine_id,
                     "platform": sys.platform,
                     "desktop_commander": True,
+                    "computer_use": computer_ready,
                     "tool_count": len(tools),
                     "tools": [tool.get("name") for tool in tools],
                 },
@@ -290,7 +345,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._json(401, {"ok": False, "error": "unauthorized"})
             return
-        if self.path != "/v1/tools/call":
+        if self.path not in {"/v1/tools/call", "/v1/computer/descriptor"}:
             self._json(404, {"ok": False, "error": "not_found"})
             return
         try:
@@ -300,12 +355,19 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length))
             if not isinstance(body, dict):
                 raise AgentError("request_must_be_object")
-            name = str(body.get("name") or "")
-            args = body.get("arguments") if isinstance(body.get("arguments"), dict) else {}
-            workspace_root = str(body.get("workspace_root") or "")
             session_id = str(body.get("session_id") or "")
             if not session_id:
                 raise AgentError("session_id_required")
+            if self.path == "/v1/computer/descriptor":
+                result = _computer_use_descriptor(
+                    self.server.computer_use,  # type: ignore[attr-defined]
+                    session_id,
+                )
+                self._json(200, {"ok": True, **result})
+                return
+            name = str(body.get("name") or "")
+            args = body.get("arguments") if isinstance(body.get("arguments"), dict) else {}
+            workspace_root = str(body.get("workspace_root") or "")
             result = self.server.relay.call(name, args, workspace_root, session_id)  # type: ignore[attr-defined]
             self._json(200, {"ok": True, "result": result})
         except AgentError as exc:
@@ -335,12 +397,17 @@ def main() -> int:
     command = config.get("desktop_commander_command")
     if not isinstance(command, list) or not command or not all(isinstance(x, str) and x for x in command):
         raise SystemExit("desktop_commander_command must be a non-empty JSON string array")
+    try:
+        computer_use = _computer_use_config(config)
+    except AgentError as exc:
+        raise SystemExit(str(exc)) from exc
     relay = DesktopCommanderRelay(command, args.machine_id)
     relay.start()
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.token = token  # type: ignore[attr-defined]
     server.allow_client_ip = args.allow_client_ip  # type: ignore[attr-defined]
     server.relay = relay  # type: ignore[attr-defined]
+    server.computer_use = computer_use  # type: ignore[attr-defined]
     print(json.dumps({"ok": True, "machine_id": args.machine_id, "listen": f"{args.host}:{args.port}"}), flush=True)
     try:
         server.serve_forever(poll_interval=0.5)
