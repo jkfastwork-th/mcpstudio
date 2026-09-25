@@ -2192,7 +2192,12 @@ class GatewaySessionManager:
             )
         if name == "mcpstudio_current_session":
             gateway = await self.db.get_gateway_session(gateway_session_id)
-            managed_id = gateway.get("managed_session_id")
+            # Gateway transports are ephemeral (ChatGPT may open a fresh one for
+            # each tool call). The durable Studio session owns the authoritative
+            # project pin, so report that logical binding without waking or
+            # reconciling the managed runtime.
+            logical = await self.db.get_session(gateway["studio_session_id"])
+            managed_id = logical.get("managed_session_id")
             managed = await self.managed_sessions.get_session(managed_id) if managed_id else None
             machine = (
                 self.machine_router.session_machine(managed)

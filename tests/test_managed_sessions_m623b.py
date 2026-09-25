@@ -567,6 +567,55 @@ async def test_reclaimed_logical_session_preserves_pin_without_waking_runtime_du
 
 
 @pytest.mark.asyncio
+async def test_current_session_reports_logical_pin_for_fresh_ephemeral_gateway(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    db = Database(settings.studio.database); await db.init()
+    project = tmp_path / "projects" / "alpha"; project.mkdir()
+    managed_sessions = ManagedSessionManager(settings, db)
+    await managed_sessions.register_workspace(key="alpha", project_path=str(project))
+    managed = await db.create_managed_session(
+        name="alpha",
+        workspace_key="alpha",
+        project_path=str(project),
+        server_id="serena-8001",
+        port=43110,
+    )
+    studio = await db.create_session({
+        "client_id": "stable",
+        "client_type": "chatgpt",
+        "server_id": "serena-8001",
+    })
+    gateway = await db.create_gateway_session(
+        studio_session_id=studio["id"],
+        client_id="stable",
+        client_type="chatgpt",
+        server_id="serena-8001",
+        upstream_session_id="base-up",
+        protocol_version="2025-06-18",
+        init_payload={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        upstream_url="http://127.0.0.1:8001/mcp",
+    )
+
+    def pin_logical_session():
+        with db._connect() as conn:
+            conn.execute(
+                "UPDATE sessions SET managed_session_id=? WHERE id=?",
+                (managed["id"], studio["id"]),
+            )
+    await db._run(pin_logical_session)
+
+    manager = GatewaySessionManager(settings, db, managed_sessions=managed_sessions)
+    result = await manager._handle_management_tool(
+        gateway["id"], "mcpstudio_current_session", {}
+    )
+
+    assert result["managed_session"]["id"] == managed["id"]
+    assert result["managed_session"]["workspace_key"] == "alpha"
+    assert (await db.get_gateway_session(gateway["id"]))["managed_session_id"] is None
+    assert (await db.get_managed_session(managed["id"]))["status"] == "stopped"
+
+
+@pytest.mark.asyncio
 async def test_gateway_does_not_converge_logical_pin_for_tools_list(tmp_path: Path, monkeypatch):
     settings = settings_for(tmp_path)
     db = Database(settings.studio.database); await db.init()
