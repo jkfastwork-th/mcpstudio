@@ -68,6 +68,10 @@ Hardware resource facts now complement refreshable health/load observations and 
 
 N7 uses current N6 load/resource observations as deterministic preference signals after capability lineage and policy eligibility are satisfied. See `docs/HIRDA_CAPABILITY_ROUTER.md`.
 
-## Next milestone
+## N8 integration
 
-N8 — Cognitive Router Integration.
+N8 consumes N7 decisions that may use N6 load/resource observations as infrastructure preference and eligibility inputs without changing semantic authority. See `docs/HIRDA_COGNITIVE_ROUTER.md`.
+
+## Roadmap status
+
+N1-N8 are complete.

@@ -973,3 +973,347 @@ async def test_auto_rollover_pane_is_excluded_from_default_cognitive_routing():
     assert plan["candidates"]
     assert plan["candidates"][0]["runtime"] == "claude"
     assert plan["candidates"][0]["pane_id"] == "wC:p1"
+
+
+class FakeCapabilityRouter:
+    def __init__(self, routes: dict[str, dict | None]):
+        self.routes = routes
+        self.calls: list[dict] = []
+
+    def resolve_capability_route(
+        self,
+        capability,
+        *,
+        permission,
+        machine_id=None,
+        backend_id=None,
+        model_id=None,
+    ):
+        self.calls.append(
+            {
+                "capability": capability,
+                "permission": permission,
+                "machine_id": machine_id,
+                "backend_id": backend_id,
+                "model_id": model_id,
+            }
+        )
+        selected = self.routes.get(machine_id)
+        return {
+            "schema": "hirda-capability-route-v1",
+            "capability": capability,
+            "permission": permission,
+            "selected": selected,
+            "eligible": [selected] if isinstance(selected, dict) else [],
+            "rejected": (
+                []
+                if isinstance(selected, dict)
+                else [
+                    {
+                        "node_id": machine_id,
+                        "reason": "node_unavailable",
+                    }
+                ]
+            ),
+            "eligible_count": 1 if isinstance(selected, dict) else 0,
+            "rejected_count": 0 if isinstance(selected, dict) else 1,
+            "no_route_reason": (
+                None
+                if isinstance(selected, dict)
+                else "no_eligible_route"
+            ),
+        }
+
+
+def routing_studio(mode: str) -> SimpleNamespace:
+    cfg = studio()
+    cfg.cognitive_node_routing_mode = mode
+    cfg.cognitive_capability_routes = {
+        "fast_utility": "chat",
+        "reasoning_high": "reasoning",
+    }
+    cfg.cognitive_runtime_bindings = {
+        "hermes": {
+            "machine_id": "node-h",
+            "backend_id": "runtime-h",
+            "model_id": "model-h",
+        },
+        "claude": {
+            "machine_id": "node-c",
+            "backend_id": "runtime-c",
+            "model_id": "model-c",
+        },
+    }
+    return cfg
+
+
+def selected_route(
+    node_id: str,
+    backend_id: str,
+    model_id: str,
+) -> dict:
+    return {
+        "node_id": node_id,
+        "machine_id": node_id,
+        "scope": "model",
+        "capability": "chat",
+        "backend_id": backend_id,
+        "model_id": model_id,
+        "permission": "execute",
+        "health": {
+            "state": "ready",
+            "age_seconds": 1.0,
+            "load_ratio_1m": 0.2,
+            "memory_available_ratio": 0.6,
+            "backend_state": "ready",
+            "backend_latency_ms": 12.0,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_n8_off_mode_preserves_legacy_cognitive_routing():
+    capability_router = FakeCapabilityRouter({})
+    router = CognitiveRouter(
+        routing_studio("off"),
+        FakeHerdr(),
+        FakeRuntimes(),
+        capability_router=capability_router,
+    )
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-N8-OFF",
+            "prompt": "Return a short result.",
+            "capability": "fast_utility",
+        }
+    )
+
+    assert plan["candidates"][0]["runtime"] == "hermes"
+    assert plan["infrastructure_routing"]["mode"] == "off"
+    assert plan["infrastructure_routing"]["enabled"] is False
+    assert capability_router.calls == []
+
+
+@pytest.mark.asyncio
+async def test_n8_shadow_observes_n7_failure_without_filtering_candidate():
+    capability_router = FakeCapabilityRouter(
+        {
+            "node-h": None,
+            "node-c": selected_route(
+                "node-c",
+                "runtime-c",
+                "model-c",
+            ),
+        }
+    )
+    router = CognitiveRouter(
+        routing_studio("shadow"),
+        FakeHerdr(),
+        FakeRuntimes(),
+        capability_router=capability_router,
+    )
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-N8-SHADOW",
+            "prompt": "Return a short result.",
+            "capability": "fast_utility",
+        }
+    )
+
+    assert [row["runtime"] for row in plan["candidates"]][:2] == [
+        "hermes",
+        "claude",
+    ]
+    report = plan["infrastructure_routing"]
+    assert report["mode"] == "shadow"
+    assert report["enforced"] is False
+    assert report["decisions"][0]["runtime"] == "hermes"
+    assert report["decisions"][0]["eligible"] is False
+    assert report["decisions"][0]["reason"] == "no_eligible_route"
+
+
+@pytest.mark.asyncio
+async def test_n8_enforce_filters_unavailable_primary_and_executes_fallback():
+    capability_router = FakeCapabilityRouter(
+        {
+            "node-h": None,
+            "node-c": selected_route(
+                "node-c",
+                "runtime-c",
+                "model-c",
+            ),
+        }
+    )
+    router = CognitiveRouter(
+        routing_studio("enforce"),
+        FakeHerdr(),
+        FakeRuntimes(),
+        capability_router=capability_router,
+    )
+
+    result = await router.execute(
+        {
+            "request_id": "COG-N8-ENFORCE",
+            "prompt": "Return the current result.",
+            "capability": "fast_utility",
+        }
+    )
+
+    assert result.status == "success"
+    assert result.runtime == "claude"
+    assert result.output == "CLAUDE_RESULT"
+    assert result.identity_continuity is True
+    assert result.semantic_authority_changed is False
+    report = result.infrastructure_routing
+    assert report["mode"] == "enforce"
+    assert report["candidate_count_before"] == 2
+    assert report["candidate_count_after"] == 1
+    selected = [
+        item["selected"]
+        for item in report["decisions"]
+        if item["runtime"] == "claude"
+    ][0]
+    assert selected["node_id"] == "node-c"
+
+
+@pytest.mark.asyncio
+async def test_n8_enforce_fails_closed_when_capability_mapping_missing():
+    cfg = routing_studio("enforce")
+    cfg.cognitive_capability_routes = {}
+    capability_router = FakeCapabilityRouter({})
+    router = CognitiveRouter(
+        cfg,
+        FakeHerdr(),
+        FakeRuntimes(),
+        capability_router=capability_router,
+    )
+
+    result = await router.execute(
+        {
+            "request_id": "COG-N8-UNMAPPED",
+            "prompt": "Return a result.",
+            "capability": "fast_utility",
+        }
+    )
+
+    assert result.status == "failed"
+    assert result.error == "no_healthy_cognitive_runtime"
+    assert result.infrastructure_routing["candidate_count_after"] == 0
+    assert {
+        decision["reason"]
+        for decision in result.infrastructure_routing["decisions"]
+    } == {"cognitive_capability_route_unmapped"}
+    assert capability_router.calls == []
+
+
+@pytest.mark.asyncio
+async def test_n8_enforce_fails_closed_when_runtime_binding_missing():
+    cfg = routing_studio("enforce")
+    cfg.cognitive_runtime_bindings.pop("hermes")
+    cfg.cognitive_runtime_bindings.pop("claude")
+    router = CognitiveRouter(
+        cfg,
+        FakeHerdr(),
+        FakeRuntimes(),
+        capability_router=FakeCapabilityRouter({}),
+    )
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-N8-NOBIND",
+            "prompt": "Return a result.",
+            "capability": "fast_utility",
+        }
+    )
+
+    assert plan["candidates"] == []
+    assert {
+        decision["reason"]
+        for decision in plan["infrastructure_routing"]["decisions"]
+    } == {"cognitive_runtime_binding_missing"}
+
+
+@pytest.mark.asyncio
+async def test_n8_calls_n7_with_explicit_runtime_lineage():
+    route = selected_route(
+        "node-h",
+        "runtime-h",
+        "model-h",
+    )
+    capability_router = FakeCapabilityRouter({"node-h": route})
+    cfg = routing_studio("enforce")
+    cfg.cognitive_runtime_bindings = {
+        "hermes": cfg.cognitive_runtime_bindings["hermes"],
+    }
+    router = CognitiveRouter(
+        cfg,
+        FakeHerdr(),
+        FakeRuntimes(),
+        capability_router=capability_router,
+    )
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-N8-BIND",
+            "prompt": "Return a result.",
+            "capability": "fast_utility",
+            "preferred_runtime": "hermes",
+            "allow_fallback": False,
+        }
+    )
+
+    assert plan["candidates"][0]["runtime"] == "hermes"
+    assert plan["candidates"][0]["infrastructure_route"] == route
+    assert capability_router.calls == [
+        {
+            "capability": "chat",
+            "permission": "execute",
+            "machine_id": "node-h",
+            "backend_id": "runtime-h",
+            "model_id": "model-h",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_n8_infrastructure_gate_does_not_change_semantic_lane():
+    capability_router = FakeCapabilityRouter(
+        {
+            "node-c": {
+                **selected_route(
+                    "node-c",
+                    "runtime-c",
+                    "model-c",
+                ),
+                "capability": "reasoning",
+            }
+        }
+    )
+    cfg = routing_studio("enforce")
+    cfg.cognitive_runtime_bindings = {
+        "claude": cfg.cognitive_runtime_bindings["claude"],
+    }
+    router = CognitiveRouter(
+        cfg,
+        FakeHerdr(),
+        FakeRuntimes(),
+        capability_router=capability_router,
+    )
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-N8-DEEP",
+            "prompt": "Reason through this carefully.",
+            "capability": "reasoning_high",
+        }
+    )
+
+    assert plan["lane"] == "deep"
+    assert plan["deterministic_lane"] == "deep"
+    assert plan["semantic_authority_changed"] is False
+    assert plan["infrastructure_routing"][
+        "semantic_authority_changed"
+    ] is False
+    assert plan["candidates"][0]["runtime"] == "claude"

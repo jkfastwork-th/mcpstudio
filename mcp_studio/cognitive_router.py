@@ -86,6 +86,7 @@ class CognitiveResult:
     fallback_used: bool
     attempts: tuple[dict[str, Any], ...]
     jev: dict[str, Any]
+    infrastructure_routing: dict[str, Any] = field(default_factory=dict)
     identity_continuity: bool = True
     semantic_authority_changed: bool = False
     error: str | None = None
@@ -421,11 +422,164 @@ class CognitiveRouter:
     lane/runtime and can fail over between compatible runtimes. JEV is teacher evidence only.
     """
 
-    def __init__(self, studio: Any, herdr: HerdrManager, runtimes: Any, capsules: Any | None = None) -> None:
+    def __init__(
+        self,
+        studio: Any,
+        herdr: HerdrManager,
+        runtimes: Any,
+        capsules: Any | None = None,
+        capability_router: Any | None = None,
+    ) -> None:
         self.studio = studio
         self.herdr = herdr
         self.runtimes = runtimes
         self.capsules = capsules
+        self.capability_router = capability_router
+
+
+    def _node_routing_mode(self) -> str:
+        mode = str(
+            getattr(self.studio, "cognitive_node_routing_mode", "off")
+            or "off"
+        ).strip().lower()
+        return mode if mode in {"off", "shadow", "enforce"} else "off"
+
+    def _advertised_capability(self, request: CognitiveRequest) -> str | None:
+        raw = getattr(self.studio, "cognitive_capability_routes", {})
+        if not isinstance(raw, dict):
+            return None
+        value = raw.get(request.capability)
+        capability = str(value or "").strip().lower()
+        return capability or None
+
+    def _runtime_binding(self, runtime_id: str) -> dict[str, str] | None:
+        raw = getattr(self.studio, "cognitive_runtime_bindings", {})
+        if not isinstance(raw, dict):
+            return None
+
+        selected: Any = None
+        for key, value in raw.items():
+            if str(key or "").strip().casefold() == runtime_id.casefold():
+                selected = value
+                break
+        if not isinstance(selected, dict):
+            return None
+
+        machine_id = str(selected.get("machine_id") or "").strip()
+        backend_id = str(selected.get("backend_id") or "").strip().lower()
+        model_id = str(selected.get("model_id") or "").strip()
+        if not machine_id:
+            return None
+        if model_id and not backend_id:
+            return None
+        return {
+            "machine_id": machine_id,
+            "backend_id": backend_id,
+            "model_id": model_id,
+        }
+
+    def _apply_infrastructure_routing(
+        self,
+        request: CognitiveRequest,
+        candidates: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        mode = self._node_routing_mode()
+        report: dict[str, Any] = {
+            "schema": "hirda-cognitive-infrastructure-routing-v1",
+            "mode": mode,
+            "enabled": mode != "off",
+            "advertised_capability": None,
+            "permission": "execute",
+            "candidate_count_before": len(candidates),
+            "candidate_count_after": len(candidates),
+            "decisions": [],
+            "eligible_runtimes": [],
+            "filtered_runtimes": [],
+            "enforced": mode == "enforce",
+            "routing_authority": (
+                "infrastructure_eligibility_only"
+                if mode != "off"
+                else "disabled"
+            ),
+            "semantic_authority_changed": False,
+        }
+        if mode == "off":
+            return candidates, report
+
+        advertised_capability = self._advertised_capability(request)
+        report["advertised_capability"] = advertised_capability
+        filtered: list[dict[str, Any]] = []
+
+        for row in candidates:
+            candidate = dict(row)
+            runtime_id = str(candidate.get("id") or "").strip().casefold()
+            binding = self._runtime_binding(runtime_id)
+            decision: dict[str, Any] = {
+                "runtime": runtime_id,
+                "binding": dict(binding) if binding is not None else None,
+                "eligible": False,
+                "selected": None,
+                "reason": None,
+            }
+
+            if advertised_capability is None:
+                decision["reason"] = "cognitive_capability_route_unmapped"
+            elif binding is None:
+                decision["reason"] = "cognitive_runtime_binding_missing"
+            elif self.capability_router is None:
+                decision["reason"] = "capability_router_unavailable"
+            else:
+                try:
+                    resolved = self.capability_router.resolve_capability_route(
+                        advertised_capability,
+                        permission="execute",
+                        machine_id=binding["machine_id"],
+                        backend_id=binding["backend_id"] or None,
+                        model_id=binding["model_id"] or None,
+                    )
+                except Exception as exc:
+                    decision["reason"] = (
+                        f"capability_route_error:{type(exc).__name__}"
+                    )
+                else:
+                    selected = resolved.get("selected")
+                    if isinstance(selected, dict):
+                        decision["eligible"] = True
+                        decision["selected"] = dict(selected)
+                        decision["reason"] = None
+                        candidate["_infrastructure_route"] = dict(selected)
+                    else:
+                        decision["reason"] = str(
+                            resolved.get("no_route_reason")
+                            or "no_eligible_route"
+                        )
+                        decision["route_rejections"] = list(
+                            resolved.get("rejected") or []
+                        )
+
+            report["decisions"].append(decision)
+            if mode == "shadow" or bool(decision["eligible"]):
+                filtered.append(candidate)
+
+        report["candidate_count_after"] = len(filtered)
+        report["enforced"] = mode == "enforce"
+        report["eligible_runtimes"] = [
+            item["runtime"]
+            for item in report["decisions"]
+            if item["eligible"]
+        ]
+        report["filtered_runtimes"] = (
+            [
+                item["runtime"]
+                for item in report["decisions"]
+                if not item["eligible"]
+            ]
+            if mode == "enforce"
+            else []
+        )
+        report["routing_authority"] = "infrastructure_eligibility_only"
+        report["semantic_authority_changed"] = False
+        return filtered, report
 
     @staticmethod
     def _deterministic_lane(request: CognitiveRequest) -> str:
@@ -567,16 +721,34 @@ class CognitiveRouter:
             payload = {
                 **payload,
                 "timeout_seconds": float(
-                    getattr(self.studio, "cognitive_router_default_timeout_seconds", 30.0) or 30.0
+                    getattr(
+                        self.studio,
+                        "cognitive_router_default_timeout_seconds",
+                        30.0,
+                    )
+                    or 30.0
                 ),
             }
         request = normalize_cognitive_request(payload)
         await self.herdr.refresh()
         runtime_snapshot = self.runtimes.snapshot(force=True)
-        lane_states = await self.capsules.lane_states() if self.capsules is not None else {}
+        lane_states = (
+            await self.capsules.lane_states()
+            if self.capsules is not None
+            else {}
+        )
         jev = await evaluate_cognitive_request(self.studio, request)
         deterministic = self._deterministic_lane(request)
-        min_confidence = max(0.0, min(1.0, float(getattr(self.studio, "jev_min_confidence", 0.90) or 0.90)))
+        min_confidence = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    getattr(self.studio, "jev_min_confidence", 0.90)
+                    or 0.90
+                ),
+            ),
+        )
         lane = deterministic
         # Deterministic policy is the compute-depth floor. JEV may elevate a
         # routine request to deep, but it may never downgrade a required deep lane.
@@ -588,7 +760,20 @@ class CognitiveRouter:
             and jev.confidence >= min_confidence
         ):
             lane = "deep"
-        candidates = self._ordered_candidates(request, lane, runtime_snapshot, lane_states)
+
+        candidates = self._ordered_candidates(
+            request,
+            lane,
+            runtime_snapshot,
+            lane_states,
+        )
+        candidates, infrastructure_routing = (
+            self._apply_infrastructure_routing(
+                request,
+                candidates,
+            )
+        )
+
         return {
             "schema": "hirda-cognitive-plan-v1",
             "request": request.as_dict(),
@@ -596,14 +781,24 @@ class CognitiveRouter:
             "deterministic_lane": deterministic,
             "lane_states": lane_states,
             "jev": jev.as_dict(),
+            "infrastructure_routing": infrastructure_routing,
             "candidates": [
                 {
                     "runtime": row.get("id"),
                     "provider": row.get("provider") or row.get("brand"),
-                    "model": row.get("model") or row.get("last_used_model"),
+                    "model": row.get("model")
+                    or row.get("last_used_model"),
                     "free": bool(row.get("free")),
                     "status": row.get("status"),
                     "pane_id": (row.get("_pane") or {}).get("pane_id"),
+                    "infrastructure_route": (
+                        dict(row.get("_infrastructure_route"))
+                        if isinstance(
+                            row.get("_infrastructure_route"),
+                            dict,
+                        )
+                        else None
+                    ),
                 }
                 for row in candidates
             ],
@@ -775,6 +970,9 @@ class CognitiveRouter:
         plan = await self.plan(payload)
         request = normalize_cognitive_request(plan["request"])
         candidates = plan["candidates"]
+        infrastructure_routing = dict(
+            plan.get("infrastructure_routing") or {}
+        )
         attempts: list[dict[str, Any]] = []
         if not candidates:
             return CognitiveResult(
@@ -790,6 +988,7 @@ class CognitiveRouter:
                 fallback_used=False,
                 attempts=tuple(attempts),
                 jev=dict(plan["jev"]),
+                infrastructure_routing=infrastructure_routing,
                 error="no_healthy_cognitive_runtime",
             )
 
@@ -872,6 +1071,7 @@ class CognitiveRouter:
                 fallback_used=index > 0,
                 attempts=tuple(attempts),
                 jev=dict(plan["jev"]),
+                infrastructure_routing=infrastructure_routing,
             )
 
         return CognitiveResult(
@@ -887,5 +1087,6 @@ class CognitiveRouter:
             fallback_used=len(attempts) > 1,
             attempts=tuple(attempts),
             jev=dict(plan["jev"]),
+            infrastructure_routing=infrastructure_routing,
             error="all_cognitive_runtimes_failed",
         )

@@ -65,6 +65,10 @@ Capability claims now have a separate refreshable health/load/availability signa
 
 Capability claims are now evaluated by the Machine Capability Router together with policy, N3/N4 lineage, and N6 freshness/availability. Route resolution remains non-executing and does not grant authority. See `docs/HIRDA_CAPABILITY_ROUTER.md`.
 
-## Next milestone
+## N8 integration
 
-N8 — Cognitive Router Integration.
+Cognitive capabilities can now map explicitly to N5 advertised capabilities; N7 then evaluates the bound node/backend/model route before cognitive execution. See `docs/HIRDA_COGNITIVE_ROUTER.md`.
+
+## Roadmap status
+
+N1-N8 are complete.

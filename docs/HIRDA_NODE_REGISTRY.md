@@ -58,6 +58,10 @@ Health observations now use the versioned `health.availability` facet with perio
 
 The existing Machine Capability Router now resolves eligible node/backend/model routes from N5 capability advertisements, N3/N4 lineage, machine policy, and N6 availability. See `docs/HIRDA_CAPABILITY_ROUTER.md`.
 
-## Next milestone
+## N8 cognitive router integration
 
-N8 — Cognitive Router Integration.
+Cognitive routing now consumes N7 eligibility through explicit runtime bindings without moving semantic authority into Node Registry. See `docs/HIRDA_COGNITIVE_ROUTER.md`.
+
+## Roadmap status
+
+N1-N8 are complete. Next: live certification and controlled cutover.

@@ -223,6 +223,17 @@ studio:
   #cognitive_router_enabled: false
   #cognitive_router_execute_enabled: false
   #cognitive_router_default_timeout_seconds: 30.0
+  # N8 infrastructure routing integration. Start with shadow, then enforce after
+  # capability advertisements and runtime bindings are certified.
+  #cognitive_node_routing_mode: off  # off | shadow | enforce
+  #cognitive_capability_routes:
+  #  fast_utility: chat
+  #  reasoning_high: reasoning
+  #cognitive_runtime_bindings:
+  #  runtime-a:
+  #    machine_id: openclaw
+  #    backend_id: local-inference
+  #    model_id: model-a
 
   # M6.2.5 Computer Use / Web VNC MVP.
   #computer_use_enabled: false

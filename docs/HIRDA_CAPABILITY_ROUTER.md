@@ -87,6 +87,10 @@ Existing machine policy remains the hard ceiling. N7 only determines eligibility
 
 The existing `online` field and provider-health surface remain unchanged.
 
-## Next milestone
+## N8 cognitive router integration
 
-N8 — Cognitive Router Integration: consume the N7 resolver for cognitive/inference decisions while preserving semantic authority, model/backend lineage, and existing HIRDA routing policy.
+The Cognitive Router now consumes N7 as an infrastructure eligibility gate through explicit capability mappings and runtime-to-node/backend/model bindings. Semantic lane/runtime policy remains authoritative. See `docs/HIRDA_COGNITIVE_ROUTER.md`.
+
+## Roadmap status
+
+N1-N8 are complete. Next: end-to-end certification and controlled shadow/enforce cutover.

@@ -67,6 +67,10 @@ Model identity remains separate from health; N6 contributes node/backend availab
 
 Model capability routes now require ready N4 model lineage, an eligible backend, machine policy, and fresh N6 availability. See `docs/HIRDA_CAPABILITY_ROUTER.md`.
 
-## Next milestone
+## N8 integration
 
-N8 — Cognitive Router Integration.
+Cognitive runtime bindings may explicitly reference N4 model lineage beneath a backend, and N7 validates that lineage before the runtime remains eligible. See `docs/HIRDA_COGNITIVE_ROUTER.md`.
+
+## Roadmap status
+
+N1-N8 are complete.

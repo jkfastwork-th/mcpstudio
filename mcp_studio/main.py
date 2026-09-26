@@ -160,7 +160,13 @@ operations = OperationsManager(settings, db)
 observability = ObservabilityManager(settings, db)
 reflex_metrics = ReflexMetrics(settings.studio)
 action_provider_registry = build_action_provider_registry(settings.studio)
-cognitive_router = CognitiveRouter(settings.studio, herdr, agent_runtimes, capsules)
+cognitive_router = CognitiveRouter(
+    settings.studio,
+    herdr,
+    agent_runtimes,
+    capsules,
+    machine_router,
+)
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
 
 
@@ -582,6 +588,15 @@ async def cognitive_router_status():
         "schema": "hirda-cognitive-status-v1",
         "enabled": bool(settings.studio.cognitive_router_enabled),
         "execute_enabled": bool(settings.studio.cognitive_router_execute_enabled),
+        "node_routing": {
+            "mode": settings.studio.cognitive_node_routing_mode,
+            "capability_mapping_count": len(
+                settings.studio.cognitive_capability_routes
+            ),
+            "runtime_binding_count": len(
+                settings.studio.cognitive_runtime_bindings
+            ),
+        },
         "runtimes": snapshot,
         "identity_authority": "external",
         "semantic_authority": "external",

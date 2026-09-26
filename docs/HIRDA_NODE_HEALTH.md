@@ -78,6 +78,10 @@ N6 reports current facts. N7 decides whether those facts make a route eligible.
 
 Capability routing now consumes fresh N6 availability, backend health, policy, and N5 capability lineage through the existing Machine Capability Router. See `docs/HIRDA_CAPABILITY_ROUTER.md`.
 
-## Next milestone
+## N8 integration
 
-N8 — Cognitive Router Integration.
+Cognitive runtime candidates now use N7 eligibility, which includes N6 freshness and availability, as an infrastructure gate. See `docs/HIRDA_COGNITIVE_ROUTER.md`.
+
+## Roadmap status
+
+N1-N8 are complete.

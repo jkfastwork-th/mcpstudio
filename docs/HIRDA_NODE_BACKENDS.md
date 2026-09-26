@@ -64,6 +64,10 @@ Backend specs may now declare generic bounded health probes, and their current a
 
 Backend capability routes now require both current N3 availability and fresh N6 backend health before becoming eligible. See `docs/HIRDA_CAPABILITY_ROUTER.md`.
 
-## Next milestone
+## N8 integration
 
-N8 — Cognitive Router Integration.
+Cognitive runtime bindings can explicitly reference N3 backend identity; no provider/model-name inference is performed. See `docs/HIRDA_COGNITIVE_ROUTER.md`.
+
+## Roadmap status
+
+N1-N8 are complete.

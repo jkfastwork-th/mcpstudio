@@ -238,6 +238,9 @@ class StudioConfig:
     cognitive_router_enabled: bool = False
     cognitive_router_execute_enabled: bool = False
     cognitive_router_default_timeout_seconds: float = 30.0
+    cognitive_node_routing_mode: str = "off"
+    cognitive_capability_routes: dict[str, str] = field(default_factory=dict)
+    cognitive_runtime_bindings: dict[str, dict[str, str]] = field(default_factory=dict)
 
     # M6.2.4 lifecycle polish. Zero keeps idle auto-stop disabled by default;
     # operators can opt in once their workload pattern is understood.
@@ -382,6 +385,37 @@ class StudioConfig:
                 geometry = str(self.computer_geometry or "").lower().split("x", 1)
                 if len(geometry) != 2 or not all(part.isdigit() and int(part) > 0 for part in geometry):
                     raise ValueError("studio.computer_geometry must look like 1440x900")
+
+        mode = str(self.cognitive_node_routing_mode or "off").strip().lower()
+        if mode not in {"off", "shadow", "enforce"}:
+            raise ValueError(
+                "studio.cognitive_node_routing_mode must be off, shadow, or enforce"
+            )
+        self.cognitive_node_routing_mode = mode
+        if not isinstance(self.cognitive_capability_routes, dict):
+            raise ValueError("studio.cognitive_capability_routes must be an object")
+        if not isinstance(self.cognitive_runtime_bindings, dict):
+            raise ValueError("studio.cognitive_runtime_bindings must be an object")
+        for runtime_id, raw in self.cognitive_runtime_bindings.items():
+            if not str(runtime_id or "").strip():
+                raise ValueError(
+                    "studio.cognitive_runtime_bindings runtime id must be non-empty"
+                )
+            if not isinstance(raw, dict):
+                raise ValueError(
+                    "studio.cognitive_runtime_bindings entries must be objects"
+                )
+            machine_id = str(raw.get("machine_id") or "").strip()
+            if not machine_id:
+                raise ValueError(
+                    "studio.cognitive_runtime_bindings entries require machine_id"
+                )
+            backend_id = str(raw.get("backend_id") or "").strip()
+            model_id = str(raw.get("model_id") or "").strip()
+            if model_id and not backend_id:
+                raise ValueError(
+                    "studio.cognitive_runtime_bindings model_id requires backend_id"
+                )
 
 
 @dataclass(slots=True)
