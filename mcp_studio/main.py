@@ -5,6 +5,7 @@ import html
 import ipaddress
 import json
 import os
+import time
 from typing import Any
 
 import websockets
@@ -61,6 +62,7 @@ from .reflex_metrics import ReflexMetrics
 from .action_adapter import evaluate_action_envelope
 from .action_registry import ActionProviderRegistryError, build_action_provider_registry
 from .cognitive_router import CognitiveRouter, CognitiveRouterError
+from .cognitive_observability import CognitiveObservability
 from .pixel_art_studio import (
     PixelArtStudioError,
     PixelArtStudioProvider,
@@ -166,6 +168,11 @@ cognitive_router = CognitiveRouter(
     agent_runtimes,
     capsules,
     machine_router,
+)
+cognitive_observability = CognitiveObservability(
+    db,
+    agent_runtimes,
+    settings.studio,
 )
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
 
@@ -607,10 +614,31 @@ async def cognitive_router_status():
 async def cognitive_router_plan(payload: dict[str, Any]):
     if not settings.studio.cognitive_router_enabled:
         raise HTTPException(status_code=503, detail="HIRDA cognitive router is disabled")
+    started = time.perf_counter()
     try:
-        return await cognitive_router.plan(payload)
+        plan = await cognitive_router.plan(payload)
+        await cognitive_observability.record_plan(
+            payload,
+            plan,
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+        )
+        return plan
     except CognitiveRouterError as exc:
+        await cognitive_observability.record_error(
+            "plan",
+            payload,
+            exc,
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        await cognitive_observability.record_error(
+            "plan",
+            payload,
+            exc,
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+        )
+        raise
 
 
 @app.post("/api/cognition/execute")
@@ -619,10 +647,38 @@ async def cognitive_router_execute(payload: dict[str, Any]):
         raise HTTPException(status_code=503, detail="HIRDA cognitive router is disabled")
     if not settings.studio.cognitive_router_execute_enabled:
         raise HTTPException(status_code=503, detail="HIRDA cognitive execution is disabled")
+    started = time.perf_counter()
     try:
-        return (await cognitive_router.execute(payload)).as_dict()
+        result = (await cognitive_router.execute(payload)).as_dict()
+        await cognitive_observability.record_execute(
+            payload,
+            result,
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+        )
+        return result
     except CognitiveRouterError as exc:
+        await cognitive_observability.record_error(
+            "execute",
+            payload,
+            exc,
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        await cognitive_observability.record_error(
+            "execute",
+            payload,
+            exc,
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+        )
+        raise
+
+
+@app.get("/api/cognition/observability")
+async def cognitive_observability_report(window_minutes: int | None = None):
+    return await cognitive_observability.report(
+        window_minutes=window_minutes,
+    )
 
 
 def _loopback_request(request: Request) -> bool:

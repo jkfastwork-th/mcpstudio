@@ -241,6 +241,10 @@ class StudioConfig:
     cognitive_node_routing_mode: str = "off"
     cognitive_capability_routes: dict[str, str] = field(default_factory=dict)
     cognitive_runtime_bindings: dict[str, dict[str, str]] = field(default_factory=dict)
+    cognitive_soak_window_minutes: int = 60
+    cognitive_soak_min_executions: int = 20
+    cognitive_soak_failure_warn_percent: float = 5.0
+    cognitive_soak_fallback_warn_percent: float = 25.0
 
     # M6.2.4 lifecycle polish. Zero keeps idle auto-stop disabled by default;
     # operators can opt in once their workload pattern is understood.
@@ -416,6 +420,22 @@ class StudioConfig:
                 raise ValueError(
                     "studio.cognitive_runtime_bindings model_id requires backend_id"
                 )
+
+        if not (1 <= int(self.cognitive_soak_window_minutes) <= 7 * 24 * 60):
+            raise ValueError(
+                "studio.cognitive_soak_window_minutes must be between 1 and 10080"
+            )
+        if int(self.cognitive_soak_min_executions) < 1:
+            raise ValueError(
+                "studio.cognitive_soak_min_executions must be >= 1"
+            )
+        for key in (
+            "cognitive_soak_failure_warn_percent",
+            "cognitive_soak_fallback_warn_percent",
+        ):
+            value = float(getattr(self, key))
+            if not (0.0 <= value <= 100.0):
+                raise ValueError(f"studio.{key} must be between 0 and 100")
 
 
 @dataclass(slots=True)
