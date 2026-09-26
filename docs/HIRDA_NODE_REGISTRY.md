@@ -46,6 +46,10 @@ Configured runtime/backend probes now enrich the existing node through the versi
 
 Models are discovered beneath existing backends and stored in the versioned `runtime.models` facet with explicit node/backend lineage. See `docs/HIRDA_NODE_MODELS.md`.
 
+## N5 capability advertisement
+
+Node/backend/model capability claims now use the versioned `capabilities.advertised` facet with lineage enforced against N3/N4 inventories. Advertisement remains observational and does not grant permission or routing authority. See `docs/HIRDA_NODE_CAPABILITIES.md`.
+
 ## Next milestone
 
-N5 — Capability Advertisement.
+N6 — Health / Load / Availability.

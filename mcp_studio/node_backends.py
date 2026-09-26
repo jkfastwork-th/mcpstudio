@@ -163,6 +163,7 @@ def normalize_backend_probe_specs(raw: Any) -> list[dict[str, Any]]:
                 "version_args": version_args,
                 "timeout_seconds": timeout_seconds,
                 "capabilities": _string_list(item.get("capabilities")),
+                "model_capabilities": _string_list(item.get("model_capabilities")),
                 "model_probe": model_probe,
             }
         )

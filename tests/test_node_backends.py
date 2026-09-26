@@ -318,7 +318,8 @@ def test_machine_agent_and_broker_expose_generic_observation_path() -> None:
     agent_source = (root / "scripts" / "hirda_machine_agent.py").read_text()
     main_source = (root / "mcp_studio" / "main.py").read_text()
 
-    assert '"runtime.backends": probe_configured_backends(backend_probes)' in agent_source
+    assert "backend_observation = probe_configured_backends(backend_probes)" in agent_source
+    assert '"runtime.backends": backend_observation' in agent_source
     assert 'config.get("backend_probes")' in agent_source
     assert 'if kind == "node_observations":' in main_source
     assert 'source="device_runtime"' in main_source

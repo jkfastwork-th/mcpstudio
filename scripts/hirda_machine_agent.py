@@ -27,6 +27,7 @@ from mcp_studio.node_backends import (
     probe_configured_backends,
 )
 from mcp_studio.node_models import probe_configured_models
+from mcp_studio.node_capabilities import build_capability_advertisement
 
 
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
@@ -287,6 +288,14 @@ class Handler(BaseHTTPRequestHandler):
                         "runtime_mode": runtime_mode,
                         "transport": "websocket",
                     }
+                backend_observation = probe_configured_backends(backend_probes)
+                model_observation = probe_configured_models(backend_probes)
+                capability_observation = build_capability_advertisement(
+                    capabilities,
+                    backend_observation,
+                    model_observation,
+                    backend_specs=backend_probes,
+                )
                 self._json(
                     200,
                     {
@@ -300,8 +309,9 @@ class Handler(BaseHTTPRequestHandler):
                         "providers": providers,
                         "observations": {
                             "hardware.resources": probe_hardware_resources(Path.cwd()),
-                            "runtime.backends": probe_configured_backends(backend_probes),
-                            "runtime.models": probe_configured_models(backend_probes),
+                            "runtime.backends": backend_observation,
+                            "runtime.models": model_observation,
+                            "capabilities.advertised": capability_observation,
                         },
                     },
                 )

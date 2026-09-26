@@ -56,6 +56,10 @@ Runtime/backend observations now travel through the same node observation pipeli
 
 Model inventories now use the same node observation pipeline with backend lineage enforced by the control plane. See `docs/HIRDA_NODE_MODELS.md`.
 
+## N5 integration
+
+Capability advertisements now share the same node observation pipeline and remain separate from policy/authority. See `docs/HIRDA_NODE_CAPABILITIES.md`.
+
 ## Next milestone
 
-N5 — Capability Advertisement.
+N6 — Health / Load / Availability.

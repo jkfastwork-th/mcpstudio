@@ -55,6 +55,10 @@ N4 does not mutate:
 
 Model inventory remains refreshable observation state, not durable node identity truth.
 
+## N5 capability advertisement
+
+Model capability claims now live in the separate `capabilities.advertised` facet and are accepted only when their backend/model lineage exists in N3/N4 observations. See `docs/HIRDA_NODE_CAPABILITIES.md`.
+
 ## Next milestone
 
-N5 — Capability Advertisement: advertise node/backend/model capabilities using the same node lineage without hardcoding a provider or model family in HIRDA core.
+N6 — Health / Load / Availability.

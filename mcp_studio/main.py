@@ -49,6 +49,7 @@ from .node_registry import NodeRegistry
 from .node_hardware import refresh_local_node_hardware
 from .node_backends import refresh_local_node_backends
 from .node_models import refresh_local_node_models
+from .node_capabilities import refresh_local_node_capabilities
 from .node_observations import ingest_node_observations
 from .machine_enrollment import MachineEnrollmentManager, MachineEnrollmentError
 from .device_pairing import DevicePairingManager, DevicePairingError
@@ -127,6 +128,9 @@ refresh_local_node_backends(
     machine_registry, settings.studio.node_backend_probes
 )
 refresh_local_node_models(
+    machine_registry, settings.studio.node_backend_probes
+)
+refresh_local_node_capabilities(
     machine_registry, settings.studio.node_backend_probes
 )
 machine_enrollment = MachineEnrollmentManager(

@@ -19,6 +19,7 @@ from .desktop_commander_relay import AgentError, DesktopCommanderRelay
 from .node_backends import normalize_backend_probe_specs, probe_configured_backends
 from .node_hardware import probe_hardware_resources
 from .node_models import probe_configured_models
+from .node_capabilities import build_capability_advertisement
 
 
 class DeviceRuntimeError(RuntimeError):
@@ -457,14 +458,19 @@ class DeviceRuntime:
 
     def node_observations(self) -> dict[str, Any]:
         storage_path = Path(self.config.identity_path).parent
+        backends = probe_configured_backends(self.config.backend_probes)
+        models = probe_configured_models(self.config.backend_probes)
+        capabilities = build_capability_advertisement(
+            self.config.capabilities,
+            backends,
+            models,
+            backend_specs=self.config.backend_probes,
+        )
         return {
             "hardware.resources": probe_hardware_resources(storage_path),
-            "runtime.backends": probe_configured_backends(
-                self.config.backend_probes
-            ),
-            "runtime.models": probe_configured_models(
-                self.config.backend_probes
-            ),
+            "runtime.backends": backends,
+            "runtime.models": models,
+            "capabilities.advertised": capabilities,
         }
 
     async def _run_connection(self) -> None:

@@ -52,6 +52,10 @@ The existing Claude/Codex/Hermes lane inventory remains a separate operator/UI c
 
 Backend-scoped model probes now populate the versioned `runtime.models` facet. The control plane stamps `node_id` and rejects inventories whose `backend_id` is not present in that node's discovered backend set. See `docs/HIRDA_NODE_MODELS.md`.
 
+## N5 capability advertisement
+
+Backend and model capability claims now reference the N3/N4 lineage and are stored separately from backend identity. See `docs/HIRDA_NODE_CAPABILITIES.md`.
+
 ## Next milestone
 
-N5 — Capability Advertisement.
+N6 — Health / Load / Availability.
