@@ -185,6 +185,7 @@ class StudioConfig:
     # secrets are referenced through env/token files and never embedded here.
     machine_local_id: str = "openclaw"
     machine_registry: list[dict[str, Any]] = field(default_factory=list)
+    node_backend_probes: list[dict[str, Any]] = field(default_factory=list)
     machine_enrollment_enabled: bool = False
     machine_enrollment_state_path: str = "data/machine-enrollment.json"
     machine_enrollment_agent_port: int = 8765
@@ -506,6 +507,12 @@ def load_settings(path: str | Path) -> Settings:
             raise ValueError("managed_session_cutover_enabled=true requires managed_session_require_binding_for_tools=true")
         if not studio.gateway_session_enabled:
             raise ValueError("managed_session_cutover_enabled=true requires gateway_session_enabled=true")
+    if not isinstance(studio.node_backend_probes, list):
+        raise ValueError("studio.node_backend_probes must be a list")
+    for item in studio.node_backend_probes:
+        if not isinstance(item, dict):
+            raise ValueError("studio.node_backend_probes entries must be objects")
+
     if studio.machine_enrollment_enabled:
         if not (1024 <= int(studio.machine_enrollment_agent_port) <= 65535):
             raise ValueError("studio.machine_enrollment_agent_port must be between 1024 and 65535")

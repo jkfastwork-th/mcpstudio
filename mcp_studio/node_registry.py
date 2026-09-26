@@ -109,7 +109,28 @@ class NodeRegistry(MachineRegistry):
         replace: bool = False,
         lifecycle_state: str | None = None,
     ) -> MachineDescriptor:
-        node = super().register_machine(raw, source=source, replace=replace)
+        payload = dict(raw)
+        machine_id = str(payload.get("id") or "").strip()
+        existing = self._machines.get(machine_id)
+        if replace and existing is not None:
+            previous_lifecycle = existing.metadata.get(_NODE_METADATA_KEY)
+            if isinstance(previous_lifecycle, dict):
+                metadata = (
+                    dict(payload.get("metadata") or {})
+                    if isinstance(payload.get("metadata"), dict)
+                    else {}
+                )
+                metadata.setdefault(
+                    _NODE_METADATA_KEY,
+                    copy.deepcopy(previous_lifecycle),
+                )
+                payload["metadata"] = metadata
+
+        node = super().register_machine(
+            payload,
+            source=source,
+            replace=replace,
+        )
         return self._stamp_node(
             node,
             source=source,

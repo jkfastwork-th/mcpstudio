@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 from .machine_registry import MachineRegistry, MachineRegistryError
-from .node_hardware import normalize_hardware_resources
+from .node_observations import ingest_node_observations, normalize_node_observations
 
 _MACHINE_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
 _SAFE_DEFAULT_POLICY: dict[str, Any] = {
@@ -153,11 +153,7 @@ class MachineEnrollmentManager:
             if value in _ALLOWED_CAPABILITIES
         ]
         providers = identity.get("providers") if isinstance(identity.get("providers"), dict) else {}
-        raw_observations = identity.get("observations") if isinstance(identity.get("observations"), dict) else {}
-        hardware = normalize_hardware_resources(raw_observations.get("hardware.resources"))
-        observations: dict[str, Any] = {}
-        if hardware is not None:
-            observations["hardware.resources"] = hardware
+        observations = normalize_node_observations(identity.get("observations"))
         return {
             "schema": self.AGENT_SCHEMA,
             "machine_id": machine_id,
@@ -177,20 +173,13 @@ class MachineEnrollmentManager:
         self,
         machine_id: str,
         identity: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        observations = identity.get("observations") if isinstance(identity.get("observations"), dict) else {}
-        hardware = normalize_hardware_resources(observations.get("hardware.resources"))
-        enrich = getattr(self.registry, "enrich_node", None)
-        if hardware is None or not callable(enrich):
-            return None
-        enrich(
+    ) -> dict[str, dict[str, Any]]:
+        return ingest_node_observations(
+            self.registry,
             machine_id,
-            facet="hardware.resources",
-            data=hardware,
+            identity.get("observations"),
             source="machine_agent",
-            observed_at=hardware["observed_at"],
         )
-        return hardware
 
     def _agent_endpoint(self, address: str) -> str:
         host = f"[{address}]" if ":" in address else address

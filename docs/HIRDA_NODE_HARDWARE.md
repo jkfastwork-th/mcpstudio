@@ -48,6 +48,10 @@ The external product surface remains Machines. Existing machine APIs, UI, polici
 
 No product, AI runtime, model family, hardware vendor, or provider is privileged by N2 core.
 
+## N3 integration
+
+Runtime/backend observations now travel through the same node observation pipeline as hardware/resource observations. See `docs/HIRDA_NODE_BACKENDS.md`.
+
 ## Next milestone
 
-N3 — Runtime / Backend Discovery: discover available execution/inference backends and enrich the same node record without creating a separate Local AI subsystem.
+N4 — Model Discovery.

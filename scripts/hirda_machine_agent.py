@@ -21,6 +21,11 @@ from typing import Any
 
 from mcp_studio.desktop_commander_relay import AgentError, DesktopCommanderRelay
 from mcp_studio.node_hardware import probe_hardware_resources
+from mcp_studio.node_backends import (
+    NodeBackendDiscoveryError,
+    normalize_backend_probe_specs,
+    probe_configured_backends,
+)
 
 
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
@@ -247,6 +252,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         relay = self.server.relay  # type: ignore[attr-defined]
         computer_use = self.server.computer_use  # type: ignore[attr-defined]
+        backend_probes = self.server.backend_probes  # type: ignore[attr-defined]
         path = self.path.split("?", 1)[0]
         ws_prefix = "/v1/computer/ws/"
         if path.startswith(ws_prefix):
@@ -293,6 +299,7 @@ class Handler(BaseHTTPRequestHandler):
                         "providers": providers,
                         "observations": {
                             "hardware.resources": probe_hardware_resources(Path.cwd()),
+                            "runtime.backends": probe_configured_backends(backend_probes),
                         },
                     },
                 )
@@ -372,7 +379,8 @@ def main() -> int:
         raise SystemExit("desktop_commander_command must be a non-empty JSON string array")
     try:
         computer_use = _computer_use_config(config)
-    except AgentError as exc:
+        backend_probes = normalize_backend_probe_specs(config.get("backend_probes"))
+    except (AgentError, NodeBackendDiscoveryError) as exc:
         raise SystemExit(str(exc)) from exc
     relay = DesktopCommanderRelay(command, args.machine_id)
     relay.start()
@@ -381,6 +389,7 @@ def main() -> int:
     server.allow_client_ip = args.allow_client_ip  # type: ignore[attr-defined]
     server.relay = relay  # type: ignore[attr-defined]
     server.computer_use = computer_use  # type: ignore[attr-defined]
+    server.backend_probes = backend_probes  # type: ignore[attr-defined]
     print(json.dumps({"ok": True, "machine_id": args.machine_id, "listen": f"{args.host}:{args.port}"}), flush=True)
     try:
         server.serve_forever(poll_interval=0.5)

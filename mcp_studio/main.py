@@ -47,6 +47,8 @@ from .integrations import build_integration_manager
 from .machine_registry import MachineRegistryError
 from .node_registry import NodeRegistry
 from .node_hardware import refresh_local_node_hardware
+from .node_backends import refresh_local_node_backends
+from .node_observations import ingest_node_observations
 from .machine_enrollment import MachineEnrollmentManager, MachineEnrollmentError
 from .device_pairing import DevicePairingManager, DevicePairingError
 from .device_pairing_web import render_pairing_page
@@ -119,6 +121,9 @@ machine_registry = NodeRegistry(
 )
 refresh_local_node_hardware(
     machine_registry, storage_path=settings.config_path.parent
+)
+refresh_local_node_backends(
+    machine_registry, settings.studio.node_backend_probes
 )
 machine_enrollment = MachineEnrollmentManager(
     settings.studio, machine_registry, base_dir=settings.config_path.parent
@@ -1255,6 +1260,40 @@ async def device_broker_ws(websocket: WebSocket):
                 )
                 continue
             kind = str(message.get("type") or "")
+            if kind == "node_observations":
+                try:
+                    await device_broker.touch_connection(device_id, connection_id)
+                except DeviceBrokerError:
+                    await websocket.close(code=4403, reason="Device trust revoked or session expired")
+                    return
+                machine_registry.sync_trusted_devices()
+                if not machine_registry.contains(device_id):
+                    await device_broker.send_connection_message(
+                        device_id,
+                        connection_id,
+                        {
+                            "schema": device_broker.SCHEMA,
+                            "type": "error",
+                            "error": "device_node_not_registered",
+                        },
+                    )
+                    continue
+                accepted = ingest_node_observations(
+                    machine_registry,
+                    device_id,
+                    message.get("observations"),
+                    source="device_runtime",
+                )
+                await device_broker.send_connection_message(
+                    device_id,
+                    connection_id,
+                    {
+                        "schema": device_broker.SCHEMA,
+                        "type": "node_observations_ack",
+                        "facets": sorted(accepted),
+                    },
+                )
+                continue
             if kind == "rpc_response":
                 try:
                     await device_broker.touch_connection(device_id, connection_id)

@@ -38,6 +38,10 @@ The product surface remains Machines for now. Existing machine IDs, machine APIs
 
 Hardware/resource observations now enrich the existing node through the versioned `hardware.resources` facet. They remain observational cache rather than durable identity or policy. See `docs/HIRDA_NODE_HARDWARE.md`.
 
+## N3 runtime/backend discovery
+
+Configured runtime/backend probes now enrich the existing node through the versioned `runtime.backends` facet. Local control plane, legacy Machine Agent, and Shared Device Runtime use the same observation contract. See `docs/HIRDA_NODE_BACKENDS.md`.
+
 ## Next milestone
 
-N3 — Runtime / Backend Discovery: discover execution and inference backends and enrich the same node record without creating a separate Local AI subsystem.
+N4 — Model Discovery: enumerate models exposed by discovered inference backends while preserving backend and node identity boundaries.

@@ -158,6 +158,16 @@ studio:
   #    workspace_map:
   #      example: C:\Users\me\HIRDA\workspaces\example
 
+  # Vendor-neutral N3 runtime/backend probes for the local node. Each probe
+  # declares an executable and optional version command; provider-specific
+  # choices live in config/adapters, never in Node Registry core.
+  #node_backend_probes:
+  #  - id: local-inference
+  #    kind: inference
+  #    command: [my-runtime]
+  #    version_args: [--version]
+  #    capabilities: [text-generation]
+
   # Safe auto-onboarding: HIRDA scans online Tailnet peers for a machine agent,
   # records unknown nodes as pending, and requires explicit approval.
   #machine_enrollment_enabled: false

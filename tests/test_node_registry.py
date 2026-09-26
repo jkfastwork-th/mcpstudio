@@ -124,6 +124,45 @@ def test_discovery_enriches_same_record_without_replacing_policy_or_provider(tmp
     assert facet["data"]["cpu_logical"] == 16
 
 
+def test_replace_preserves_existing_node_lifecycle_and_enrichment(tmp_path: Path) -> None:
+    registry = NodeRegistry(studio(tmp_path), base_dir=tmp_path)
+    node = registry.get_node("openclaw")
+    registry.enrich_node(
+        "openclaw",
+        facet="runtime.backends",
+        data={"schema": "test", "backends": [{"id": "runtime-x"}]},
+        source="n3-probe",
+        observed_at="2026-09-26T02:00:00+00:00",
+    )
+    lifecycle_before = registry.lifecycle("openclaw")
+    revision_before = lifecycle_before["revision"]
+
+    replaced = registry.register_node(
+        {
+            "id": "openclaw",
+            "name": "openclaw-updated",
+            "enabled": True,
+            "local": True,
+            "os": "linux",
+            "address": "127.0.0.1",
+            "capabilities": ["filesystem", "process"],
+            "providers": {"desktop_commander": {"mode": "local"}},
+            "policy": dict(node.policy),
+            "metadata": {"registry_source": "local"},
+        },
+        source="local",
+        replace=True,
+    )
+
+    lifecycle_after = registry.lifecycle("openclaw")
+    assert replaced.name == "openclaw-updated"
+    assert lifecycle_after["revision"] == revision_before + 1
+    assert (
+        lifecycle_after["enrichment"]["facets"]["runtime.backends"]["data"]["backends"][0]["id"]
+        == "runtime-x"
+    )
+
+
 def test_arbitrary_runtime_and_capability_names_remain_vendor_neutral(tmp_path: Path) -> None:
     registry = NodeRegistry(studio(tmp_path), base_dir=tmp_path)
     node = registry.register_node(

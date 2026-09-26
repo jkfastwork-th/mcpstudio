@@ -16,6 +16,8 @@ import yaml
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from .desktop_commander_relay import AgentError, DesktopCommanderRelay
+from .node_backends import normalize_backend_probe_specs, probe_configured_backends
+from .node_hardware import probe_hardware_resources
 
 
 class DeviceRuntimeError(RuntimeError):
@@ -115,6 +117,7 @@ class DeviceRuntimeConfig:
         platform: str,
         architecture: str,
         runtime_version: str,
+        backend_probes: list[dict[str, Any]],
         desktop_commander_timeout_seconds: float,
         heartbeat_seconds: float,
         reconnect_min_seconds: float,
@@ -129,6 +132,7 @@ class DeviceRuntimeConfig:
         self.platform = platform
         self.architecture = architecture
         self.runtime_version = runtime_version
+        self.backend_probes = backend_probes
         self.desktop_commander_timeout_seconds = desktop_commander_timeout_seconds
         self.heartbeat_seconds = heartbeat_seconds
         self.reconnect_min_seconds = reconnect_min_seconds
@@ -179,6 +183,7 @@ class DeviceRuntimeConfig:
                 if str(value or "").strip()
             }
         )
+        backend_probes = normalize_backend_probe_specs(raw.get("backend_probes"))
         reconnect_min = max(0.25, float(raw.get("reconnect_min_seconds") or 1.0))
         reconnect_max = max(
             reconnect_min,
@@ -196,6 +201,7 @@ class DeviceRuntimeConfig:
                 raw.get("architecture") or platform_module.machine() or "unknown"
             ).strip().lower(),
             runtime_version=str(raw.get("runtime_version") or "0.1").strip(),
+            backend_probes=backend_probes,
             desktop_commander_timeout_seconds=max(
                 1.0,
                 float(raw.get("desktop_commander_timeout_seconds") or 15.0),
@@ -448,6 +454,15 @@ class DeviceRuntime:
                 "error": error,
             }
 
+    def node_observations(self) -> dict[str, Any]:
+        storage_path = Path(self.config.identity_path).parent
+        return {
+            "hardware.resources": probe_hardware_resources(storage_path),
+            "runtime.backends": probe_configured_backends(
+                self.config.backend_probes
+            ),
+        }
+
     async def _run_connection(self) -> None:
         async with websockets.connect(
             self.broker_url,
@@ -472,6 +487,16 @@ class DeviceRuntime:
                     or authenticated.get("type") != "authenticated"
                 ):
                     raise DeviceRuntimeError("broker_authentication_failed")
+
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "node_observations",
+                            "observations": self.node_observations(),
+                        },
+                        separators=(",", ":"),
+                    )
+                )
 
                 while not self._stopping.is_set():
                     try:
