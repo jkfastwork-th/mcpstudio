@@ -61,6 +61,10 @@ HIRDA core does not contain provider, runtime, or model-family capability tables
 
 Capability claims now have a separate refreshable health/load/availability signal with freshness semantics. See `docs/HIRDA_NODE_HEALTH.md`.
 
+## N7 router integration
+
+Capability claims are now evaluated by the Machine Capability Router together with policy, N3/N4 lineage, and N6 freshness/availability. Route resolution remains non-executing and does not grant authority. See `docs/HIRDA_CAPABILITY_ROUTER.md`.
+
 ## Next milestone
 
-N7 — Capability Router Integration: combine capability lineage, policy, health, freshness, and availability without weakening the existing machine-policy ceiling.
+N8 — Cognitive Router Integration.

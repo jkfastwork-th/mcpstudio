@@ -28,7 +28,7 @@ from .agent_runtimes import AgentRuntimeInventory
 from .models import (
     SessionCreate, SessionHeartbeat, WorkerBind, WorkerHeartbeat, WorkerStatePatch,
     WorkSubmit, WorkFinish, WorkFail, WorkDetach, AlertAcknowledge, RetryDispatch, FaultInject, BatchDispatch,
-    SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate, ManagedSessionMachineUpdate, MachineEnrollmentApprove, MachineEnrollmentReject, DevicePairingStart, DevicePairingVerify, DevicePairingApprove, DevicePairingReject, DeviceRevoke,
+    SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate, ManagedSessionMachineUpdate, MachineCapabilityRouteRequest, MachineEnrollmentApprove, MachineEnrollmentReject, DevicePairingStart, DevicePairingVerify, DevicePairingApprove, DevicePairingReject, DeviceRevoke,
     GraftConfigureRequest, GraftQueryRequest, GraftRollbackRequest, ComputerRepairRequest, ManagedGatewayAttach, GatewayContextUsageReport, SessionHandoffPrepareRequest,
     CapsuleCreate, CapsuleStageUpdate, CapsuleHandoff, CapsuleHandoffAck, CapsuleContractUpdate,
     CapsuleHandoffValidation, CapsuleHandoffApproval, CapsuleHandoffCompletion, LaneStateUpdate, CapsuleComplete,
@@ -1496,6 +1496,20 @@ async def device_pairing_revoke(
 @app.get("/api/machines")
 async def machine_registry_status():
     return await machine_router.machine_snapshot()
+
+
+@app.post("/api/machines/routes/resolve")
+async def machine_capability_route_resolve(payload: MachineCapabilityRouteRequest):
+    try:
+        return machine_router.resolve_capability_route(
+            payload.capability,
+            permission=payload.permission,
+            machine_id=payload.machine_id,
+            backend_id=payload.backend_id,
+            model_id=payload.model_id,
+        )
+    except MachineRegistryError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @app.get("/api/machines/enrollments")

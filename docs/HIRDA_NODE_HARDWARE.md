@@ -64,6 +64,10 @@ Capability advertisements now share the same node observation pipeline and remai
 
 Hardware resource facts now complement refreshable health/load observations and stale-aware availability. See `docs/HIRDA_NODE_HEALTH.md`.
 
+## N7 router integration
+
+N7 uses current N6 load/resource observations as deterministic preference signals after capability lineage and policy eligibility are satisfied. See `docs/HIRDA_CAPABILITY_ROUTER.md`.
+
 ## Next milestone
 
-N7 — Capability Router Integration.
+N8 — Cognitive Router Integration.

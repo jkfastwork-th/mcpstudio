@@ -182,6 +182,23 @@ class ManagedSessionMachineUpdate(BaseModel):
     machine_id: str = Field(min_length=1, max_length=120)
 
 
+class MachineCapabilityRouteRequest(BaseModel):
+    capability: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$",
+    )
+    permission: Literal["read", "write", "execute", "destructive"] = "execute"
+    machine_id: str | None = Field(default=None, min_length=1, max_length=120)
+    backend_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$",
+    )
+    model_id: str | None = Field(default=None, min_length=1, max_length=512)
+
+
 class MachineEnrollmentApprove(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     workspace_map: dict[str, str] = Field(default_factory=dict)

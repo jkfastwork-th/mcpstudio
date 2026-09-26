@@ -63,6 +63,10 @@ Model capability claims now live in the separate `capabilities.advertised` facet
 
 Model identity remains separate from health; N6 contributes node/backend availability that N7 can combine with this model lineage. See `docs/HIRDA_NODE_HEALTH.md`.
 
+## N7 router integration
+
+Model capability routes now require ready N4 model lineage, an eligible backend, machine policy, and fresh N6 availability. See `docs/HIRDA_CAPABILITY_ROUTER.md`.
+
 ## Next milestone
 
-N7 — Capability Router Integration.
+N8 — Cognitive Router Integration.

@@ -60,6 +60,10 @@ Backend and model capability claims now reference the N3/N4 lineage and are stor
 
 Backend specs may now declare generic bounded health probes, and their current availability is reported separately from backend identity. See `docs/HIRDA_NODE_HEALTH.md`.
 
+## N7 router integration
+
+Backend capability routes now require both current N3 availability and fresh N6 backend health before becoming eligible. See `docs/HIRDA_CAPABILITY_ROUTER.md`.
+
 ## Next milestone
 
-N7 — Capability Router Integration.
+N8 — Cognitive Router Integration.

@@ -74,6 +74,10 @@ Health and availability do not mutate:
 
 N6 reports current facts. N7 decides whether those facts make a route eligible.
 
+## N7 router integration
+
+Capability routing now consumes fresh N6 availability, backend health, policy, and N5 capability lineage through the existing Machine Capability Router. See `docs/HIRDA_CAPABILITY_ROUTER.md`.
+
 ## Next milestone
 
-N7 — Capability Router Integration: combine capability lineage, policy, health, freshness, and availability to select eligible node/backend/model routes without weakening existing machine policy.
+N8 — Cognitive Router Integration.

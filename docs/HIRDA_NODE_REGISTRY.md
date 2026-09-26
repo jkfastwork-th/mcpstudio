@@ -54,6 +54,10 @@ Node/backend/model capability claims now use the versioned `capabilities.adverti
 
 Health observations now use the versioned `health.availability` facet with periodic refresh, backend health probes, stale evaluation, and immediate offline marking for disconnected Device Runtime sessions. See `docs/HIRDA_NODE_HEALTH.md`.
 
+## N7 capability router integration
+
+The existing Machine Capability Router now resolves eligible node/backend/model routes from N5 capability advertisements, N3/N4 lineage, machine policy, and N6 availability. See `docs/HIRDA_CAPABILITY_ROUTER.md`.
+
 ## Next milestone
 
-N7 — Capability Router Integration.
+N8 — Cognitive Router Integration.
