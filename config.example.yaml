@@ -236,7 +236,7 @@ studio:
   #    model_id: model-a
   # Cognitive enforce soak/observability thresholds. These are reporting-only
   # and never change route eligibility or runtime authority.
-  #cognitive_soak_window_minutes: 60
+  #cognitive_soak_window_minutes: 1440
   #cognitive_soak_min_executions: 20
   #cognitive_soak_failure_warn_percent: 5.0
   #cognitive_soak_fallback_warn_percent: 25.0

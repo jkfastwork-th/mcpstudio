@@ -351,6 +351,26 @@ async def test_observer_failure_is_fail_open():
     assert observer.last_error == "RuntimeError: ledger unavailable"
 
 
+@pytest.mark.asyncio
+async def test_report_uses_24_hour_window_by_default():
+    observer = CognitiveObservability(
+        FakeDB(),
+        FakeRuntimes(),
+        SimpleNamespace(
+            cognitive_node_routing_mode="enforce",
+            cognitive_soak_min_executions=1,
+            cognitive_soak_failure_warn_percent=5.0,
+            cognitive_soak_fallback_warn_percent=25.0,
+        ),
+    )
+
+    report = await observer.report()
+
+    assert report["window_minutes"] == 1440
+
+def test_soak_default_window_is_24_hours():
+    assert StudioConfig().cognitive_soak_window_minutes == 1440
+
 def test_soak_settings_validate_bounds():
     with pytest.raises(ValueError, match="cognitive_soak_window_minutes"):
         StudioConfig(cognitive_soak_window_minutes=0)

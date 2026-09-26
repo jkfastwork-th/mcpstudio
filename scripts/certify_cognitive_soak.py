@@ -70,7 +70,7 @@ async def certify(base_url: str, window: int, require_min: bool) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://127.0.0.1:8100")
-    parser.add_argument("--window-minutes", type=int, default=60)
+    parser.add_argument("--window-minutes", type=int, default=1440)
     parser.add_argument("--require-min-executions", action="store_true")
     parser.add_argument(
         "--output",

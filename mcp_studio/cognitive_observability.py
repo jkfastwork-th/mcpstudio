@@ -342,7 +342,7 @@ class CognitiveObservability:
         window_minutes: int | None = None,
     ) -> dict[str, Any]:
         configured_window = int(
-            getattr(self.studio, "cognitive_soak_window_minutes", 60) or 60
+            getattr(self.studio, "cognitive_soak_window_minutes", 1440) or 1440
         )
         window = max(1, min(int(window_minutes or configured_window), 7 * 24 * 60))
         cutoff = _utcnow() - timedelta(minutes=window)

@@ -241,7 +241,7 @@ class StudioConfig:
     cognitive_node_routing_mode: str = "off"
     cognitive_capability_routes: dict[str, str] = field(default_factory=dict)
     cognitive_runtime_bindings: dict[str, dict[str, str]] = field(default_factory=dict)
-    cognitive_soak_window_minutes: int = 60
+    cognitive_soak_window_minutes: int = 1440
     cognitive_soak_min_executions: int = 20
     cognitive_soak_failure_warn_percent: float = 5.0
     cognitive_soak_fallback_warn_percent: float = 25.0

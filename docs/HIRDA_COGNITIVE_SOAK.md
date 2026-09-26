@@ -54,7 +54,7 @@ The infrastructure rejection may still be correct because machine policy, backen
 
 Read-only endpoint:
 
-`GET /api/cognition/observability?window_minutes=60`
+`GET /api/cognition/observability?window_minutes=1440`
 
 The report includes:
 
@@ -81,8 +81,8 @@ The reporting state is informational only:
 
 Defaults:
 
-- window: 60 minutes;
-- minimum executions: 20;
+- window: 24 hours (1440 minutes);
+- minimum executions: 20 within that rolling 24-hour window;
 - execution failure warning: 5%;
 - fallback warning: 25%.
 
