@@ -7,11 +7,15 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+
+import mcp_studio.managed_sessions as managed_sessions_module
+
+import mcp_studio.managed_sessions as managed_sessions_module
 from starlette.requests import Request
 
 from mcp_studio.db import Database
 from mcp_studio.gateway import GatewaySessionManager
-from mcp_studio.managed_sessions import ManagedSessionManager, ManagedSessionConflict, WorkspaceNotAllowed
+from mcp_studio.managed_sessions import ManagedSessionManager, ManagedSessionConflict, ManagedSessionError, WorkspaceNotAllowed
 from mcp_studio.settings import ServerConfig, Settings, StudioConfig
 
 
@@ -345,8 +349,12 @@ async def test_spawn_uses_certified_serena_template_and_project_pin(tmp_path: Pa
     async def fake_wait_ready(item, process):
         return None
 
+    async def fake_wait_semantic_ready(item, process):
+        return None
+
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_create)
     monkeypatch.setattr(manager, "_wait_ready", fake_wait_ready)
+    monkeypatch.setattr(manager, "_wait_semantic_ready", fake_wait_semantic_ready)
     monkeypatch.setattr(manager, "_port_available", lambda port: True)
     ready = await manager.ensure_running(raw["id"])
     args = list(captured["args"])
@@ -1173,3 +1181,169 @@ async def test_pinned_activate_project_allows_same_project_and_blocks_cross_proj
     cross_text = json.loads(cross_response.body)["result"]["content"][0]["text"]
     assert "SESSION_PROJECT_PINNED" in cross_text
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_language_runtime_certification_requires_explicit_confirmation(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    db = Database(settings.studio.database)
+    await db.init()
+    manager = ManagedSessionManager(settings, db)
+
+    with pytest.raises(ManagedSessionError, match="FAULT_INJECTION"):
+        await manager.certify_language_runtime_recovery(
+            "ms-test",
+            confirm="",
+        )
+
+
+@pytest.mark.asyncio
+async def test_language_runtime_certification_rotates_generation_and_reprobes(
+    tmp_path: Path, monkeypatch
+):
+    settings = settings_for(tmp_path)
+    db = Database(settings.studio.database)
+    await db.init()
+    manager = ManagedSessionManager(settings, db)
+
+    before = {
+        "id": "ms-test",
+        "port": 43123,
+        "endpoint": "http://127.0.0.1:43123/mcp",
+        "generation": 8,
+        "metadata": {
+            "language_runtime": {
+                "state": "ready",
+                "owner_generation": 8,
+                "restart_count": 2,
+            }
+        },
+    }
+    after = {
+        **before,
+        "generation": 9,
+        "metadata": {
+            "language_runtime": {
+                "state": "ready",
+                "owner_generation": 9,
+                "restart_count": 3,
+                "last_error": None,
+            }
+        },
+        "language_runtime": {
+            "state": "ready",
+            "owner_generation": 9,
+            "restart_count": 3,
+            "last_error": None,
+        },
+    }
+    calls = []
+
+    class FakeMCPClient:
+        def __init__(self, url, **kwargs):
+            self.url = url
+
+        async def call_tool(self, name, arguments, **kwargs):
+            calls.append((self.url, name, arguments))
+            return {"content": [{"type": "text", "text": "ok"}]}
+
+    async def fake_ensure(session_id):
+        assert session_id == "ms-test"
+        return before
+
+    async def fake_recover(session_id, *, reason, actor):
+        assert session_id == "ms-test"
+        assert reason == "CERTIFICATION_INJECTED_LANGUAGE_SERVER_FAILURE"
+        assert actor == "system/lsp-certification"
+        return after
+
+    async def fake_get(session_id):
+        assert session_id == "ms-test"
+        return after
+
+    async def fake_audit(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(managed_sessions_module, "MCPClient", FakeMCPClient)
+    monkeypatch.setattr(manager, "ensure_running", fake_ensure)
+    monkeypatch.setattr(manager, "recover_language_runtime", fake_recover)
+    monkeypatch.setattr(manager, "get_session", fake_get)
+    monkeypatch.setattr(db, "add_audit", fake_audit)
+
+    result = await manager.certify_language_runtime_recovery(
+        "ms-test",
+        confirm="FAULT_INJECTION",
+    )
+
+    assert result["passed"] is True
+    assert result["fault_mode"] == "synthetic_control_plane"
+    assert result["generation_before"] == 8
+    assert result["generation_after"] == 9
+    assert result["restart_count_before"] == 2
+    assert result["restart_count_after"] == 3
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_semantic_readiness_failure_never_reports_ready(
+    tmp_path: Path, monkeypatch
+):
+    settings = settings_for(tmp_path)
+    db = Database(settings.studio.database)
+    await db.init()
+    manager = ManagedSessionManager(settings, db)
+    project = tmp_path / "projects" / "alpha"
+    project.mkdir()
+    await manager.register_workspace(key="alpha", project_path=str(project))
+    raw = await db.create_managed_session(
+        name="Alpha",
+        workspace_key="alpha",
+        project_path=str(project.resolve()),
+        server_id="serena-8001",
+        port=43144,
+        desired_state="running",
+    )
+
+    class FakeProcess:
+        pid = 99001
+        returncode = None
+
+    async def fake_spawn(item):
+        await db.update_managed_session_runtime(
+            item["id"],
+            status="starting",
+            pid=FakeProcess.pid,
+            endpoint=f"http://127.0.0.1:{item['port']}/mcp",
+            increment_generation=True,
+        )
+        await manager._set_language_runtime_state(item["id"], state="starting")
+        return SimpleNamespace(process=FakeProcess(), log_handle=None)
+
+    async def fake_wait_ready(item, process):
+        return None
+
+    async def fake_wait_semantic_ready(item, process):
+        raise ManagedSessionError("language server semantic probe failed")
+
+    async def fake_terminate(session_id, *, preserve_desired):
+        manager._instances.pop(session_id, None)
+        await db.update_managed_session_runtime(
+            session_id,
+            status="stopped",
+            pid=None,
+            error=None,
+        )
+
+    monkeypatch.setattr(manager, "_port_available", lambda port: True)
+    monkeypatch.setattr(manager, "_spawn", fake_spawn)
+    monkeypatch.setattr(manager, "_wait_ready", fake_wait_ready)
+    monkeypatch.setattr(manager, "_wait_semantic_ready", fake_wait_semantic_ready)
+    monkeypatch.setattr(manager, "_terminate_instance", fake_terminate)
+
+    with pytest.raises(ManagedSessionError, match="semantic probe failed"):
+        await manager.ensure_running(raw["id"])
+
+    failed = await manager.get_session(raw["id"])
+    assert failed["status"] == "error"
+    assert failed["language_runtime"]["state"] == "degraded"
+    assert "semantic probe failed" in failed["language_runtime"]["last_error"]

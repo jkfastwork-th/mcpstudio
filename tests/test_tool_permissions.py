@@ -48,6 +48,7 @@ def test_classifies_serena_read_write_and_destructive_tools():
     assert classify_tool("replace_in_files", {"dry_run": False}) == "write"
     assert classify_tool("safe_delete_symbol", {}) == "destructive"
     assert classify_tool("activate_project", {"project": "alpha"}) == "execute"
+    assert classify_tool("mcpstudio_certify_language_runtime_recovery", {}) == "execute"
     assert classify_tool("herdr_prompt_agent", {"agent_id": "w1:pA"}) == "execute"
     assert classify_tool("herdr_wait_agent", {"agent_id": "w1:pA"}) == "read"
 
@@ -57,6 +58,7 @@ def test_shell_classifier_keeps_read_write_execute_separate():
     assert classify_shell_command("pytest -q tests") == "execute"
     assert classify_shell_command("uv run pytest -q tests") == "execute"
     assert classify_shell_command("python3 -m unittest -v tests.test_tool_permissions") == "execute"
+    assert classify_shell_command("./.venv/bin/python -m py_compile mcp_studio/gateway.py") == "execute"
     assert classify_shell_command("./.venv/bin/python scripts/certify-live-session-handoff.py --help") == "execute"
     assert classify_shell_command("git add x.py && git commit -m test") == "write"
     assert classify_shell_command("git push origin review/remove-hca") == "execute"

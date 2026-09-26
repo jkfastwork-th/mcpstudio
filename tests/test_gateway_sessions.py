@@ -373,3 +373,41 @@ def test_tools_list_prepends_machine_management_and_backend_tools(tmp_path: Path
     assert "hirda__desktop_commander__read_file" in names
     assert names.index("mcpstudio_list_machines") < names.index("serena_tool")
     assert names.index("hirda__desktop_commander__read_file") < names.index("serena_tool")
+
+
+def test_language_runtime_error_detects_sse_lsp_failure():
+    content = (
+        b'data: {"jsonrpc":"2.0","id":1,"result":{"content":'
+        b'[{"type":"text","text":"Language server pyright timed out"}],'
+        b'"isError":true}}\n\n'
+    )
+    error = GatewaySessionManager._language_runtime_error(
+        content, "text/event-stream"
+    )
+    assert error == "Language server pyright timed out"
+
+
+def test_language_runtime_error_detects_json_lsp_failure():
+    content = (
+        b'{"jsonrpc":"2.0","id":1,"result":{"content":'
+        b'[{"type":"text","text":"solidLSP process closed unexpectedly"}],'
+        b'"isError":true}}'
+    )
+    error = GatewaySessionManager._language_runtime_error(
+        content, "application/json"
+    )
+    assert error == "solidLSP process closed unexpectedly"
+
+
+def test_language_runtime_error_does_not_retry_ordinary_tool_error():
+    content = (
+        b'{"jsonrpc":"2.0","id":1,"result":{"content":'
+        b'[{"type":"text","text":"File does not exist"}],'
+        b'"isError":true}}'
+    )
+    assert (
+        GatewaySessionManager._language_runtime_error(
+            content, "application/json"
+        )
+        is None
+    )

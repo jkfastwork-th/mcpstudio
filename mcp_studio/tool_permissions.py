@@ -38,6 +38,7 @@ _EXECUTE_TOOLS = {
     "mcpstudio_handoff_session", "mcpstudio_accept_handoff", "mcpstudio_report_context_usage",
     "mcpstudio_world_authoring_preview", "mcpstudio_world_authoring_audit",
     "mcpstudio_close_session", "mcpstudio_detach_session",
+    "mcpstudio_certify_language_runtime_recovery",
     "mcpstudio_set_lane_state", "mcpstudio_approve_capsule_handoff",
     "fern_inbox_claim", "fern_reply_submit", "fern_interjection_decide",
 }
@@ -166,7 +167,12 @@ def _segment_class(segment: str) -> ToolClass:
     if command in _EXECUTE_COMMANDS:
         return "execute"
     if command in {"python", "python3"}:
-        if len(tokens) >= 3 and tokens[1:3] in (["-m", "pytest"], ["-m", "unittest"], ["-m", "compileall"]):
+        if len(tokens) >= 3 and tokens[1:3] in (
+            ["-m", "pytest"],
+            ["-m", "unittest"],
+            ["-m", "compileall"],
+            ["-m", "py_compile"],
+        ):
             return "execute"
         # Running a concrete Python script is execution, not an unknown shell
         # mutation. Workspace-scope enforcement separately rejects absolute or

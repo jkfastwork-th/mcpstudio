@@ -50,6 +50,7 @@ class ManagedSessionManager:
         self._lock = asyncio.Lock()
         self._create_lock = asyncio.Lock()
         self._workspace_lock = asyncio.Lock()
+        self._runtime_recovery_lock = asyncio.Lock()
         self._monitor_task: asyncio.Task | None = None
         self._stopping = False
 
@@ -497,6 +498,7 @@ class ManagedSessionManager:
             endpoint=f"http://127.0.0.1:{item['port']}/mcp",
             log_path=str(log_path), increment_generation=True,
         )
+        await self._set_language_runtime_state(item["id"], state="starting")
         return RunningInstance(item["id"], process, log_handle)
 
     async def _wait_ready(self, item: dict[str, Any], process: asyncio.subprocess.Process) -> None:
@@ -518,6 +520,51 @@ class ManagedSessionManager:
                 last_error = exc
             await asyncio.sleep(0.35)
         raise ManagedSessionError(f"managed Serena readiness timeout: {last_error or 'no response'}")
+
+    async def _wait_semantic_ready(
+        self,
+        item: dict[str, Any],
+        process: asyncio.subprocess.Process,
+    ) -> None:
+        endpoint = str(
+            item.get("endpoint")
+            or f"http://127.0.0.1:{item['port']}/mcp"
+        )
+        deadline = (
+            asyncio.get_running_loop().time()
+            + float(self.settings.studio.managed_session_start_timeout_seconds)
+        )
+        last_error: Exception | None = None
+        while asyncio.get_running_loop().time() < deadline:
+            if process.returncode is not None:
+                raise ManagedSessionError(
+                    f"Serena exited before semantic readiness rc={process.returncode}"
+                )
+            try:
+                await MCPClient(
+                    endpoint,
+                    timeout=min(
+                        5.0,
+                        float(self.settings.studio.request_timeout_seconds),
+                    ),
+                    protocol_version="2025-06-18",
+                ).call_tool(
+                    "find_symbol",
+                    {
+                        "name_path_pattern": "__hirda_semantic_readiness_probe__",
+                        "relative_path": "",
+                        "include_body": False,
+                        "max_matches": 1,
+                    },
+                    client_name="hirda-semantic-readiness",
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+            await asyncio.sleep(0.35)
+        raise ManagedSessionError(
+            f"managed Serena semantic readiness timeout: {last_error or 'no response'}"
+        )
 
     async def ensure_running(self, session_id: str) -> dict[str, Any]:
         if not self.enabled:
@@ -542,8 +589,27 @@ class ManagedSessionManager:
                 latest = await self.db.get_managed_session(session_id)
                 await self._wait_ready(latest, instance.process)
                 latest = await self.db.update_managed_session_runtime(
-                    session_id, status="ready", pid=instance.process.pid, error=None,
+                    session_id,
+                    status="starting",
+                    pid=instance.process.pid,
+                    error=None,
                     endpoint=f"http://127.0.0.1:{latest['port']}/mcp",
+                )
+                await self._set_language_runtime_state(
+                    session_id,
+                    state="probing",
+                )
+                await self._wait_semantic_ready(latest, instance.process)
+                latest = await self.db.update_managed_session_runtime(
+                    session_id,
+                    status="ready",
+                    pid=instance.process.pid,
+                    error=None,
+                    endpoint=f"http://127.0.0.1:{latest['port']}/mcp",
+                )
+                latest = await self._set_language_runtime_state(
+                    session_id,
+                    state="ready",
                 )
                 await self.db.add_event(
                     "managed.session.ready",
@@ -552,9 +618,172 @@ class ManagedSessionManager:
                 )
                 return latest
             except Exception as exc:
+                await self._set_language_runtime_state(
+                    session_id,
+                    state="degraded",
+                    error=str(exc),
+                )
                 await self._terminate_instance(session_id, preserve_desired=True)
-                await self.db.update_managed_session_runtime(session_id, status="error", pid=None, error=str(exc))
+                await self.db.update_managed_session_runtime(
+                    session_id, status="error", pid=None, error=str(exc)
+                )
                 raise
+
+    async def _set_language_runtime_state(
+        self,
+        session_id: str,
+        *,
+        state: str,
+        error: str | None = None,
+        increment_restart: bool = False,
+    ) -> dict[str, Any]:
+        session = await self.db.get_managed_session(session_id)
+        metadata = dict(session.get("metadata") or {})
+        previous = dict(metadata.get("language_runtime") or {})
+        restart_count = int(previous.get("restart_count") or 0)
+        if increment_restart:
+            restart_count += 1
+        metadata["language_runtime"] = {
+            "state": state,
+            "owner_generation": int(session.get("generation") or 0),
+            "restart_count": restart_count,
+            "last_error": error,
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        return await self.db.update_managed_session_metadata(session_id, metadata)
+
+    async def certify_language_runtime_recovery(
+        self,
+        session_id: str,
+        *,
+        confirm: str,
+        probe_file: str = "mcp_studio/managed_sessions.py",
+        actor: str = "chatgpt/mcp",
+    ) -> dict[str, Any]:
+        if str(confirm or "").strip() != "FAULT_INJECTION":
+            raise ManagedSessionError(
+                'language runtime certification requires confirm="FAULT_INJECTION"'
+            )
+
+        session = await self.ensure_running(session_id)
+        generation_before = int(session.get("generation") or 0)
+        runtime_before = dict((session.get("metadata") or {}).get("language_runtime") or {})
+        restart_before = int(runtime_before.get("restart_count") or 0)
+        endpoint = session.get("endpoint") or f"http://127.0.0.1:{session['port']}/mcp"
+        probe_args = {"relative_path": str(probe_file)}
+
+        try:
+            await MCPClient(
+                endpoint,
+                timeout=max(5.0, float(self.settings.studio.request_timeout_seconds)),
+                protocol_version="2025-06-18",
+            ).call_tool(
+                "get_symbols_overview",
+                probe_args,
+                client_name="hirda-language-runtime-certifier",
+            )
+        except Exception as exc:
+            raise ManagedSessionError(f"pre-fault semantic probe failed: {exc}") from exc
+
+        injected_error = "CERTIFICATION_INJECTED_LANGUAGE_SERVER_FAILURE"
+        recovered = await self.recover_language_runtime(
+            session_id,
+            reason=injected_error,
+            actor="system/lsp-certification",
+        )
+        recovered_endpoint = recovered.get("endpoint") or (
+            f"http://127.0.0.1:{recovered['port']}/mcp"
+        )
+        try:
+            await MCPClient(
+                recovered_endpoint,
+                timeout=max(5.0, float(self.settings.studio.request_timeout_seconds)),
+                protocol_version="2025-06-18",
+            ).call_tool(
+                "get_symbols_overview",
+                probe_args,
+                client_name="hirda-language-runtime-certifier",
+            )
+        except Exception as exc:
+            raise ManagedSessionError(
+                f"post-recovery semantic probe failed: {exc}"
+            ) from exc
+
+        final = await self.get_session(session_id)
+        generation_after = int(final.get("generation") or 0)
+        runtime_after = dict(final.get("language_runtime") or {})
+        restart_after = int(runtime_after.get("restart_count") or 0)
+        passed = bool(
+            generation_after > generation_before
+            and restart_after == restart_before + 1
+            and runtime_after.get("state") == "ready"
+            and int(runtime_after.get("owner_generation") or -1) == generation_after
+        )
+        result = {
+            "certification": "hirda-language-runtime-recovery-v1",
+            "passed": passed,
+            "fault_injected": True,
+            "fault_mode": "synthetic_control_plane",
+            "semantic_probe_before": "passed",
+            "semantic_probe_after": "passed",
+            "generation_before": generation_before,
+            "generation_after": generation_after,
+            "restart_count_before": restart_before,
+            "restart_count_after": restart_after,
+            "language_runtime": runtime_after,
+            "injected_error": injected_error,
+            "probe_file": str(probe_file),
+        }
+        await self.db.add_audit(
+            "managed.session.language_runtime_certify",
+            actor=actor,
+            target_type="managed_session",
+            target_id=session_id,
+            data=result,
+        )
+        return result
+
+    async def recover_language_runtime(
+        self,
+        session_id: str,
+        *,
+        reason: str,
+        actor: str = "system/lsp-recovery",
+    ) -> dict[str, Any]:
+        async with self._runtime_recovery_lock:
+            await self._set_language_runtime_state(
+                session_id,
+                state="degraded",
+                error=reason,
+                increment_restart=True,
+            )
+            before = await self.db.get_managed_session(session_id)
+            await self._terminate_instance(session_id, preserve_desired=True)
+            await self.db.set_managed_session_desired_state(session_id, "running")
+            recovered = await self.ensure_running(session_id)
+            await self.db.add_audit(
+                "managed.session.language_runtime_recover",
+                actor=actor,
+                target_type="managed_session",
+                target_id=session_id,
+                data={
+                    "workspace_key": recovered.get("workspace_key"),
+                    "reason": reason[:1000],
+                    "generation_before": int(before.get("generation") or 0),
+                    "generation_after": int(recovered.get("generation") or 0),
+                },
+            )
+            await self.db.add_event(
+                "managed.session.language_runtime_recovered",
+                f"Recovered language runtime for {session_id}",
+                data={
+                    "managed_session_id": session_id,
+                    "workspace_key": recovered.get("workspace_key"),
+                    "generation_before": int(before.get("generation") or 0),
+                    "generation_after": int(recovered.get("generation") or 0),
+                },
+            )
+            return recovered
 
     async def _terminate_instance(self, session_id: str, *, preserve_desired: bool) -> None:
         instance = self._instances.pop(session_id, None)
@@ -639,6 +868,8 @@ class ManagedSessionManager:
         item = dict(session)
         item["tool_permissions"] = effective_policy(self.settings.studio, item)
         item["tool_permissions_enabled"] = bool(self.settings.studio.managed_session_tool_permissions_enabled)
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        item["language_runtime"] = dict(metadata.get("language_runtime") or {})
         return item
 
     async def get_session(self, session_id: str) -> dict[str, Any]:

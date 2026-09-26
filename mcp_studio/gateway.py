@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -594,6 +595,20 @@ class GatewaySessionManager:
                 "name": "mcpstudio_current_session",
                 "description": "Show the managed session currently attached to this MCP transport.",
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            {
+                "name": "mcpstudio_certify_language_runtime_recovery",
+                "description": "Run an explicit synthetic language-runtime fault certification against the attached managed session. Performs semantic pre/post probes, rotates the managed Serena generation through the real recovery path, and reports PASS/FAIL. Requires confirm=FAULT_INJECTION.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session": {"type": "string"},
+                        "confirm": {"type": "string", "enum": ["FAULT_INJECTION"]},
+                        "probe_file": {"type": "string", "default": "mcp_studio/managed_sessions.py"},
+                    },
+                    "required": ["confirm"],
+                    "additionalProperties": False,
+                },
             },
             {
                 "name": "mcpstudio_detach_session",
@@ -1960,6 +1975,56 @@ class GatewaySessionManager:
             "hirda_world_authority": False,
         }
 
+    async def _certification_semantic_probe(
+        self,
+        gateway_session_id: str,
+        *,
+        relative_path: str,
+    ) -> None:
+        gateway = await self.db.get_gateway_session(gateway_session_id)
+        upstream_url = str(gateway.get("upstream_url") or "")
+        upstream_session_id = str(gateway.get("upstream_session_id") or "")
+        if not upstream_url or not upstream_session_id:
+            raise ManagedSessionError("gateway has no initialized upstream session")
+
+        payload = {
+            "jsonrpc": "2.0",
+            "id": f"lsp-cert-{uuid4().hex[:12]}",
+            "method": "tools/call",
+            "params": {
+                "name": "get_symbols_overview",
+                "arguments": {"relative_path": str(relative_path)},
+            },
+        }
+        headers = {
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+            "Mcp-Session-Id": upstream_session_id,
+            "User-Agent": "hirda-language-runtime-certifier/1",
+        }
+        client, response = await self._send(
+            server_url=upstream_url,
+            method="POST",
+            headers=headers,
+            body=json.dumps(payload).encode("utf-8"),
+            stream=True,
+        )
+        try:
+            content = await response.aread()
+            if response.status_code >= 400:
+                raise ManagedSessionError(
+                    f"semantic probe HTTP {response.status_code}"
+                )
+            error = self._language_runtime_error(
+                content,
+                response.headers.get("content-type", "application/json"),
+            )
+            if error:
+                raise ManagedSessionError(f"semantic probe failed: {error}")
+        finally:
+            await response.aclose()
+            await client.aclose()
+
     async def _handle_management_tool(self, gateway_session_id: str, name: str, args: dict[str, Any]) -> Any:
         if not self.managed_sessions:
             raise ManagedSessionError("managed sessions are unavailable")
@@ -2245,6 +2310,91 @@ class GatewaySessionManager:
                 token=str(args.get("token") or ""),
                 actor="chatgpt/mcp",
             )
+        if name == "mcpstudio_certify_language_runtime_recovery":
+            if str(args.get("confirm") or "").strip() != "FAULT_INJECTION":
+                raise ManagedSessionError(
+                    'language runtime certification requires confirm="FAULT_INJECTION"'
+                )
+            selector = str(args.get("session") or "").strip()
+            if selector:
+                target = await self._resolve_managed_session(selector)
+            else:
+                gateway = await self.db.get_gateway_session(gateway_session_id)
+                managed_id = str(gateway.get("managed_session_id") or "")
+                if not managed_id:
+                    logical = await self.db.get_session(gateway["studio_session_id"])
+                    managed_id = str(logical.get("managed_session_id") or "")
+                if not managed_id:
+                    raise ManagedSessionError("no managed session is attached")
+                target = await self.managed_sessions.get_session(managed_id)
+
+            probe_file = str(
+                args.get("probe_file") or "mcp_studio/managed_sessions.py"
+            )
+            await self.bind_managed_session(
+                gateway_session_id,
+                target["id"],
+                actor="system/lsp-certification",
+            )
+            before = await self.managed_sessions.get_session(target["id"])
+            runtime_before = dict(before.get("language_runtime") or {})
+            generation_before = int(before.get("generation") or 0)
+            restart_before = int(runtime_before.get("restart_count") or 0)
+
+            await self._certification_semantic_probe(
+                gateway_session_id,
+                relative_path=probe_file,
+            )
+            recovered = await self.managed_sessions.recover_language_runtime(
+                target["id"],
+                reason="CERTIFICATION_INJECTED_LANGUAGE_SERVER_FAILURE",
+                actor="system/lsp-certification",
+            )
+            await self.bind_managed_session(
+                gateway_session_id,
+                recovered["id"],
+                actor="system/lsp-certification",
+            )
+            await self._certification_semantic_probe(
+                gateway_session_id,
+                relative_path=probe_file,
+            )
+
+            final = await self.managed_sessions.get_session(target["id"])
+            runtime_after = dict(final.get("language_runtime") or {})
+            generation_after = int(final.get("generation") or 0)
+            restart_after = int(runtime_after.get("restart_count") or 0)
+            passed = bool(
+                generation_after > generation_before
+                and restart_after == restart_before + 1
+                and runtime_after.get("state") == "ready"
+                and int(runtime_after.get("owner_generation") or -1)
+                == generation_after
+            )
+            result = {
+                "certification": "hirda-language-runtime-recovery-v1",
+                "passed": passed,
+                "fault_injected": True,
+                "fault_mode": "synthetic_control_plane",
+                "semantic_probe_transport": "gateway_private_upstream_session",
+                "semantic_probe_before": "passed",
+                "semantic_probe_after": "passed",
+                "generation_before": generation_before,
+                "generation_after": generation_after,
+                "restart_count_before": restart_before,
+                "restart_count_after": restart_after,
+                "language_runtime": runtime_after,
+                "injected_error": "CERTIFICATION_INJECTED_LANGUAGE_SERVER_FAILURE",
+                "probe_file": probe_file,
+            }
+            await self.db.add_audit(
+                "managed.session.language_runtime_certify",
+                actor="chatgpt/mcp",
+                target_type="managed_session",
+                target_id=target["id"],
+                data=result,
+            )
+            return result
         if name == "mcpstudio_current_session":
             gateway = await self.db.get_gateway_session(gateway_session_id)
             # Gateway transports are ephemeral (ChatGPT may open a fresh one for
@@ -2295,6 +2445,65 @@ class GatewaySessionManager:
     @staticmethod
     def _response_headers(response: httpx.Response) -> dict[str, str]:
         return {k: v for k, v in response.headers.items() if k.lower() not in HOP_BY_HOP and k.lower() != "mcp-session-id"}
+
+    @staticmethod
+    def _language_runtime_error(content: bytes, content_type: str) -> str | None:
+        """Return a compact recoverable LSP error, otherwise None."""
+        payloads: list[dict[str, Any]] = []
+        try:
+            if "text/event-stream" in str(content_type or ""):
+                for line in content.decode("utf-8", errors="replace").splitlines():
+                    if not line.startswith("data:"):
+                        continue
+                    raw = line[5:].strip()
+                    if not raw or raw == "[DONE]":
+                        continue
+                    value = json.loads(raw)
+                    if isinstance(value, dict):
+                        payloads.append(value)
+            else:
+                value = json.loads(content.decode("utf-8", errors="replace"))
+                if isinstance(value, dict):
+                    payloads.append(value)
+        except Exception:
+            return None
+
+        for payload in payloads:
+            result = payload.get("result")
+            if not isinstance(result, dict) or not result.get("isError"):
+                continue
+            blocks = result.get("content")
+            if not isinstance(blocks, list):
+                continue
+            message = "\n".join(
+                str(block.get("text") or "")
+                for block in blocks
+                if isinstance(block, dict) and block.get("type") == "text"
+            ).strip()
+            if not message:
+                continue
+            lowered = message.casefold()
+            signatures = (
+                "language server",
+                "language_server",
+                "solidlsp",
+                "pyright",
+                "basedpyright",
+                "pylsp",
+                "typescript-language-server",
+                "tsserver",
+                "rust-analyzer",
+                "jdtls",
+                "clangd",
+            )
+            if any(signature in lowered for signature in signatures):
+                return message[:2000]
+            if "lsp" in lowered and any(
+                token in lowered
+                for token in ("failed", "error", "timeout", "timed out", "closed", "crash", "unavailable")
+            ):
+                return message[:2000]
+        return None
 
     async def _send(
         self,
@@ -3096,6 +3305,143 @@ class GatewaySessionManager:
             headers = self._proxy_headers(request, session.get("upstream_session_id"))
             client, response = await self._send(
                 server_url=target_url, method=request.method, headers=headers, body=body, stream=True
+            )
+
+        # Serena can remain MCP-healthy while its project language server is
+        # dead or wedged. Buffer managed Serena tool results so HIRDA can detect
+        # that narrow failure mode, rotate the worker generation, and replay
+        # the original call exactly once. Ordinary tool errors are never retried.
+        if (
+            request.method == "POST"
+            and rpc_method == "tools/call"
+            and session.get("managed_session_id")
+            and self.managed_sessions is not None
+        ):
+            ctype = response.headers.get("content-type", "")
+            buffered_response_headers = self._response_headers(response)
+            content = await response.aread()
+            status_code = response.status_code
+            runtime_error = self._language_runtime_error(content, ctype)
+            await response.aclose()
+            await client.aclose()
+
+            if runtime_error:
+                managed_id = str(session["managed_session_id"])
+                await self.db.add_event(
+                    "managed.session.language_runtime_failure",
+                    f"Language runtime failure detected for {managed_id}",
+                    severity="warning",
+                    server_id=server.id,
+                    data={
+                        "managed_session_id": managed_id,
+                        "gateway_session_id": gateway_session_id,
+                        "tool": tool_name,
+                        "error": runtime_error[:1000],
+                    },
+                )
+                try:
+                    await self.managed_sessions.recover_language_runtime(
+                        managed_id,
+                        reason=runtime_error,
+                        actor="system/gateway-lsp-recovery",
+                    )
+                    rebound = await self.bind_managed_session(
+                        gateway_session_id,
+                        managed_id,
+                        actor="system/gateway-lsp-recovery",
+                    )
+                    session = rebound["gateway_session"]
+                    target_url = session.get("upstream_url") or server.url
+                    headers = self._proxy_headers(
+                        request, session.get("upstream_session_id")
+                    )
+                    client, response = await self._send(
+                        server_url=target_url,
+                        method=request.method,
+                        headers=headers,
+                        body=body,
+                        stream=True,
+                    )
+                    ctype = response.headers.get("content-type", "")
+                    buffered_response_headers = self._response_headers(response)
+                    content = await response.aread()
+                    status_code = response.status_code
+                    await response.aclose()
+                    await client.aclose()
+                    retry_error = self._language_runtime_error(content, ctype)
+                    await self.db.add_event(
+                        "managed.session.language_runtime_replay",
+                        (
+                            f"Language runtime replay {'failed' if retry_error else 'succeeded'} "
+                            f"for {managed_id}"
+                        ),
+                        severity="warning" if retry_error else "info",
+                        server_id=server.id,
+                        data={
+                            "managed_session_id": managed_id,
+                            "gateway_session_id": gateway_session_id,
+                            "tool": tool_name,
+                            "recovered": retry_error is None,
+                            "retry_error": retry_error[:1000] if retry_error else None,
+                        },
+                    )
+                except Exception as exc:
+                    await self.db.add_event(
+                        "managed.session.language_runtime_recovery_failed",
+                        f"Language runtime recovery failed for {managed_id}: {exc}",
+                        severity="error",
+                        server_id=server.id,
+                        data={
+                            "managed_session_id": managed_id,
+                            "gateway_session_id": gateway_session_id,
+                            "tool": tool_name,
+                            "error": str(exc)[:1000],
+                        },
+                    )
+                    return local_tool_response(
+                        {
+                            "error": "LANGUAGE_RUNTIME_RECOVERY_FAILED",
+                            "message": str(exc),
+                            "tool": tool_name,
+                            "managed_session_id": managed_id,
+                        },
+                        is_error=True,
+                    )
+
+            response_headers = {
+                **buffered_response_headers,
+                "Mcp-Session-Id": gateway_session_id,
+                "X-MCP-Studio-Session-Id": session["studio_session_id"],
+                "X-MCP-Studio-Generation": str(session["generation"]),
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            }
+            if session.get("managed_session_id"):
+                response_headers["X-MCP-Studio-Managed-Session-Id"] = str(
+                    session["managed_session_id"]
+                )
+            if session.get("last_tunnel_id"):
+                response_headers["X-MCP-Studio-Tunnel-Id"] = str(
+                    session["last_tunnel_id"]
+                )
+            if context_notice:
+                content = self._augment_tool_result_context_notice(
+                    content, ctype, context_notice
+                )
+            await record_reflex_outcome(
+                status_code,
+                "buffered-lsp-recovery" if runtime_error else "buffered-managed-tool",
+            )
+            media = (
+                "text/event-stream"
+                if "text/event-stream" in ctype
+                else "application/json"
+            )
+            return Response(
+                content=content,
+                status_code=status_code,
+                headers=response_headers,
+                media_type=media,
             )
 
         response_headers = self._response_headers(response)
