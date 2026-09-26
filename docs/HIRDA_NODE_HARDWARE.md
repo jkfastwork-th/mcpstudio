@@ -60,6 +60,10 @@ Model inventories now use the same node observation pipeline with backend lineag
 
 Capability advertisements now share the same node observation pipeline and remain separate from policy/authority. See `docs/HIRDA_NODE_CAPABILITIES.md`.
 
+## N6 integration
+
+Hardware resource facts now complement refreshable health/load observations and stale-aware availability. See `docs/HIRDA_NODE_HEALTH.md`.
+
 ## Next milestone
 
-N6 — Health / Load / Availability.
+N7 — Capability Router Integration.

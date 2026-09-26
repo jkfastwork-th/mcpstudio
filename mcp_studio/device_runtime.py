@@ -20,6 +20,7 @@ from .node_backends import normalize_backend_probe_specs, probe_configured_backe
 from .node_hardware import probe_hardware_resources
 from .node_models import probe_configured_models
 from .node_capabilities import build_capability_advertisement
+from .node_health import probe_node_health
 
 
 class DeviceRuntimeError(RuntimeError):
@@ -471,7 +472,17 @@ class DeviceRuntime:
             "runtime.backends": backends,
             "runtime.models": models,
             "capabilities.advertised": capabilities,
+            "health.availability": probe_node_health(
+                self.config.backend_probes,
+                storage_path=storage_path,
+            ),
         }
+
+    def node_health_observation(self) -> dict[str, Any]:
+        return probe_node_health(
+            self.config.backend_probes,
+            storage_path=Path(self.config.identity_path).parent,
+        )
 
     async def _run_connection(self) -> None:
         async with websockets.connect(
@@ -515,6 +526,17 @@ class DeviceRuntime:
                             timeout=self.config.heartbeat_seconds,
                         )
                     except TimeoutError:
+                        await websocket.send(
+                            json.dumps(
+                                {
+                                    "type": "node_observations",
+                                    "observations": {
+                                        "health.availability": self.node_health_observation(),
+                                    },
+                                },
+                                separators=(",", ":"),
+                            )
+                        )
                         await websocket.send(
                             json.dumps({"type": "heartbeat"}, separators=(",", ":"))
                         )

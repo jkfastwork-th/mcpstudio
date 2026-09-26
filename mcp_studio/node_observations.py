@@ -5,6 +5,7 @@ from typing import Any, Callable
 from .node_backends import normalize_backend_observation
 from .node_capabilities import normalize_capability_advertisement
 from .node_hardware import normalize_hardware_resources
+from .node_health import normalize_health_observation
 from .node_models import normalize_model_observation
 
 
@@ -15,6 +16,7 @@ _OBSERVATION_NORMALIZERS: dict[str, ObservationNormalizer] = {
     "runtime.backends": normalize_backend_observation,
     "runtime.models": normalize_model_observation,
     "capabilities.advertised": normalize_capability_advertisement,
+    "health.availability": normalize_health_observation,
 }
 
 
@@ -143,6 +145,17 @@ def ingest_node_observations(
             ) in known_model_refs
         ]
         accepted["capabilities.advertised"] = capabilities
+
+    health = accepted.get("health.availability")
+    if isinstance(health, dict):
+        health = dict(health)
+        health["node_id"] = str(node_id)
+        health["backends"] = [
+            item
+            for item in health.get("backends", [])
+            if item.get("backend_id") in known_backend_ids
+        ]
+        accepted["health.availability"] = health
 
     for facet, normalized in accepted.items():
         enrich(

@@ -28,6 +28,7 @@ from mcp_studio.node_backends import (
 )
 from mcp_studio.node_models import probe_configured_models
 from mcp_studio.node_capabilities import build_capability_advertisement
+from mcp_studio.node_health import probe_node_health
 
 
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
@@ -296,6 +297,10 @@ class Handler(BaseHTTPRequestHandler):
                     model_observation,
                     backend_specs=backend_probes,
                 )
+                health_observation = probe_node_health(
+                    backend_probes,
+                    storage_path=Path.cwd(),
+                )
                 self._json(
                     200,
                     {
@@ -312,6 +317,7 @@ class Handler(BaseHTTPRequestHandler):
                             "runtime.backends": backend_observation,
                             "runtime.models": model_observation,
                             "capabilities.advertised": capability_observation,
+                            "health.availability": health_observation,
                         },
                     },
                 )

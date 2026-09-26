@@ -103,6 +103,38 @@ def _normalize_model_probe(raw: Any, *, backend_id: str) -> dict[str, Any] | Non
     }
 
 
+def _normalize_health_probe(raw: Any, *, backend_id: str) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise NodeBackendDiscoveryError(
+            f"node backend probe {backend_id} health_probe must be an object"
+        )
+
+    command_raw = raw.get("command")
+    if isinstance(command_raw, str):
+        command = [command_raw.strip()] if command_raw.strip() else []
+    elif isinstance(command_raw, list):
+        command = [
+            str(part).strip()
+            for part in command_raw
+            if str(part).strip()
+        ][:32]
+    else:
+        command = []
+    if not command:
+        raise NodeBackendDiscoveryError(
+            f"node backend probe {backend_id} health_probe requires command"
+        )
+
+    timeout_seconds = float(raw.get("timeout_seconds") or 2.0)
+    timeout_seconds = max(0.25, min(10.0, timeout_seconds))
+    return {
+        "command": command,
+        "timeout_seconds": timeout_seconds,
+    }
+
+
 def normalize_backend_probe_specs(raw: Any) -> list[dict[str, Any]]:
     if raw in (None, []):
         return []
@@ -155,6 +187,10 @@ def normalize_backend_probe_specs(raw: Any) -> list[dict[str, Any]]:
             item.get("model_probe"),
             backend_id=backend_id,
         )
+        health_probe = _normalize_health_probe(
+            item.get("health_probe"),
+            backend_id=backend_id,
+        )
         result.append(
             {
                 "id": backend_id,
@@ -165,6 +201,7 @@ def normalize_backend_probe_specs(raw: Any) -> list[dict[str, Any]]:
                 "capabilities": _string_list(item.get("capabilities")),
                 "model_capabilities": _string_list(item.get("model_capabilities")),
                 "model_probe": model_probe,
+                "health_probe": health_probe,
             }
         )
         seen.add(backend_id)

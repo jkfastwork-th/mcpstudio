@@ -32,6 +32,9 @@ backend_probes: []
 #       json_path: [models]
 #       id_field: id
 #       name_field: name
+#     health_probe:
+#       command: [my-runtime, health]
+#       timeout_seconds: 2
 
 # Logical HIRDA workspace key -> local path on THIS device.
 # The control plane sends only the key, never its own absolute path.

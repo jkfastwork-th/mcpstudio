@@ -29,6 +29,10 @@ class NodeRegistry(MachineRegistry):
     schema = NODE_REGISTRY_SCHEMA
 
     def __init__(self, studio: Any, **kwargs: Any) -> None:
+        self.health_stale_after_seconds = max(
+            1.0,
+            float(getattr(studio, "node_health_stale_after_seconds", 45.0)),
+        )
         super().__init__(studio, **kwargs)
         for node in self.list():
             source = str(node.metadata.get("registry_source") or "").strip()
@@ -210,3 +214,26 @@ class NodeRegistry(MachineRegistry):
         metadata[_NODE_METADATA_KEY] = lifecycle
         node.metadata = metadata
         return node
+
+
+    def availability(
+        self,
+        node_id: str,
+        *,
+        stale_after_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        from .node_health import evaluate_health_availability
+
+        lifecycle = self.lifecycle(node_id)
+        facets = ((lifecycle.get("enrichment") or {}).get("facets") or {})
+        raw = ((facets.get("health.availability") or {}).get("data") or {})
+        result = evaluate_health_availability(
+            raw,
+            stale_after_seconds=(
+                self.health_stale_after_seconds
+                if stale_after_seconds is None
+                else stale_after_seconds
+            ),
+        )
+        result["node_id"] = str(node_id)
+        return result

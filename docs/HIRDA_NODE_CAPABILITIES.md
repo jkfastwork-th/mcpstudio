@@ -57,6 +57,10 @@ Node capabilities originate from the node's configured/runtime declaration. Back
 
 HIRDA core does not contain provider, runtime, or model-family capability tables. Provider-specific adapters may translate their native metadata into this generic observation contract.
 
+## N6 integration
+
+Capability claims now have a separate refreshable health/load/availability signal with freshness semantics. See `docs/HIRDA_NODE_HEALTH.md`.
+
 ## Next milestone
 
-N6 — Health / Load / Availability: add refreshable node/backend health and load observations so later routing can distinguish capability from current availability.
+N7 — Capability Router Integration: combine capability lineage, policy, health, freshness, and availability without weakening the existing machine-policy ceiling.

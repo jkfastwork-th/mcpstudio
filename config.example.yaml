@@ -174,6 +174,11 @@ studio:
   #      json_path: [models]
   #      id_field: id
   #      name_field: name
+  #    health_probe:
+  #      command: [my-runtime, health]
+  #      timeout_seconds: 2
+  #node_health_interval_seconds: 15
+  #node_health_stale_after_seconds: 45
 
   # Safe auto-onboarding: HIRDA scans online Tailnet peers for a machine agent,
   # records unknown nodes as pending, and requires explicit approval.

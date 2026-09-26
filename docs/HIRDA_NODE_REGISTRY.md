@@ -50,6 +50,10 @@ Models are discovered beneath existing backends and stored in the versioned `run
 
 Node/backend/model capability claims now use the versioned `capabilities.advertised` facet with lineage enforced against N3/N4 inventories. Advertisement remains observational and does not grant permission or routing authority. See `docs/HIRDA_NODE_CAPABILITIES.md`.
 
+## N6 health/load/availability
+
+Health observations now use the versioned `health.availability` facet with periodic refresh, backend health probes, stale evaluation, and immediate offline marking for disconnected Device Runtime sessions. See `docs/HIRDA_NODE_HEALTH.md`.
+
 ## Next milestone
 
-N6 — Health / Load / Availability.
+N7 — Capability Router Integration.

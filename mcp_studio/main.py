@@ -50,6 +50,7 @@ from .node_hardware import refresh_local_node_hardware
 from .node_backends import refresh_local_node_backends
 from .node_models import refresh_local_node_models
 from .node_capabilities import refresh_local_node_capabilities
+from .node_health import NodeHealthMonitor, mark_node_unavailable
 from .node_observations import ingest_node_observations
 from .machine_enrollment import MachineEnrollmentManager, MachineEnrollmentError
 from .device_pairing import DevicePairingManager, DevicePairingError
@@ -133,6 +134,12 @@ refresh_local_node_models(
 refresh_local_node_capabilities(
     machine_registry, settings.studio.node_backend_probes
 )
+node_health_monitor = NodeHealthMonitor(
+    machine_registry,
+    settings.studio.node_backend_probes,
+    storage_path=settings.config_path.parent,
+    interval_seconds=settings.studio.node_health_interval_seconds,
+)
 machine_enrollment = MachineEnrollmentManager(
     settings.studio, machine_registry, base_dir=settings.config_path.parent
 )
@@ -164,6 +171,7 @@ async def lifespan(app: FastAPI):
     # recorded in lifecycle state and never prevent the HIRDA control plane from starting.
     await integration_manager.snapshot(reconcile=True)
     await machine_enrollment.start()
+    await node_health_monitor.start()
     await workers.start()
     await health.start()
     await herdr.start()
@@ -176,6 +184,7 @@ async def lifespan(app: FastAPI):
     await db.add_audit("studio.start", actor="system", data={"version": "0.9.10-m6.2.5", "production_mode": settings.studio.production_mode})
     yield
     await db.add_audit("studio.stop", actor="system", data={"version": "0.9.10-m6.2.5"})
+    await node_health_monitor.stop()
     await machine_enrollment.stop()
     await integration_manager.close()
     await connectivity.stop()
@@ -1356,6 +1365,14 @@ async def device_broker_ws(websocket: WebSocket):
     finally:
         if connection_id:
             await device_broker.unregister_connection(device_id, connection_id)
+            status = await device_broker.connection_status(device_id)
+            if not status.get("connected") and machine_registry.contains(device_id):
+                mark_node_unavailable(
+                    machine_registry,
+                    device_id,
+                    source="device_broker",
+                    state="offline",
+                )
 
 
 @app.post("/api/device-pairing/sessions")

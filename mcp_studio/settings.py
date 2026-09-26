@@ -186,6 +186,8 @@ class StudioConfig:
     machine_local_id: str = "openclaw"
     machine_registry: list[dict[str, Any]] = field(default_factory=list)
     node_backend_probes: list[dict[str, Any]] = field(default_factory=list)
+    node_health_interval_seconds: float = 15.0
+    node_health_stale_after_seconds: float = 45.0
     machine_enrollment_enabled: bool = False
     machine_enrollment_state_path: str = "data/machine-enrollment.json"
     machine_enrollment_agent_port: int = 8765
@@ -512,6 +514,14 @@ def load_settings(path: str | Path) -> Settings:
     for item in studio.node_backend_probes:
         if not isinstance(item, dict):
             raise ValueError("studio.node_backend_probes entries must be objects")
+    if float(studio.node_health_interval_seconds) < 5:
+        raise ValueError("studio.node_health_interval_seconds must be >= 5")
+    if float(studio.node_health_stale_after_seconds) <= float(
+        studio.node_health_interval_seconds
+    ):
+        raise ValueError(
+            "studio.node_health_stale_after_seconds must be greater than node_health_interval_seconds"
+        )
 
     if studio.machine_enrollment_enabled:
         if not (1024 <= int(studio.machine_enrollment_agent_port) <= 65535):

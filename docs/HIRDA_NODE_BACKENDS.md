@@ -56,6 +56,10 @@ Backend-scoped model probes now populate the versioned `runtime.models` facet. T
 
 Backend and model capability claims now reference the N3/N4 lineage and are stored separately from backend identity. See `docs/HIRDA_NODE_CAPABILITIES.md`.
 
+## N6 health integration
+
+Backend specs may now declare generic bounded health probes, and their current availability is reported separately from backend identity. See `docs/HIRDA_NODE_HEALTH.md`.
+
 ## Next milestone
 
-N6 — Health / Load / Availability.
+N7 — Capability Router Integration.

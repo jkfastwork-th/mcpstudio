@@ -59,6 +59,10 @@ Model inventory remains refreshable observation state, not durable node identity
 
 Model capability claims now live in the separate `capabilities.advertised` facet and are accepted only when their backend/model lineage exists in N3/N4 observations. See `docs/HIRDA_NODE_CAPABILITIES.md`.
 
+## N6 integration
+
+Model identity remains separate from health; N6 contributes node/backend availability that N7 can combine with this model lineage. See `docs/HIRDA_NODE_HEALTH.md`.
+
 ## Next milestone
 
-N6 — Health / Load / Availability.
+N7 — Capability Router Integration.
