@@ -61,6 +61,15 @@ def test_shell_classifier_keeps_read_write_execute_separate():
     assert classify_shell_command("./.venv/bin/python -m py_compile mcp_studio/gateway.py") == "execute"
     assert classify_shell_command("./.venv/bin/python scripts/certify-live-session-handoff.py --help") == "execute"
     assert classify_shell_command("git add x.py && git commit -m test") == "write"
+    assert classify_shell_command("git worktree list") == "read"
+    assert classify_shell_command("git worktree add ../mcp-studio-permission-classifier HEAD") == "write"
+    assert classify_shell_command("git worktree move ../old ../new") == "write"
+    assert classify_shell_command("git worktree remove ../old") == "destructive"
+    assert classify_shell_command("git worktree prune") == "destructive"
+    assert classify_tool(
+        "execute_shell_command",
+        {"command": "git worktree add ../mcp-studio-permission-classifier HEAD"},
+    ) == "write"
     assert classify_shell_command("git push origin review/remove-hca") == "execute"
     assert classify_shell_command("git reset --hard HEAD") == "destructive"
     assert classify_shell_command("python -c 'open(\"x\",\"w\").write(\"x\")'") == "unknown"
