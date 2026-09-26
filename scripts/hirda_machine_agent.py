@@ -26,6 +26,7 @@ from mcp_studio.node_backends import (
     normalize_backend_probe_specs,
     probe_configured_backends,
 )
+from mcp_studio.node_models import probe_configured_models
 
 
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
@@ -300,6 +301,7 @@ class Handler(BaseHTTPRequestHandler):
                         "observations": {
                             "hardware.resources": probe_hardware_resources(Path.cwd()),
                             "runtime.backends": probe_configured_backends(backend_probes),
+                            "runtime.models": probe_configured_models(backend_probes),
                         },
                     },
                 )

@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from .desktop_commander_relay import AgentError, DesktopCommanderRelay
 from .node_backends import normalize_backend_probe_specs, probe_configured_backends
 from .node_hardware import probe_hardware_resources
+from .node_models import probe_configured_models
 
 
 class DeviceRuntimeError(RuntimeError):
@@ -459,6 +460,9 @@ class DeviceRuntime:
         return {
             "hardware.resources": probe_hardware_resources(storage_path),
             "runtime.backends": probe_configured_backends(
+                self.config.backend_probes
+            ),
+            "runtime.models": probe_configured_models(
                 self.config.backend_probes
             ),
         }

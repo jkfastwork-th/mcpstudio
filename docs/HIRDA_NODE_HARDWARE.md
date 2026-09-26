@@ -52,6 +52,10 @@ No product, AI runtime, model family, hardware vendor, or provider is privileged
 
 Runtime/backend observations now travel through the same node observation pipeline as hardware/resource observations. See `docs/HIRDA_NODE_BACKENDS.md`.
 
+## N4 integration
+
+Model inventories now use the same node observation pipeline with backend lineage enforced by the control plane. See `docs/HIRDA_NODE_MODELS.md`.
+
 ## Next milestone
 
-N4 — Model Discovery.
+N5 — Capability Advertisement.

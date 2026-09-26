@@ -42,6 +42,10 @@ Hardware/resource observations now enrich the existing node through the versione
 
 Configured runtime/backend probes now enrich the existing node through the versioned `runtime.backends` facet. Local control plane, legacy Machine Agent, and Shared Device Runtime use the same observation contract. See `docs/HIRDA_NODE_BACKENDS.md`.
 
+## N4 model discovery
+
+Models are discovered beneath existing backends and stored in the versioned `runtime.models` facet with explicit node/backend lineage. See `docs/HIRDA_NODE_MODELS.md`.
+
 ## Next milestone
 
-N4 — Model Discovery: enumerate models exposed by discovered inference backends while preserving backend and node identity boundaries.
+N5 — Capability Advertisement.

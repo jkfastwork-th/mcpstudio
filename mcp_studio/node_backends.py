@@ -36,6 +36,73 @@ def _string_list(value: Any, *, limit: int = 32) -> list[str]:
     return result
 
 
+def _normalize_model_probe(raw: Any, *, backend_id: str) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise NodeBackendDiscoveryError(
+            f"node backend probe {backend_id} model_probe must be an object"
+        )
+
+    command_raw = raw.get("command")
+    if isinstance(command_raw, str):
+        command = [command_raw.strip()] if command_raw.strip() else []
+    elif isinstance(command_raw, list):
+        command = [
+            str(part).strip()
+            for part in command_raw
+            if str(part).strip()
+        ][:32]
+    else:
+        command = []
+    if not command:
+        raise NodeBackendDiscoveryError(
+            f"node backend probe {backend_id} model_probe requires command"
+        )
+
+    output_format = str(raw.get("format") or "lines").strip().lower()
+    if output_format not in {"lines", "json"}:
+        raise NodeBackendDiscoveryError(
+            f"node backend probe {backend_id} model_probe format must be lines or json"
+        )
+
+    json_path_raw = raw.get("json_path")
+    if json_path_raw is None:
+        json_path: list[str] = []
+    elif isinstance(json_path_raw, list):
+        json_path = [
+            str(part).strip()
+            for part in json_path_raw
+            if str(part).strip()
+        ][:8]
+    else:
+        raise NodeBackendDiscoveryError(
+            f"node backend probe {backend_id} model_probe json_path must be a list"
+        )
+
+    id_field = str(raw.get("id_field") or "id").strip()
+    name_field = str(raw.get("name_field") or "name").strip()
+    if not id_field or len(id_field) > 64:
+        raise NodeBackendDiscoveryError(
+            f"node backend probe {backend_id} model_probe id_field is invalid"
+        )
+    if not name_field or len(name_field) > 64:
+        raise NodeBackendDiscoveryError(
+            f"node backend probe {backend_id} model_probe name_field is invalid"
+        )
+
+    timeout_seconds = float(raw.get("timeout_seconds") or 5.0)
+    timeout_seconds = max(0.25, min(30.0, timeout_seconds))
+    return {
+        "command": command,
+        "format": output_format,
+        "json_path": json_path,
+        "id_field": id_field,
+        "name_field": name_field,
+        "timeout_seconds": timeout_seconds,
+    }
+
+
 def normalize_backend_probe_specs(raw: Any) -> list[dict[str, Any]]:
     if raw in (None, []):
         return []
@@ -84,6 +151,10 @@ def normalize_backend_probe_specs(raw: Any) -> list[dict[str, Any]]:
 
         timeout_seconds = float(item.get("timeout_seconds") or 2.0)
         timeout_seconds = max(0.25, min(10.0, timeout_seconds))
+        model_probe = _normalize_model_probe(
+            item.get("model_probe"),
+            backend_id=backend_id,
+        )
         result.append(
             {
                 "id": backend_id,
@@ -92,6 +163,7 @@ def normalize_backend_probe_specs(raw: Any) -> list[dict[str, Any]]:
                 "version_args": version_args,
                 "timeout_seconds": timeout_seconds,
                 "capabilities": _string_list(item.get("capabilities")),
+                "model_probe": model_probe,
             }
         )
         seen.add(backend_id)

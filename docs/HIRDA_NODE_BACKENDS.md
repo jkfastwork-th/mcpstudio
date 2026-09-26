@@ -48,6 +48,10 @@ Node Registry and N3 discovery core do not contain product-specific runtime rule
 
 The existing Claude/Codex/Hermes lane inventory remains a separate operator/UI concern and is not used as Node Registry runtime truth.
 
+## N4 model discovery
+
+Backend-scoped model probes now populate the versioned `runtime.models` facet. The control plane stamps `node_id` and rejects inventories whose `backend_id` is not present in that node's discovered backend set. See `docs/HIRDA_NODE_MODELS.md`.
+
 ## Next milestone
 
-N4 — Model Discovery: enumerate models exposed by discovered inference backends while preserving backend and node identity boundaries.
+N5 — Capability Advertisement.

@@ -167,6 +167,12 @@ studio:
   #    command: [my-runtime]
   #    version_args: [--version]
   #    capabilities: [text-generation]
+  #    model_probe:
+  #      command: [my-runtime, models, --json]
+  #      format: json
+  #      json_path: [models]
+  #      id_field: id
+  #      name_field: name
 
   # Safe auto-onboarding: HIRDA scans online Tailnet peers for a machine agent,
   # records unknown nodes as pending, and requires explicit approval.
