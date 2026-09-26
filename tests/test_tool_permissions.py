@@ -57,6 +57,7 @@ def test_shell_classifier_keeps_read_write_execute_separate():
     assert classify_shell_command("git status && git diff --stat") == "read"
     assert classify_shell_command("pytest -q tests") == "execute"
     assert classify_shell_command("uv run pytest -q tests") == "execute"
+    assert classify_shell_command("uvx openbrowser-ai==0.1.54 --help") == "execute"
     assert classify_shell_command("python3 -m unittest -v tests.test_tool_permissions") == "execute"
     assert classify_shell_command("./.venv/bin/python -m py_compile mcp_studio/gateway.py") == "execute"
     assert classify_shell_command("./.venv/bin/python scripts/certify-live-session-handoff.py --help") == "execute"

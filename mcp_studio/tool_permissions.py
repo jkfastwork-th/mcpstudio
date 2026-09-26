@@ -66,7 +66,7 @@ _READ_COMMANDS = {
     "sort", "sed", "journalctl", "ss",
 }
 _EXECUTE_COMMANDS = {
-    "pytest", "uv", "make", "cmake", "ctest", "ninja", "node", "npm", "pnpm", "yarn",
+    "pytest", "uv", "uvx", "make", "cmake", "ctest", "ninja", "node", "npm", "pnpm", "yarn",
     "cargo", "go", "ruff", "mypy", "eslint", "tsc", "mcporter", "herdr", "curl",
 }
 _PATH_ARGUMENT_KEYS = {

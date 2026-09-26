@@ -31,6 +31,28 @@ _PERMISSION_MAP: dict[str, str] = {
 _TAB_ID = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
 
 
+def _resolve_browser_executable(runtime_root: Path) -> Path | None:
+    requested = str(os.getenv("HIRDA_OPENBROWSER_EXECUTABLE", "") or "").strip()
+    if requested:
+        candidate = Path(requested).expanduser().resolve(strict=False)
+        return candidate if candidate.is_file() else None
+
+    managed_root = runtime_root / "playwright-browsers"
+    managed = sorted(managed_root.glob("chromium-*/chrome-linux*/chrome"), reverse=True)
+    if managed:
+        return managed[0].resolve(strict=False)
+
+    for name in ("google-chrome-stable", "google-chrome", "chromium-browser", "chromium"):
+        resolved = shutil.which(name)
+        if not resolved:
+            continue
+        candidate = Path(resolved).resolve(strict=False)
+        if str(candidate).startswith("/snap/") or str(resolved).startswith("/snap/"):
+            continue
+        return candidate
+    return None
+
+
 class OpenBrowserAdapterError(RuntimeError):
     pass
 
@@ -242,6 +264,9 @@ class _OpenBrowserSessionClient:
         xdg_cache = self.runtime_root / "xdg-cache"
         xdg_config = self.runtime_root / "xdg-config"
         xdg_data = self.runtime_root / "xdg-data"
+        xdg_runtime = self.runtime_root / "xdg-runtime"
+        temp_root = self.runtime_root / "tmp"
+        playwright_browsers = self.runtime_root / "playwright-browsers"
         for directory in (
             self.runtime_root,
             self.profile_dir,
@@ -250,6 +275,9 @@ class _OpenBrowserSessionClient:
             xdg_cache,
             xdg_config,
             xdg_data,
+            xdg_runtime,
+            temp_root,
+            playwright_browsers,
         ):
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
             try:
@@ -262,7 +290,34 @@ class _OpenBrowserSessionClient:
         env["XDG_CACHE_HOME"] = str(xdg_cache)
         env["XDG_CONFIG_HOME"] = str(xdg_config)
         env["XDG_DATA_HOME"] = str(xdg_data)
+        env["XDG_RUNTIME_DIR"] = str(xdg_runtime)
+        env["TMPDIR"] = str(temp_root)
+        env["PLAYWRIGHT_BROWSERS_PATH"] = str(playwright_browsers)
         env["OPENBROWSER_HEADLESS"] = "true"
+
+        browser_executable = _resolve_browser_executable(self.runtime_root)
+        if browser_executable is not None:
+            config_path = self.runtime_root / "hirda-openbrowser-config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "browser_profile": {
+                            "hirda": {
+                                "id": "hirda",
+                                "default": True,
+                                "executable_path": str(browser_executable),
+                                "chromium_sandbox": False,
+                            }
+                        },
+                        "llm": {},
+                        "agent": {},
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            env["OPENBROWSER_CONFIG_PATH"] = str(config_path)
         # OpenBrowser MCP creates a disposable per-process profile unless this
         # environment variable is set explicitly. The CLI flag alone is not
         # sufficient for MCP profile reuse across server restarts.

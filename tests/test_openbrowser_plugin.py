@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -152,6 +153,16 @@ async def test_session_process_uses_persistent_profile_and_graceful_eof(monkeypa
             self.returncode = -9
 
     process = FakeProcess()
+    managed_browser = (
+        tmp_path
+        / "runtime"
+        / "playwright-browsers"
+        / "chromium-1243"
+        / "chrome-linux64"
+        / "chrome"
+    )
+    managed_browser.parent.mkdir(parents=True, exist_ok=True)
+    managed_browser.write_text("#!/bin/sh\n", encoding="utf-8")
 
     async def fake_create_subprocess_exec(*args, **kwargs):
         captured["env"] = kwargs["env"]
@@ -173,6 +184,16 @@ async def test_session_process_uses_persistent_profile_and_graceful_eof(monkeypa
 
     assert captured["env"]["OPENBROWSER_USER_DATA_DIR"] == str(tmp_path / "profile")
     assert captured["env"]["OPENBROWSER_STORAGE_STATE"] == str(tmp_path / "profile" / "storage_state.json")
+    assert captured["env"]["TMPDIR"] == str(tmp_path / "runtime" / "tmp")
+    assert captured["env"]["XDG_RUNTIME_DIR"] == str(tmp_path / "runtime" / "xdg-runtime")
+    assert captured["env"]["PLAYWRIGHT_BROWSERS_PATH"] == str(
+        tmp_path / "runtime" / "playwright-browsers"
+    )
+    config_path = Path(captured["env"]["OPENBROWSER_CONFIG_PATH"])
+    config = json.loads(config_path.read_text())
+    profile = config["browser_profile"]["hirda"]
+    assert profile["executable_path"] == str(managed_browser.resolve(strict=False))
+    assert profile["chromium_sandbox"] is False
 
     await client.close()
     assert process.stdin.closed is True
