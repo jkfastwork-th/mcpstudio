@@ -34,6 +34,10 @@ No product, model runtime, or hardware vendor is privileged by Node Registry cor
 
 The product surface remains Machines for now. Existing machine IDs, machine APIs, per-machine policies, session bindings, provider contracts, and workspace behavior remain valid.
 
+## N2 hardware/resource discovery
+
+Hardware/resource observations now enrich the existing node through the versioned `hardware.resources` facet. They remain observational cache rather than durable identity or policy. See `docs/HIRDA_NODE_HARDWARE.md`.
+
 ## Next milestone
 
-N2 — Hardware & Resource Discovery: observe hardware/resources and enrich the existing node record without replacing its identity, lifecycle, provider set, or policy.
+N3 — Runtime / Backend Discovery: discover execution and inference backends and enrich the same node record without creating a separate Local AI subsystem.

@@ -46,6 +46,7 @@ from .graft import GraftManager, GraftError
 from .integrations import build_integration_manager
 from .machine_registry import MachineRegistryError
 from .node_registry import NodeRegistry
+from .node_hardware import refresh_local_node_hardware
 from .machine_enrollment import MachineEnrollmentManager, MachineEnrollmentError
 from .device_pairing import DevicePairingManager, DevicePairingError
 from .device_pairing_web import render_pairing_page
@@ -115,6 +116,9 @@ machine_registry = NodeRegistry(
     base_dir=settings.config_path.parent,
     device_pairing=device_pairing,
     device_broker=device_broker,
+)
+refresh_local_node_hardware(
+    machine_registry, storage_path=settings.config_path.parent
 )
 machine_enrollment = MachineEnrollmentManager(
     settings.studio, machine_registry, base_dir=settings.config_path.parent

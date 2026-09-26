@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 
 from .machine_registry import MachineRegistry, MachineRegistryError
+from .node_hardware import normalize_hardware_resources
 
 _MACHINE_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
 _SAFE_DEFAULT_POLICY: dict[str, Any] = {
@@ -152,6 +153,11 @@ class MachineEnrollmentManager:
             if value in _ALLOWED_CAPABILITIES
         ]
         providers = identity.get("providers") if isinstance(identity.get("providers"), dict) else {}
+        raw_observations = identity.get("observations") if isinstance(identity.get("observations"), dict) else {}
+        hardware = normalize_hardware_resources(raw_observations.get("hardware.resources"))
+        observations: dict[str, Any] = {}
+        if hardware is not None:
+            observations["hardware.resources"] = hardware
         return {
             "schema": self.AGENT_SCHEMA,
             "machine_id": machine_id,
@@ -161,10 +167,30 @@ class MachineEnrollmentManager:
             "agent_version": str(identity.get("agent_version") or "unknown"),
             "capabilities": capabilities,
             "providers": providers,
+            "observations": observations,
             "address": address,
             "endpoint": self._agent_endpoint(address),
             "fingerprint": self._identity_fingerprint(identity),
         }
+
+    def _enrich_node_observations(
+        self,
+        machine_id: str,
+        identity: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        observations = identity.get("observations") if isinstance(identity.get("observations"), dict) else {}
+        hardware = normalize_hardware_resources(observations.get("hardware.resources"))
+        enrich = getattr(self.registry, "enrich_node", None)
+        if hardware is None or not callable(enrich):
+            return None
+        enrich(
+            machine_id,
+            facet="hardware.resources",
+            data=hardware,
+            source="machine_agent",
+            observed_at=hardware["observed_at"],
+        )
+        return hardware
 
     def _agent_endpoint(self, address: str) -> str:
         host = f"[{address}]" if ":" in address else address
@@ -266,6 +292,7 @@ class MachineEnrollmentManager:
                 "last_seen_at": now,
             }
             if self.registry.contains(machine_id):
+                self._enrich_node_observations(machine_id, candidate)
                 candidate["status"] = "registered"
                 observed.append(candidate)
                 continue
@@ -383,6 +410,7 @@ class MachineEnrollmentManager:
             },
         }
         machine = self.registry.register_machine(record, source="enrollment")
+        self._enrich_node_observations(key, candidate)
         self._state["pending"].pop(key, None)
         self._state["rejected"].pop(key, None)
         self._state["approved"][key] = {

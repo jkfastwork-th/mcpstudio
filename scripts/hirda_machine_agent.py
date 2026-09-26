@@ -20,6 +20,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from mcp_studio.desktop_commander_relay import AgentError, DesktopCommanderRelay
+from mcp_studio.node_hardware import probe_hardware_resources
 
 
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
@@ -290,6 +291,9 @@ class Handler(BaseHTTPRequestHandler):
                         "agent_version": self.agent_version,
                         "capabilities": capabilities,
                         "providers": providers,
+                        "observations": {
+                            "hardware.resources": probe_hardware_resources(Path.cwd()),
+                        },
                     },
                 )
                 return
