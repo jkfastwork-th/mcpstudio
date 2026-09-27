@@ -238,9 +238,19 @@ class StudioConfig:
     cognitive_router_enabled: bool = False
     cognitive_router_execute_enabled: bool = False
     cognitive_router_default_timeout_seconds: float = 30.0
+    cognitive_runtime_auto_recovery_enabled: bool = True
+    cognitive_runtime_recovery_successes: int = 3
+    cognitive_runtime_recovery_interval_seconds: float = 15.0
+    cognitive_semantic_routing_mode: str = "shadow"
+    cognitive_semantic_canary_min_margin: float = 0.03
+    cognitive_runtime_capability_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     cognitive_node_routing_mode: str = "off"
+    # Pane ownership is independent from semantic/runtime ranking. In shadow
+    # mode HIRDA reports which panes are cognitive-owned but preserves legacy
+    # selection; enforce mode permits automatic routing only to owned panes.
+    cognitive_pane_routing_mode: str = "off"
     cognitive_capability_routes: dict[str, str] = field(default_factory=dict)
-    cognitive_runtime_bindings: dict[str, dict[str, str]] = field(default_factory=dict)
+    cognitive_runtime_bindings: dict[str, dict[str, Any]] = field(default_factory=dict)
     cognitive_soak_window_minutes: int = 1440
     cognitive_soak_min_executions: int = 20
     cognitive_soak_failure_warn_percent: float = 5.0
@@ -390,12 +400,46 @@ class StudioConfig:
                 if len(geometry) != 2 or not all(part.isdigit() and int(part) > 0 for part in geometry):
                     raise ValueError("studio.computer_geometry must look like 1440x900")
 
+        semantic_mode = str(self.cognitive_semantic_routing_mode or "shadow").strip().lower()
+        if semantic_mode not in {"off", "shadow", "canary"}:
+            raise ValueError(
+                "studio.cognitive_semantic_routing_mode must be off, shadow, or canary"
+            )
+        self.cognitive_semantic_routing_mode = semantic_mode
+        semantic_canary_margin = float(
+            self.cognitive_semantic_canary_min_margin
+        )
+        if not 0.0 <= semantic_canary_margin <= 1.0:
+            raise ValueError(
+                "studio.cognitive_semantic_canary_min_margin must be between 0 and 1"
+            )
+        self.cognitive_semantic_canary_min_margin = semantic_canary_margin
+        if not isinstance(self.cognitive_runtime_capability_overrides, dict):
+            raise ValueError(
+                "studio.cognitive_runtime_capability_overrides must be an object"
+            )
+        for runtime_id, raw in self.cognitive_runtime_capability_overrides.items():
+            if not str(runtime_id or "").strip():
+                raise ValueError(
+                    "studio.cognitive_runtime_capability_overrides runtime id must be non-empty"
+                )
+            if not isinstance(raw, dict):
+                raise ValueError(
+                    "studio.cognitive_runtime_capability_overrides entries must be objects"
+                )
+
         mode = str(self.cognitive_node_routing_mode or "off").strip().lower()
         if mode not in {"off", "shadow", "enforce"}:
             raise ValueError(
                 "studio.cognitive_node_routing_mode must be off, shadow, or enforce"
             )
         self.cognitive_node_routing_mode = mode
+        pane_mode = str(self.cognitive_pane_routing_mode or "off").strip().lower()
+        if pane_mode not in {"off", "shadow", "enforce"}:
+            raise ValueError(
+                "studio.cognitive_pane_routing_mode must be off, shadow, or enforce"
+            )
+        self.cognitive_pane_routing_mode = pane_mode
         if not isinstance(self.cognitive_capability_routes, dict):
             raise ValueError("studio.cognitive_capability_routes must be an object")
         if not isinstance(self.cognitive_runtime_bindings, dict):
@@ -420,6 +464,21 @@ class StudioConfig:
                 raise ValueError(
                     "studio.cognitive_runtime_bindings model_id requires backend_id"
                 )
+            for selector_key in (
+                "pane_ids",
+                "pane_name_prefixes",
+                "pane_label_prefixes",
+            ):
+                selector = raw.get(selector_key, [])
+                if selector is None:
+                    selector = []
+                if not isinstance(selector, list) or any(
+                    not str(value or "").strip() for value in selector
+                ):
+                    raise ValueError(
+                        "studio.cognitive_runtime_bindings "
+                        f"{selector_key} must be a list of non-empty strings"
+                    )
 
         if not (1 <= int(self.cognitive_soak_window_minutes) <= 7 * 24 * 60):
             raise ValueError(

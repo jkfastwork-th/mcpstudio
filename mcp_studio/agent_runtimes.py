@@ -20,6 +20,67 @@ class AgentRuntimeInventory:
         ("hermes", "Hermes", "Nous / custom"),
     )
 
+    CAPABILITY_PROFILE_SCHEMA = "hirda-runtime-capability-profile-v1"
+    CAPABILITY_PROFILES = {
+        "claude": {
+            "skills": {
+                "social_reasoning": 0.92,
+                "persona_continuity": 0.96,
+                "reasoning": 0.98,
+                "multi_step_reasoning": 0.96,
+                "reflection": 0.96,
+                "research": 0.96,
+                "evidence_synthesis": 0.95,
+                "coding": 0.88,
+                "software_engineering": 0.84,
+                "fast_utility": 0.68,
+                "tool_operation": 0.84,
+            },
+            "quality": 0.98,
+            "latency": 0.58,
+            "cost_efficiency": 0.35,
+            "tool_use": 0.84,
+        },
+        "codex": {
+            "skills": {
+                "social_reasoning": 0.52,
+                "persona_continuity": 0.48,
+                "reasoning": 0.92,
+                "multi_step_reasoning": 0.90,
+                "reflection": 0.68,
+                "research": 0.78,
+                "evidence_synthesis": 0.76,
+                "coding": 0.99,
+                "software_engineering": 0.99,
+                "fast_utility": 0.62,
+                "tool_operation": 0.96,
+            },
+            "quality": 0.96,
+            "latency": 0.70,
+            "cost_efficiency": 0.45,
+            "tool_use": 0.98,
+        },
+        "hermes": {
+            "skills": {
+                "social_reasoning": 0.86,
+                "persona_continuity": 0.82,
+                "reasoning": 0.76,
+                "multi_step_reasoning": 0.70,
+                "reflection": 0.80,
+                "research": 0.72,
+                "evidence_synthesis": 0.68,
+                "coding": 0.66,
+                "software_engineering": 0.62,
+                "fast_utility": 0.96,
+                "tool_operation": 0.80,
+            },
+            "quality": 0.78,
+            "latency": 0.96,
+            "cost_efficiency": 0.95,
+            "tool_use": 0.82,
+        },
+    }
+
     AUTH_ENV = {
         "claude": ("ANTHROPIC_API_KEY",),
         "codex": ("OPENAI_API_KEY",),
@@ -603,6 +664,14 @@ class AgentRuntimeInventory:
                 "model": model,
                 "last_used_model": last_used_model,
                 "free": free,
+                "capability_profile": {
+                    "schema": self.CAPABILITY_PROFILE_SCHEMA,
+                    "source": "builtin_runtime_profile",
+                    **dict(self.CAPABILITY_PROFILES.get(key) or {}),
+                    "skills": dict(
+                        (self.CAPABILITY_PROFILES.get(key) or {}).get("skills") or {}
+                    ),
+                },
             }
             if key == "hermes":
                 item["nous_free"] = {

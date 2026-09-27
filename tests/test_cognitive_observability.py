@@ -312,6 +312,44 @@ async def test_report_aggregates_execution_soak_metrics():
     }
 
 
+
+@pytest.mark.asyncio
+async def test_report_aggregates_semantic_shadow_disagreement():
+    db = FakeDB()
+    observer = CognitiveObservability(
+        db,
+        FakeRuntimes(),
+        studio(cognitive_semantic_routing_mode="shadow"),
+    )
+    shadow_plan = plan()
+    shadow_plan["semantic_routing"] = {
+        "mode": "shadow",
+        "applied": False,
+        "current_selected": "claude",
+        "semantic_preference": "codex",
+        "would_select": "codex",
+        "changed": True,
+        "ranked_order": ["codex", "claude", "hermes"],
+        "rankings": [
+            {"runtime": "codex", "score": 0.94, "profile_source": "builtin_runtime_profile"},
+            {"runtime": "claude", "score": 0.84, "profile_source": "builtin_runtime_profile"},
+        ],
+    }
+
+    await observer.record_plan(
+        {"request_id": "REQ-SEMANTIC", "capability": "coding"},
+        shadow_plan,
+        elapsed_ms=8,
+    )
+
+    report = await observer.report(window_minutes=60)
+
+    assert report["semantic_routing_mode"] == "shadow"
+    assert report["metrics"]["semantic_shadow_plan_count"] == 1
+    assert report["metrics"]["semantic_shadow_disagreement_count"] == 1
+    assert report["metrics"]["semantic_shadow_disagreement_percent"] == 100.0
+    assert report["semantic_routing"]["preferred_runtimes"] == {"codex": 1}
+
 @pytest.mark.asyncio
 async def test_report_flags_suspected_false_rejection_for_review():
     db = FakeDB()
@@ -370,6 +408,32 @@ async def test_report_uses_24_hour_window_by_default():
 
 def test_soak_default_window_is_24_hours():
     assert StudioConfig().cognitive_soak_window_minutes == 1440
+
+
+def test_semantic_routing_defaults_to_shadow_and_validates_configuration():
+    cfg = StudioConfig()
+    assert cfg.cognitive_semantic_routing_mode == "shadow"
+    assert cfg.cognitive_semantic_canary_min_margin == pytest.approx(0.03)
+    assert cfg.cognitive_runtime_capability_overrides == {}
+
+    canary = StudioConfig(
+        cognitive_semantic_routing_mode="canary",
+        cognitive_semantic_canary_min_margin=0.05,
+    )
+    assert canary.cognitive_semantic_routing_mode == "canary"
+    assert canary.cognitive_semantic_canary_min_margin == pytest.approx(0.05)
+
+    with pytest.raises(ValueError, match="cognitive_semantic_routing_mode"):
+        StudioConfig(cognitive_semantic_routing_mode="enforce")
+    with pytest.raises(
+        ValueError,
+        match="cognitive_semantic_canary_min_margin",
+    ):
+        StudioConfig(cognitive_semantic_canary_min_margin=1.01)
+    with pytest.raises(ValueError, match="cognitive_runtime_capability_overrides"):
+        StudioConfig(
+            cognitive_runtime_capability_overrides={"codex": "invalid"}
+        )
 
 def test_soak_settings_validate_bounds():
     with pytest.raises(ValueError, match="cognitive_soak_window_minutes"):

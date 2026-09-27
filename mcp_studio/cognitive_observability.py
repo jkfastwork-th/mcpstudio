@@ -188,6 +188,55 @@ class CognitiveObservability:
             "suspected_false_rejections": suspected_false_rejections,
         }
 
+    @staticmethod
+    def _semantic_routing_summary(value: Any) -> dict[str, Any]:
+        semantic = dict(value) if isinstance(value, dict) else {}
+        rankings = []
+        for raw in semantic.get("rankings", []):
+            if not isinstance(raw, dict):
+                continue
+            rankings.append(
+                {
+                    "runtime": str(raw.get("runtime") or "").strip().casefold() or None,
+                    "score": _safe_float(raw.get("score")),
+                    "profile_source": str(raw.get("profile_source") or "").strip() or None,
+                }
+            )
+        return {
+            "mode": str(semantic.get("mode") or "off").strip().casefold(),
+            "applied": bool(semantic.get("applied")),
+            "current_selected": str(
+                semantic.get("current_selected") or ""
+            ).strip().casefold() or None,
+            "semantic_preference": str(
+                semantic.get("semantic_preference") or ""
+            ).strip().casefold() or None,
+            "would_select": str(
+                semantic.get("would_select") or ""
+            ).strip().casefold() or None,
+            "effective_selected": str(
+                semantic.get("effective_selected") or ""
+            ).strip().casefold() or None,
+            "changed": bool(semantic.get("changed")),
+            "top_margin": _safe_float(semantic.get("top_margin")),
+            "min_margin": _safe_float(semantic.get("min_margin")),
+            "guard_passed": bool(semantic.get("guard_passed")),
+            "guard_reasons": [
+                str(item)
+                for item in semantic.get("guard_reasons", [])
+                if str(item or "").strip()
+            ],
+            "explicit_constraint": str(
+                semantic.get("explicit_constraint") or ""
+            ).strip() or None,
+            "ranked_order": [
+                str(item or "").strip().casefold()
+                for item in semantic.get("ranked_order", [])
+                if str(item or "").strip()
+            ],
+            "rankings": rankings,
+        }
+
 
     async def _add_event(
         self,
@@ -223,6 +272,7 @@ class CognitiveObservability:
         request_id = str(request.get("request_id") or meta.get("request_id") or "").strip() or None
         capability = str(request.get("capability") or meta.get("capability") or "").strip() or None
         routing = self._routing_summary(plan.get("infrastructure_routing"))
+        semantic_routing = self._semantic_routing_summary(plan.get("semantic_routing"))
         data = {
             **meta,
             "request_id": request_id,
@@ -235,6 +285,7 @@ class CognitiveObservability:
                 if isinstance(item, dict) and str(item.get("runtime") or "").strip()
             ],
             "routing": routing,
+            "semantic_routing": semantic_routing,
             "identity_continuity": bool(plan.get("identity_continuity", True)),
             "semantic_authority_changed": bool(plan.get("semantic_authority_changed", False)),
             "elapsed_ms": round(max(0.0, float(elapsed_ms)), 3),
@@ -263,6 +314,7 @@ class CognitiveObservability:
         meta = _request_meta(payload)
         request_id = str(result.get("request_id") or meta.get("request_id") or "").strip() or None
         routing = self._routing_summary(result.get("infrastructure_routing"))
+        semantic_routing = self._semantic_routing_summary(result.get("semantic_routing"))
         attempts = []
         for raw in result.get("attempts", []):
             if not isinstance(raw, dict):
@@ -286,6 +338,7 @@ class CognitiveObservability:
             "fallback_used": bool(result.get("fallback_used")),
             "attempts": attempts,
             "routing": routing,
+            "semantic_routing": semantic_routing,
             "identity_continuity": bool(result.get("identity_continuity", True)),
             "semantic_authority_changed": bool(result.get("semantic_authority_changed", False)),
             "error": str(result.get("error") or "").strip() or None,
@@ -388,6 +441,9 @@ class CognitiveObservability:
         filtered_by_runtime: Counter[str] = Counter()
         selected_loads: list[float] = []
         selected_latencies: list[float] = []
+        semantic_shadow_plan_count = 0
+        semantic_shadow_disagreement_count = 0
+        semantic_preference_by_runtime: Counter[str] = Counter()
 
         for row in executions:
             data = row.get("data") or {}
@@ -445,6 +501,23 @@ class CognitiveObservability:
 
         for row in plans:
             data = row.get("data") or {}
+            semantic_routing = data.get("semantic_routing") or {}
+            if semantic_routing.get("mode") == "shadow":
+                semantic_shadow_plan_count += 1
+                preference = str(
+                    semantic_routing.get("semantic_preference") or ""
+                ).strip().casefold()
+                current_selected = str(
+                    semantic_routing.get("current_selected") or ""
+                ).strip().casefold()
+                if preference:
+                    semantic_preference_by_runtime[preference] += 1
+                if (
+                    preference
+                    and current_selected
+                    and preference != current_selected
+                ):
+                    semantic_shadow_disagreement_count += 1
             if bool(data.get("semantic_authority_changed")):
                 semantic_change_count += 1
             if not bool(data.get("identity_continuity", True)):
@@ -464,6 +537,16 @@ class CognitiveObservability:
         fallback_percent = (
             round(fallback_count / execution_count * 100.0, 3)
             if execution_count
+            else None
+        )
+        semantic_shadow_disagreement_percent = (
+            round(
+                semantic_shadow_disagreement_count
+                / semantic_shadow_plan_count
+                * 100.0,
+                3,
+            )
+            if semantic_shadow_plan_count
             else None
         )
 
@@ -528,6 +611,9 @@ class CognitiveObservability:
             "routing_mode": str(
                 getattr(self.studio, "cognitive_node_routing_mode", "off")
             ),
+            "semantic_routing_mode": str(
+                getattr(self.studio, "cognitive_semantic_routing_mode", "shadow")
+            ),
             "state": state,
             "state_reasons": reasons,
             "thresholds": {
@@ -549,6 +635,9 @@ class CognitiveObservability:
                 "suspected_false_rejection_count": suspected_false_rejection_count,
                 "semantic_authority_change_count": semantic_change_count,
                 "identity_continuity_failure_count": identity_failure_count,
+                "semantic_shadow_plan_count": semantic_shadow_plan_count,
+                "semantic_shadow_disagreement_count": semantic_shadow_disagreement_count,
+                "semantic_shadow_disagreement_percent": semantic_shadow_disagreement_percent,
                 "plan_avg_latency_ms": (
                     round(sum(plan_latencies) / len(plan_latencies), 3)
                     if plan_latencies
@@ -570,6 +659,9 @@ class CognitiveObservability:
                     selected_latencies,
                     0.95,
                 ),
+            },
+            "semantic_routing": {
+                "preferred_runtimes": dict(semantic_preference_by_runtime),
             },
             "runtime": {
                 "successes": dict(runtime_success),

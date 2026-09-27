@@ -270,6 +270,38 @@ async def test_real_n7_resolver_filters_cognitive_runtime_by_bound_node(
     assert plan["semantic_authority_changed"] is False
 
 
+def test_cognitive_pane_routing_settings_validate_mode_and_selectors():
+    cfg = StudioConfig(
+        cognitive_pane_routing_mode="shadow",
+        cognitive_runtime_bindings={
+            "hermes": {
+                "machine_id": "openclaw",
+                "backend_id": "hermes-runtime",
+                "pane_ids": ["wH:p1"],
+                "pane_name_prefixes": ["hirda-cognitive-"],
+                "pane_label_prefixes": ["cognition:"],
+            }
+        },
+    )
+    assert cfg.cognitive_pane_routing_mode == "shadow"
+
+    with pytest.raises(
+        ValueError,
+        match="cognitive_pane_routing_mode must be off, shadow, or enforce",
+    ):
+        StudioConfig(cognitive_pane_routing_mode="magic")
+
+    with pytest.raises(ValueError, match="pane_ids must be a list"):
+        StudioConfig(
+            cognitive_runtime_bindings={
+                "hermes": {
+                    "machine_id": "openclaw",
+                    "pane_ids": "wH:p1",
+                }
+            }
+        )
+
+
 def test_n8_settings_fail_closed_for_invalid_mode() -> None:
     with pytest.raises(ValueError, match="cognitive_node_routing_mode"):
         StudioConfig(cognitive_node_routing_mode="magic")

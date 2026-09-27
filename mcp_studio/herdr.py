@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+from collections import deque
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from .db import Database
@@ -63,6 +66,181 @@ def _count_items(value: Any, keys: tuple[str, ...]) -> int | None:
             count = _count_items(nested, keys)
             if count is not None:
                 return count
+    return None
+
+
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _message_text(message: Any) -> str:
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, dict) and isinstance(item.get("text"), str):
+            parts.append(item["text"])
+    return "\n".join(parts)
+
+
+def _read_agent_session_result(
+    pane: dict[str, Any] | None,
+    request_id: str,
+    *,
+    home: Path | None = None,
+    max_lines: int = 2000,
+) -> str | None:
+    """Read a framed result from an agent's durable session transcript.
+
+    This is a fallback for terminal UIs whose alternate-screen rendering does
+    not preserve the assistant response in host scrollback. Transcript reads
+    are bounded and require an exact HIRDA request marker.
+    """
+    if not pane or not request_id:
+        return None
+
+    start_marker = f"<<<HIRDA_COGNITIVE_RESULT:{request_id}>>>"
+    end_marker = "<<<END_HIRDA_COGNITIVE_RESULT>>>"
+    root_home = home or Path.home()
+    agent = str(pane.get("agent") or "").strip().casefold()
+
+    session = pane.get("agent_session")
+    source = ""
+    session_id = ""
+    if isinstance(session, dict):
+        source = str(session.get("source") or "").strip().casefold()
+        session_id = str(session.get("value") or "").strip()
+
+    def recent_lines(path: Path) -> deque[str] | None:
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                return deque(handle, maxlen=max(1, int(max_lines)))
+        except OSError:
+            return None
+
+    if source == "herdr:claude" and _SESSION_ID_RE.fullmatch(session_id):
+        root = root_home / ".claude" / "projects"
+        if not root.is_dir():
+            return None
+        cwd = str(
+            pane.get("cwd") or pane.get("foreground_cwd") or ""
+        ).strip()
+        candidates: list[Path] = []
+        if cwd:
+            candidates.append(
+                root / cwd.replace("/", "-") / f"{session_id}.jsonl"
+            )
+        if not any(path.is_file() for path in candidates):
+            candidates.extend(root.glob(f"*/{session_id}.jsonl"))
+
+        transcript = next(
+            (path for path in candidates if path.is_file()),
+            None,
+        )
+        if transcript is None:
+            return None
+        recent = recent_lines(transcript)
+        if recent is None:
+            return None
+
+        for raw_line in reversed(recent):
+            try:
+                row = json.loads(raw_line)
+            except Exception:
+                continue
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("type") or "").casefold() != "assistant":
+                continue
+            message = row.get("message")
+            if not isinstance(message, dict):
+                continue
+            if str(message.get("role") or "").casefold() != "assistant":
+                continue
+            text = _message_text(message)
+            if start_marker in text and end_marker in text:
+                return text
+        return None
+
+    if source == "herdr:codex" or agent == "codex":
+        root = root_home / ".codex" / "sessions"
+        if not root.is_dir():
+            return None
+
+        candidates: list[Path] = []
+        if session_id and _SESSION_ID_RE.fullmatch(session_id):
+            candidates.extend(root.rglob(f"*{session_id}.jsonl"))
+
+        if not candidates:
+            ranked: list[tuple[float, Path]] = []
+            for path in root.rglob("*.jsonl"):
+                if not path.is_file():
+                    continue
+                try:
+                    ranked.append((path.stat().st_mtime, path))
+                except OSError:
+                    continue
+            ranked.sort(key=lambda item: item[0], reverse=True)
+            candidates = [path for _mtime, path in ranked[:12]]
+
+        for transcript in candidates[:12]:
+            recent = recent_lines(transcript)
+            if recent is None:
+                continue
+            for raw_line in reversed(recent):
+                try:
+                    row = json.loads(raw_line)
+                except Exception:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+
+                text = ""
+                row_type = str(row.get("type") or "").casefold()
+                payload = row.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+
+                if row_type == "response_item":
+                    if (
+                        str(payload.get("type") or "").casefold() == "message"
+                        and str(payload.get("role") or "").casefold()
+                        == "assistant"
+                    ):
+                        content = payload.get("content")
+                        if isinstance(content, list):
+                            text = "\n".join(
+                                str(item.get("text") or "")
+                                for item in content
+                                if isinstance(item, dict)
+                                and str(item.get("type") or "").casefold()
+                                in {"output_text", "text"}
+                            )
+                elif row_type == "event_msg":
+                    item = payload.get("item")
+                    if (
+                        isinstance(item, dict)
+                        and str(item.get("type") or "").casefold()
+                        == "agentmessage"
+                    ):
+                        content = item.get("content")
+                        if isinstance(content, list):
+                            text = "\n".join(
+                                str(part.get("text") or "")
+                                for part in content
+                                if isinstance(part, dict)
+                                and str(part.get("type") or "").casefold()
+                                in {"text", "output_text"}
+                            )
+
+                if start_marker in text and end_marker in text:
+                    return text
+        return None
+
     return None
 
 
@@ -167,6 +345,13 @@ class HerdrManager:
                 str(p.get("pane_id") or ""),
             ),
         )[0]
+
+    def read_session_result(
+        self,
+        pane: dict[str, Any] | None,
+        request_id: str,
+    ) -> str | None:
+        return _read_agent_session_result(pane, request_id)
 
     def tool(self, name: str) -> dict[str, Any] | None:
         return self.tool_definitions.get(name)

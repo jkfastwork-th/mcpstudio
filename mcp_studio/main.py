@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import ipaddress
 import json
@@ -29,7 +30,7 @@ from .agent_runtimes import AgentRuntimeInventory
 from .models import (
     SessionCreate, SessionHeartbeat, WorkerBind, WorkerHeartbeat, WorkerStatePatch,
     WorkSubmit, WorkFinish, WorkFail, WorkDetach, AlertAcknowledge, RetryDispatch, FaultInject, BatchDispatch,
-    SessionReclaim, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate, ManagedSessionMachineUpdate, MachineCapabilityRouteRequest, MachineEnrollmentApprove, MachineEnrollmentReject, DevicePairingStart, DevicePairingVerify, DevicePairingApprove, DevicePairingReject, DeviceRevoke,
+    SessionReclaim, OAuthClientCreate, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate, ManagedSessionMachineUpdate, MachineCapabilityRouteRequest, MachineEnrollmentApprove, MachineEnrollmentReject, DevicePairingStart, DevicePairingVerify, DevicePairingApprove, DevicePairingReject, DeviceRevoke,
     GraftConfigureRequest, GraftQueryRequest, GraftRollbackRequest, ComputerRepairRequest, ManagedGatewayAttach, GatewayContextUsageReport, SessionHandoffPrepareRequest,
     CapsuleCreate, CapsuleStageUpdate, CapsuleHandoff, CapsuleHandoffAck, CapsuleContractUpdate,
     CapsuleHandoffValidation, CapsuleHandoffApproval, CapsuleHandoffCompletion, LaneStateUpdate, CapsuleComplete,
@@ -174,6 +175,13 @@ cognitive_observability = CognitiveObservability(
     agent_runtimes,
     settings.studio,
 )
+
+_COGNITIVE_EXECUTE_IDEMPOTENCY_TTL_SECONDS = 300.0
+_COGNITIVE_EXECUTE_IDEMPOTENCY_MAX_ENTRIES = 256
+_cognitive_execute_idempotency_lock = asyncio.Lock()
+_cognitive_execute_inflight: dict[str, tuple[str, asyncio.Task[dict[str, Any]]]] = {}
+_cognitive_execute_completed: dict[str, tuple[float, str, dict[str, Any]]] = {}
+
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
 
 
@@ -188,6 +196,7 @@ async def lifespan(app: FastAPI):
     await workers.start()
     await health.start()
     await herdr.start()
+    await cognitive_router.start_runtime_recovery()
     await managed_sessions.start()
     await operations.start()
     await observability.start()
@@ -197,6 +206,7 @@ async def lifespan(app: FastAPI):
     await db.add_audit("studio.start", actor="system", data={"version": "0.9.10-m6.2.5", "production_mode": settings.studio.production_mode})
     yield
     await db.add_audit("studio.stop", actor="system", data={"version": "0.9.10-m6.2.5"})
+    await cognitive_router.stop_runtime_recovery()
     await node_health_monitor.stop()
     await machine_enrollment.stop()
     await integration_manager.close()
@@ -428,6 +438,109 @@ async def oauth_status():
     }
 
 
+@app.post("/api/oauth/owner-approval-tokens")
+async def oauth_create_owner_approval_token(request: Request):
+    if not settings.studio.oauth_enabled:
+        raise HTTPException(status_code=404, detail="OAuth disabled")
+    owner_session = request.cookies.get("mcpstudio_owner_session", "")
+    root_token = request.headers.get("x-hirda-owner-approval", "")
+    peer = request.client.host if request.client else ""
+    local_admin = peer in {"127.0.0.1", "::1"}
+    if not (
+        local_admin
+        or oauth.verify_owner_session(owner_session)
+        or oauth.verify_owner_token(root_token)
+    ):
+        raise HTTPException(status_code=403, detail="Owner bootstrap approval required")
+    result = await oauth.create_owner_approval_token(
+        lifetime_seconds=600,
+        purpose="owner_approval",
+    )
+    await db.add_event(
+        "oauth.owner_approval_token.created",
+        "One-time owner approval token created",
+        data={
+            "purpose": result["purpose"],
+            "expires_at": result["expires_at"],
+            "max_uses": result["max_uses"],
+        },
+    )
+    return JSONResponse(
+        result,
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+    )
+
+
+@app.post("/api/oauth/clients")
+async def oauth_create_client(payload: OAuthClientCreate, request: Request):
+    if not settings.studio.oauth_enabled:
+        raise HTTPException(status_code=404, detail="OAuth disabled")
+    owner_session = request.cookies.get("mcpstudio_owner_session", "")
+    owner_token = request.headers.get("x-hirda-owner-approval", "")
+    peer = request.client.host if request.client else ""
+    local_admin = peer in {"127.0.0.1", "::1"}
+    owner_session_valid = oauth.verify_owner_session(owner_session)
+    owner_token_valid = False
+    if owner_token and not owner_session_valid:
+        owner_token_valid = await oauth.consume_owner_approval_token(
+            owner_token, purpose="owner_approval"
+        )
+    if not local_admin and not owner_session_valid and not owner_token_valid:
+        await db.add_event(
+            "oauth.client.create_denied",
+            "OAuth client creation denied: owner approval required",
+            severity="warning",
+            data={"client_name": payload.client_name},
+        )
+        raise HTTPException(status_code=403, detail="Owner approval required")
+    try:
+        item = await oauth.create_client(
+            redirect_uris=[payload.redirect_uri.strip()],
+            client_name=payload.client_name.strip(),
+            token_endpoint_auth_method=payload.token_endpoint_auth_method,
+            scopes=payload.scopes,
+            issue_secret=payload.token_endpoint_auth_method != "none",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.add_event(
+        "oauth.client.created",
+        f"OAuth client created for {item['client_name']}",
+        data={
+            "client_id": item["client_id"],
+            "client_name": item["client_name"],
+            "redirect_uris": item["redirect_uris"],
+            "scopes": item["scopes"],
+            "token_endpoint_auth_method": item["token_endpoint_auth_method"],
+        },
+    )
+    result = {
+        "client_id": item["client_id"],
+        "client_secret": item.get("client_secret"),
+        "client_name": item["client_name"],
+        "redirect_uris": item["redirect_uris"],
+        "scopes": item["scopes"],
+        "token_endpoint_auth_method": item["token_endpoint_auth_method"],
+        "issuer": oauth.issuer,
+        "resource": oauth.resource,
+    }
+    response = JSONResponse(
+        result,
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+    )
+    if owner_token_valid and not owner_session_valid:
+        response.set_cookie(
+            "mcpstudio_owner_session",
+            oauth.issue_owner_session(),
+            max_age=settings.studio.oauth_owner_session_ttl_seconds,
+            path="/",
+            secure=True,
+            httponly=True,
+            samesite="lax",
+        )
+    return response
+
+
 @app.get("/healthz")
 async def healthz():
     return {"ok": True, "version": "0.9.10-m6.2.5", "production_mode": settings.studio.production_mode}
@@ -595,6 +708,12 @@ async def cognitive_router_status():
         "schema": "hirda-cognitive-status-v1",
         "enabled": bool(settings.studio.cognitive_router_enabled),
         "execute_enabled": bool(settings.studio.cognitive_router_execute_enabled),
+        "semantic_routing": {
+            "mode": settings.studio.cognitive_semantic_routing_mode,
+            "runtime_capability_override_count": len(
+                settings.studio.cognitive_runtime_capability_overrides
+            ),
+        },
         "node_routing": {
             "mode": settings.studio.cognitive_node_routing_mode,
             "capability_mapping_count": len(
@@ -604,6 +723,7 @@ async def cognitive_router_status():
                 settings.studio.cognitive_runtime_bindings
             ),
         },
+        "pane_routing": cognitive_router.pane_routing_status(),
         "runtimes": snapshot,
         "identity_authority": "external",
         "semantic_authority": "external",
@@ -641,12 +761,40 @@ async def cognitive_router_plan(payload: dict[str, Any]):
         raise
 
 
-@app.post("/api/cognition/execute")
-async def cognitive_router_execute(payload: dict[str, Any]):
-    if not settings.studio.cognitive_router_enabled:
-        raise HTTPException(status_code=503, detail="HIRDA cognitive router is disabled")
-    if not settings.studio.cognitive_router_execute_enabled:
-        raise HTTPException(status_code=503, detail="HIRDA cognitive execution is disabled")
+def _cognitive_execute_fingerprint(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _prune_cognitive_execute_cache(now: float) -> None:
+    expired = [
+        request_id
+        for request_id, (stored_at, _fingerprint, _result) in
+        _cognitive_execute_completed.items()
+        if now - stored_at > _COGNITIVE_EXECUTE_IDEMPOTENCY_TTL_SECONDS
+    ]
+    for request_id in expired:
+        _cognitive_execute_completed.pop(request_id, None)
+
+    overflow = len(_cognitive_execute_completed) - _COGNITIVE_EXECUTE_IDEMPOTENCY_MAX_ENTRIES
+    if overflow > 0:
+        oldest = sorted(
+            _cognitive_execute_completed.items(),
+            key=lambda item: item[1][0],
+        )[:overflow]
+        for request_id, _entry in oldest:
+            _cognitive_execute_completed.pop(request_id, None)
+
+
+async def _execute_cognitive_request_once(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
     started = time.perf_counter()
     try:
         result = (await cognitive_router.execute(payload)).as_dict()
@@ -672,6 +820,72 @@ async def cognitive_router_execute(payload: dict[str, Any]):
             elapsed_ms=(time.perf_counter() - started) * 1000.0,
         )
         raise
+
+
+@app.post("/api/cognition/execute")
+async def cognitive_router_execute(payload: dict[str, Any]):
+    if not settings.studio.cognitive_router_enabled:
+        raise HTTPException(status_code=503, detail="HIRDA cognitive router is disabled")
+    if not settings.studio.cognitive_router_execute_enabled:
+        raise HTTPException(status_code=503, detail="HIRDA cognitive execution is disabled")
+
+    request_id = str(payload.get("request_id") or "").strip()
+    if not request_id:
+        return await _execute_cognitive_request_once(payload)
+
+    fingerprint = _cognitive_execute_fingerprint(payload)
+    task: asyncio.Task[dict[str, Any]]
+
+    async with _cognitive_execute_idempotency_lock:
+        now = time.monotonic()
+        _prune_cognitive_execute_cache(now)
+
+        cached = _cognitive_execute_completed.get(request_id)
+        if cached is not None:
+            _stored_at, cached_fingerprint, cached_result = cached
+            if cached_fingerprint != fingerprint:
+                raise HTTPException(
+                    status_code=409,
+                    detail="cognitive_request_id_conflict",
+                )
+            return dict(cached_result)
+
+        inflight = _cognitive_execute_inflight.get(request_id)
+        if inflight is not None:
+            inflight_fingerprint, task = inflight
+            if inflight_fingerprint != fingerprint:
+                raise HTTPException(
+                    status_code=409,
+                    detail="cognitive_request_id_conflict",
+                )
+        else:
+            task = asyncio.create_task(
+                _execute_cognitive_request_once(dict(payload))
+            )
+            _cognitive_execute_inflight[request_id] = (fingerprint, task)
+
+    try:
+        result = await asyncio.shield(task)
+    except Exception:
+        if task.done():
+            async with _cognitive_execute_idempotency_lock:
+                current = _cognitive_execute_inflight.get(request_id)
+                if current is not None and current[1] is task:
+                    _cognitive_execute_inflight.pop(request_id, None)
+        raise
+
+    async with _cognitive_execute_idempotency_lock:
+        current = _cognitive_execute_inflight.get(request_id)
+        if current is not None and current[1] is task:
+            _cognitive_execute_inflight.pop(request_id, None)
+        _cognitive_execute_completed[request_id] = (
+            time.monotonic(),
+            fingerprint,
+            dict(result),
+        )
+        _prune_cognitive_execute_cache(time.monotonic())
+
+    return dict(result)
 
 
 @app.get("/api/cognition/observability")

@@ -1,12 +1,15 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
+from mcp_studio.agent_runtimes import AgentRuntimeInventory
 from mcp_studio.cognitive_router import (
     CognitiveRouter,
     CognitiveRouterError,
     JevCognitiveJudgment,
     _extract_marked_result,
+    _runtime_terminal_error,
     normalize_cognitive_request,
 )
 
@@ -165,21 +168,113 @@ class FakeRuntimes:
         }
 
 
+class ProfiledHerdr(FakeHerdr):
+    def __init__(self):
+        super().__init__()
+        self.snapshot["panes"]["panes"].append(
+            {"pane_id": "wX:p1", "agent": "codex", "agent_status": "idle"}
+        )
+        self.outputs["wX:p1"] = "CODEX_RESULT"
+
+
+class ProfiledRuntimes(FakeRuntimes):
+    def __init__(self, *, codex_limit_status: str = "healthy"):
+        self.codex_limit_status = codex_limit_status
+
+    def snapshot(self, *, force=False):
+        data = super().snapshot(force=force)
+        by_id = {row["id"]: row for row in data["runtimes"]}
+        for runtime_id, row in by_id.items():
+            profile = AgentRuntimeInventory.CAPABILITY_PROFILES[runtime_id]
+            row["capability_profile"] = {
+                "schema": AgentRuntimeInventory.CAPABILITY_PROFILE_SCHEMA,
+                "source": "builtin_runtime_profile",
+                **profile,
+                "skills": dict(profile["skills"]),
+            }
+        codex_profile = AgentRuntimeInventory.CAPABILITY_PROFILES["codex"]
+        data["runtimes"].append(
+            {
+                "id": "codex",
+                "name": "Codex",
+                "brand": "OpenAI",
+                "provider": "OpenAI",
+                "model": "gpt-codex",
+                "installed": True,
+                "observed": True,
+                "status": "ready",
+                "free": False,
+                "auth_health": {"status": "healthy"},
+                "limit_health": {"status": self.codex_limit_status},
+                "capability_profile": {
+                    "schema": AgentRuntimeInventory.CAPABILITY_PROFILE_SCHEMA,
+                    "source": "builtin_runtime_profile",
+                    **codex_profile,
+                    "skills": dict(codex_profile["skills"]),
+                },
+            }
+        )
+        return data
+
+
+class MutableRuntimeHealth(FakeRuntimes):
+    def __init__(self):
+        self.claude_status = "ready"
+        self.claude_auth = "healthy"
+        self.claude_limit = "healthy"
+
+    def snapshot(self, *, force=False):
+        data = super().snapshot(force=force)
+        claude = next(row for row in data["runtimes"] if row["id"] == "claude")
+        claude["status"] = self.claude_status
+        claude["auth_health"] = {"status": self.claude_auth}
+        claude["limit_health"] = {"status": self.claude_limit}
+        return data
+
+
 class FakeLaneStates:
     def __init__(self, **states):
         self.states = states
+        self.actors = {agent: "test" for agent in ("claude", "codex", "hermes")}
+        self.reasons = {agent: None for agent in ("claude", "codex", "hermes")}
+        self.calls = []
 
     async def lane_states(self):
         return {
             agent: {
                 "agent": agent,
                 "state": self.states.get(agent, "normal"),
-                "reason": None,
-                "actor": "test",
+                "reason": self.reasons.get(agent),
+                "actor": self.actors.get(agent, "test"),
                 "updated_at": None,
             }
             for agent in ("claude", "codex", "hermes")
         }
+
+    async def set_lane_state(
+        self,
+        agent,
+        state,
+        *,
+        reason=None,
+        actor="operator",
+        auto_handoff=True,
+    ):
+        previous = (await self.lane_states())[agent]
+        self.states[agent] = state
+        self.actors[agent] = actor
+        self.reasons[agent] = reason
+        lane = (await self.lane_states())[agent]
+        self.calls.append(
+            {
+                "agent": agent,
+                "state": state,
+                "reason": reason,
+                "actor": actor,
+                "auto_handoff": auto_handoff,
+            }
+        )
+        return {"lane": lane, "previous": previous, "auto_handoff": []}
 
 
 def studio():
@@ -208,6 +303,9 @@ async def test_fast_lane_prefers_hermes_free_runtime():
     assert result.fallback_used is False
     assert result.identity_continuity is True
     assert result.semantic_authority_changed is False
+    assert result.task_semantic_profile["task_type"] == "utility"
+    assert result.task_semantic_profile["reasoning_depth"] == "fast"
+    assert result.task_semantic_profile["routing_authority"] is False
 
 @pytest.mark.asyncio
 async def test_result_marker_isolates_current_answer_from_pane_history():
@@ -433,6 +531,56 @@ async def test_missing_markers_get_one_bounded_repair_retry():
 
 
 @pytest.mark.asyncio
+async def test_terminal_marker_miss_uses_session_transcript_fallback():
+    class TranscriptClient(FakeClient):
+        async def call_tool(self, name, arguments, client_name="test"):
+            if name == "herdr_read_agent":
+                pane = arguments.get("pane_id")
+                self.herdr.calls.append((name, dict(arguments), client_name))
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Worked for 17s · done",
+                        }
+                    ]
+                }
+            return await super().call_tool(
+                name,
+                arguments,
+                client_name=client_name,
+            )
+
+    class TranscriptHerdr(FakeHerdr):
+        def client(self, **kwargs):
+            return TranscriptClient(self)
+
+        def read_session_result(self, pane, request_id):
+            return (
+                f"<<<HIRDA_COGNITIVE_RESULT:{request_id}>>>\n"
+                "TRANSCRIPT_FALLBACK_OK\n"
+                "<<<END_HIRDA_COGNITIVE_RESULT>>>"
+            )
+
+    router = CognitiveRouter(studio(), TranscriptHerdr(), FakeRuntimes())
+    result = await router.execute(
+        {
+            "request_id": "COG-TRANSCRIPT-FALLBACK",
+            "prompt": "Return the current result.",
+            "capability": "coding",
+            "preferred_runtime": "claude",
+            "allow_fallback": False,
+            "timeout_seconds": 30,
+        }
+    )
+
+    assert result.status == "success"
+    assert result.runtime == "claude"
+    assert result.output == "TRANSCRIPT_FALLBACK_OK"
+    assert result.fallback_used is False
+
+
+@pytest.mark.asyncio
 async def test_delayed_marker_visibility_retries_read_before_repair_prompt():
     class DelayedReadClient(FakeClient):
         async def call_tool(self, name, arguments, client_name="test"):
@@ -506,7 +654,7 @@ async def test_read_requests_wider_window_when_live_schema_supports_lines():
 
 
 @pytest.mark.asyncio
-async def test_prompt_wait_barrier_avoids_idle_race_when_supported():
+async def test_prompt_wait_completion_skips_redundant_wait_barrier():
     class WaitAwareClient(FakeClient):
         async def call_tool(self, name, arguments, client_name="test"):
             if name == "herdr_prompt_agent" and arguments.get("wait") is True:
@@ -545,23 +693,77 @@ async def test_prompt_wait_barrier_avoids_idle_race_when_supported():
     wait_calls = [call for call in herdr.calls if call[0] == "herdr_wait_agent"]
     assert prompt_calls
     assert prompt_calls[0][1]["wait"] is True
-    assert len(wait_calls) == 1
+    assert wait_calls == []
 
 
 @pytest.mark.asyncio
-async def test_claude_wait_barrier_targets_done_state():
-    class ClaudeWaitHerdr(FakeHerdr):
+async def test_concurrent_cognitive_requests_are_serialized_per_pane():
+    class OverlapDetectClient(FakeClient):
+        async def call_tool(self, name, arguments, client_name="test"):
+            if name != "herdr_prompt_agent":
+                return await super().call_tool(
+                    name,
+                    arguments,
+                    client_name=client_name,
+                )
+            self.herdr.active_prompt_calls += 1
+            self.herdr.max_active_prompt_calls = max(
+                self.herdr.max_active_prompt_calls,
+                self.herdr.active_prompt_calls,
+            )
+            try:
+                await asyncio.sleep(0.02)
+                return await super().call_tool(
+                    name,
+                    arguments,
+                    client_name=client_name,
+                )
+            finally:
+                self.herdr.active_prompt_calls -= 1
+
+    class OverlapDetectHerdr(FakeHerdr):
         def __init__(self):
             super().__init__()
-            prompt_tool = dict(PROMPT_TOOL)
-            prompt_schema = dict(prompt_tool["inputSchema"])
-            prompt_props = dict(prompt_schema["properties"])
-            prompt_props["wait"] = {"type": "boolean"}
-            prompt_schema["properties"] = prompt_props
-            prompt_tool["inputSchema"] = prompt_schema
-            self.tools["herdr_prompt_agent"] = prompt_tool
+            self.active_prompt_calls = 0
+            self.max_active_prompt_calls = 0
 
-    herdr = ClaudeWaitHerdr()
+        def client(self, **kwargs):
+            return OverlapDetectClient(self)
+
+    herdr = OverlapDetectHerdr()
+    router = CognitiveRouter(studio(), herdr, FakeRuntimes())
+
+    first, second = await asyncio.gather(
+        router.execute(
+            {
+                "request_id": "COG-SERIAL-ONE",
+                "prompt": "Return ONE.",
+                "capability": "fast_utility",
+                "preferred_runtime": "hermes",
+                "allow_fallback": False,
+                "timeout_seconds": 5,
+            }
+        ),
+        router.execute(
+            {
+                "request_id": "COG-SERIAL-TWO",
+                "prompt": "Return TWO.",
+                "capability": "fast_utility",
+                "preferred_runtime": "hermes",
+                "allow_fallback": False,
+                "timeout_seconds": 5,
+            }
+        ),
+    )
+
+    assert first.status == "success"
+    assert second.status == "success"
+    assert herdr.max_active_prompt_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_claude_wait_barrier_targets_done_state_when_prompt_wait_is_unavailable():
+    herdr = FakeHerdr()
     router = CognitiveRouter(studio(), herdr, FakeRuntimes())
     result = await router.execute(
         {
@@ -627,6 +829,93 @@ async def test_disabled_claude_lane_is_removed_from_deep_candidates():
 
 
 @pytest.mark.asyncio
+async def test_runtime_health_failure_moves_normal_lane_to_hirda_emergency():
+    cfg = studio()
+    cfg.cognitive_runtime_recovery_successes = 2
+    runtimes = MutableRuntimeHealth()
+    runtimes.claude_status = "down"
+    lanes = FakeLaneStates()
+    router = CognitiveRouter(cfg, FakeHerdr(), runtimes, lanes)
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-CLAUDE-DOWN",
+            "prompt": "Plan a deep task while Claude is unavailable.",
+            "capability": "reasoning_high",
+        }
+    )
+
+    assert plan["lane_states"]["claude"]["state"] == "emergency"
+    assert lanes.actors["claude"] == "hirda/runtime-health"
+    assert lanes.reasons["claude"] == "runtime_health:runtime_status_down"
+    assert lanes.calls[-1]["auto_handoff"] is True
+    assert [candidate["runtime"] for candidate in plan["candidates"]] == ["hermes"]
+
+
+@pytest.mark.asyncio
+async def test_hirda_runtime_lane_recovers_after_consecutive_healthy_checks():
+    cfg = studio()
+    cfg.cognitive_runtime_recovery_successes = 2
+    runtimes = MutableRuntimeHealth()
+    runtimes.claude_status = "down"
+    lanes = FakeLaneStates()
+    router = CognitiveRouter(cfg, FakeHerdr(), runtimes, lanes)
+
+    await router.plan(
+        {
+            "request_id": "COG-CLAUDE-DOWN-FIRST",
+            "prompt": "Detect the Claude outage.",
+            "capability": "reasoning_high",
+        }
+    )
+    assert lanes.states["claude"] == "emergency"
+
+    runtimes.claude_status = "ready"
+    first_healthy = await router.plan(
+        {
+            "request_id": "COG-CLAUDE-HEALTHY-1",
+            "prompt": "Check recovery once.",
+            "capability": "reasoning_high",
+        }
+    )
+    assert first_healthy["lane_states"]["claude"]["state"] == "emergency"
+
+    second_healthy = await router.plan(
+        {
+            "request_id": "COG-CLAUDE-HEALTHY-2",
+            "prompt": "Check recovery twice.",
+            "capability": "reasoning_high",
+        }
+    )
+    assert second_healthy["lane_states"]["claude"]["state"] == "normal"
+    assert lanes.calls[-1]["actor"] == "hirda/runtime-health"
+    assert lanes.calls[-1]["auto_handoff"] is False
+    assert lanes.calls[-1]["reason"] == "runtime_recovered_after_2_healthy_checks"
+    assert second_healthy["candidates"][0]["runtime"] == "claude"
+
+
+@pytest.mark.asyncio
+async def test_runtime_recovery_never_reopens_operator_owned_lane():
+    cfg = studio()
+    cfg.cognitive_runtime_recovery_successes = 1
+    lanes = FakeLaneStates(claude="disabled")
+    runtimes = MutableRuntimeHealth()
+    router = CognitiveRouter(cfg, FakeHerdr(), runtimes, lanes)
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-MANUAL-CLAUDE-DISABLED",
+            "prompt": "Respect the operator-owned lane state.",
+            "capability": "reasoning_high",
+        }
+    )
+
+    assert plan["lane_states"]["claude"]["state"] == "disabled"
+    assert lanes.calls == []
+    assert [candidate["runtime"] for candidate in plan["candidates"]] == ["hermes"]
+
+
+@pytest.mark.asyncio
 async def test_fast_lane_fails_over_from_hermes_to_claude():
     herdr = FakeHerdr()
     herdr.fail_prompt_panes.add("wH:p1")
@@ -671,6 +960,53 @@ async def test_fast_lane_skips_busy_hermes_and_falls_back_to_claude():
     assert result.attempts[0]["error"] == "runtime_busy"
     assert result.attempts[1]["runtime"] == "claude"
     assert result.attempts[1]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_owned_enforced_pane_waits_for_busy_lifecycle_to_settle():
+    class SettlingOwnedHerdr(FakeHerdr):
+        def __init__(self):
+            super().__init__()
+            self.refresh_count = 0
+            for pane in self.snapshot["panes"]["panes"]:
+                if pane["agent"] == "hermes":
+                    pane["agent_status"] = "working"
+
+        async def refresh(self):
+            self.refresh_count += 1
+            if self.refresh_count >= 2:
+                for pane in self.snapshot["panes"]["panes"]:
+                    if pane["agent"] == "hermes":
+                        pane["agent_status"] = "idle"
+            return self.snapshot
+
+    herdr = SettlingOwnedHerdr()
+    cfg = studio()
+    cfg.cognitive_pane_routing_mode = "enforce"
+    cfg.cognitive_runtime_bindings = {
+        "hermes": {
+            "machine_id": "openclaw",
+            "backend_id": "hermes-runtime",
+            "pane_ids": ["wH:p1"],
+        }
+    }
+    router = CognitiveRouter(cfg, herdr, FakeRuntimes())
+
+    result = await router.execute(
+        {
+            "request_id": "COG-OWNED-BUSY-SETTLES",
+            "prompt": "Return the dedicated lane result.",
+            "capability": "fast_utility",
+            "preferred_runtime": "hermes",
+            "allow_fallback": False,
+            "timeout_seconds": 5,
+        }
+    )
+
+    assert result.status == "success"
+    assert result.runtime == "hermes"
+    assert result.fallback_used is False
+    assert herdr.refresh_count >= 2
 
 
 @pytest.mark.asyncio
@@ -749,6 +1085,73 @@ async def test_context_exhausted_runtime_fails_over_with_specific_error():
     assert result.attempts[1]["status"] == "success"
 
 
+@pytest.mark.parametrize(
+    ("terminal_text", "expected"),
+    [
+        ("⏳ rate limited — resets in ~7m, retrying in 419s", "runtime_rate_limited"),
+        ("Provider said: HTTP 401: Your API key is invalid", "runtime_auth_failed"),
+        ("Your plan does not include paid service access; upgrade or add credits", "runtime_quota_exhausted"),
+    ],
+)
+def test_runtime_terminal_error_classifies_provider_failures(terminal_text, expected):
+    request_id = "COG-PROVIDER-FAILURE"
+    value = (
+        "HIRDA COGNITIVE REQUEST\n"
+        f"request_id: {request_id}\n"
+        f"{terminal_text}"
+    )
+    assert _runtime_terminal_error(value, request_id) == expected
+
+
+@pytest.mark.asyncio
+async def test_prompt_timeout_reads_correlated_provider_failure_and_falls_back():
+    class RateLimitedClient(FakeClient):
+        async def call_tool(self, name, arguments, client_name="test"):
+            pane = arguments.get("pane_id")
+            if name == "herdr_prompt_agent" and pane == "wH:p1":
+                raise RuntimeError("HERDR_TIMEOUT")
+            if name == "herdr_read_agent" and pane == "wH:p1":
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "HIRDA COGNITIVE REQUEST\n"
+                                "request_id: COG-RATE-LIMIT-FALLBACK\n"
+                                "⏳ rate limited — resets in ~7m, retrying in 419s"
+                            ),
+                        }
+                    ]
+                }
+            return await super().call_tool(
+                name,
+                arguments,
+                client_name=client_name,
+            )
+
+    class RateLimitedHerdr(FakeHerdr):
+        def client(self, **kwargs):
+            return RateLimitedClient(self)
+
+    herdr = RateLimitedHerdr()
+    router = CognitiveRouter(studio(), herdr, FakeRuntimes())
+    result = await router.execute(
+        {
+            "request_id": "COG-RATE-LIMIT-FALLBACK",
+            "prompt": "Return the current result.",
+            "capability": "fast_utility",
+            "allow_fallback": True,
+            "timeout_seconds": 30,
+        }
+    )
+
+    assert result.status == "success"
+    assert result.runtime != "hermes"
+    assert result.fallback_used is True
+    assert result.attempts[0]["runtime"] == "hermes"
+    assert result.attempts[0]["error"] == "runtime_rate_limited"
+
+
 @pytest.mark.asyncio
 async def test_deep_lane_fails_over_from_claude_to_hermes():
     herdr = FakeHerdr()
@@ -784,7 +1187,547 @@ async def test_plan_keeps_jev_advisory_and_external_semantic_authority():
     assert plan["jev"]["routing_authority"] is False
     assert plan["identity_continuity"] is True
     assert plan["semantic_authority_changed"] is False
+    assert plan["task_semantic_profile"]["schema"] == "hirda-task-semantic-profile-v1"
+    assert plan["task_semantic_profile"]["task_type"] == "conversation"
+    assert plan["task_semantic_profile"]["declared_capability"] == "social_dialogue"
+    assert plan["task_semantic_profile"]["source"] == "declared_capability"
+    assert plan["task_semantic_profile"]["routing_authority"] is False
     assert plan["candidates"][0]["runtime"] == "hermes"
+
+
+@pytest.mark.asyncio
+async def test_generic_reflection_accepts_jev_semantic_evidence_without_granting_authority(monkeypatch):
+    async def fake_evaluate(_studio, request):
+        return JevCognitiveJudgment(
+            schema="hirda-jev-cognitive-judgment-v1",
+            enabled=True,
+            evaluated=True,
+            mode="teacher",
+            request_id=request.request_id,
+            suggested_lane="deep",
+            confidence=0.97,
+            needs_tool=0.94,
+            needs_specialist=0.88,
+            model="jev-test",
+            error=None,
+            task_type="software_engineering",
+            coding=0.98,
+            latency_priority="quality",
+        )
+
+    monkeypatch.setattr(
+        "mcp_studio.cognitive_router.evaluate_cognitive_request",
+        fake_evaluate,
+    )
+    router = CognitiveRouter(studio(), FakeHerdr(), FakeRuntimes())
+    plan = await router.plan(
+        {
+            "request_id": "COG-SEMANTIC-PROFILE",
+            "prompt": "Inspect this failing function and determine what kind of work is needed.",
+            "capability": "reflection",
+        }
+    )
+
+    profile = plan["task_semantic_profile"]
+    assert profile["source"] == "jev_advisory"
+    assert profile["task_type"] == "software_engineering"
+    assert profile["declared_capability"] == "reflection"
+    assert profile["coding"] == pytest.approx(0.98 * 0.97 * 0.35)
+    assert profile["tool_need"] == pytest.approx(0.94)
+    assert "software_engineering" in profile["capabilities"]
+    assert "tool_operation" in profile["capabilities"]
+    assert profile["reasoning_depth"] == "deep"
+    assert profile["latency_priority"] == "quality"
+    assert profile["jev_confidence"] == pytest.approx(0.97)
+    assert profile["routing_authority"] is False
+    assert plan["request"]["capability"] == "reflection"
+    assert plan["semantic_authority_changed"] is False
+
+
+
+@pytest.mark.asyncio
+async def test_reasoning_high_keeps_declared_reasoning_anchor_when_jev_reports_coding(
+    monkeypatch,
+):
+    async def fake_evaluate(_studio, request):
+        return JevCognitiveJudgment(
+            schema="hirda-jev-cognitive-judgment-v1",
+            enabled=True,
+            evaluated=True,
+            mode="shadow",
+            request_id=request.request_id,
+            suggested_lane="deep",
+            confidence=1.0,
+            needs_tool=0.78,
+            needs_specialist=0.52,
+            model="jev-test",
+            error=None,
+            task_type="planning",
+            coding=0.69,
+            latency_priority="quality",
+        )
+
+    monkeypatch.setattr(
+        "mcp_studio.cognitive_router.evaluate_cognitive_request",
+        fake_evaluate,
+    )
+    router = CognitiveRouter(studio(), ProfiledHerdr(), ProfiledRuntimes())
+    plan = await router.plan(
+        {
+            "request_id": "COG-SEMANTIC-REASONING-ANCHOR",
+            "prompt": "Analyze a dependency graph and derive the safest migration order.",
+            "capability": "reasoning_high",
+        }
+    )
+
+    profile = plan["task_semantic_profile"]
+    assert profile["task_type"] == "general_reasoning"
+    assert profile["source"] == "declared_capability"
+    assert profile["coding"] == pytest.approx(0.69 * 0.35)
+    assert plan["semantic_routing"]["semantic_preference"] == "claude"
+
+
+@pytest.mark.asyncio
+async def test_tool_heavy_reflection_adds_tool_operation_modifier_and_prefers_codex(
+    monkeypatch,
+):
+    async def fake_evaluate(_studio, request):
+        return JevCognitiveJudgment(
+            schema="hirda-jev-cognitive-judgment-v1",
+            enabled=True,
+            evaluated=True,
+            mode="shadow",
+            request_id=request.request_id,
+            suggested_lane="fast",
+            confidence=0.38,
+            needs_tool=0.71,
+            needs_specialist=0.40,
+            model="jev-test",
+            error=None,
+            task_type="reflection",
+            coding=0.64,
+            latency_priority="balanced",
+        )
+
+    monkeypatch.setattr(
+        "mcp_studio.cognitive_router.evaluate_cognitive_request",
+        fake_evaluate,
+    )
+    router = CognitiveRouter(studio(), ProfiledHerdr(), ProfiledRuntimes())
+    plan = await router.plan(
+        {
+            "request_id": "COG-SEMANTIC-TOOL-REFLECTION",
+            "prompt": "Choose the minimum safe read-only tool sequence to inspect a service.",
+            "capability": "reflection",
+        }
+    )
+
+    profile = plan["task_semantic_profile"]
+    assert profile["task_type"] == "reflection"
+    assert "tool_operation" in profile["capabilities"]
+    assert profile["coding"] == pytest.approx(0.64 * 0.38 * 0.35)
+    semantic = plan["semantic_routing"]
+    assert semantic["semantic_preference"] == "codex"
+    ranking = {row["runtime"]: row for row in semantic["rankings"]}
+    assert ranking["codex"]["weights"]["tool_fit"] == pytest.approx(0.20)
+
+
+@pytest.mark.asyncio
+async def test_high_confidence_reflection_promotes_tool_operation_at_moderate_tool_need(
+    monkeypatch,
+):
+    async def fake_evaluate(_studio, request):
+        return JevCognitiveJudgment(
+            schema="hirda-jev-cognitive-judgment-v1",
+            enabled=True,
+            evaluated=True,
+            mode="shadow",
+            request_id=request.request_id,
+            suggested_lane="deep",
+            confidence=0.93,
+            needs_tool=0.56,
+            needs_specialist=0.46,
+            model="jev-test",
+            error=None,
+            task_type="planning",
+            coding=0.77,
+            latency_priority="balanced",
+        )
+
+    monkeypatch.setattr(
+        "mcp_studio.cognitive_router.evaluate_cognitive_request",
+        fake_evaluate,
+    )
+    router = CognitiveRouter(studio(), ProfiledHerdr(), ProfiledRuntimes())
+    plan = await router.plan(
+        {
+            "request_id": "COG-SEMANTIC-MODERATE-TOOL-NEED",
+            "prompt": (
+                "Plan read-only terminal and file operations to diagnose "
+                "a failing development server."
+            ),
+            "capability": "reflection",
+        }
+    )
+
+    profile = plan["task_semantic_profile"]
+    assert "tool_operation" in profile["capabilities"]
+    assert plan["semantic_routing"]["semantic_preference"] == "codex"
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_reflection_does_not_promote_tool_operation(
+    monkeypatch,
+):
+    async def fake_evaluate(_studio, request):
+        return JevCognitiveJudgment(
+            schema="hirda-jev-cognitive-judgment-v1",
+            enabled=True,
+            evaluated=True,
+            mode="shadow",
+            request_id=request.request_id,
+            suggested_lane="fast",
+            confidence=0.05,
+            needs_tool=0.39,
+            needs_specialist=0.30,
+            model="jev-test",
+            error=None,
+            task_type="reflection",
+            coding=0.65,
+            latency_priority="balanced",
+        )
+
+    monkeypatch.setattr(
+        "mcp_studio.cognitive_router.evaluate_cognitive_request",
+        fake_evaluate,
+    )
+    router = CognitiveRouter(studio(), ProfiledHerdr(), ProfiledRuntimes())
+    plan = await router.plan(
+        {
+            "request_id": "COG-SEMANTIC-LOW-CONFIDENCE",
+            "prompt": "Choose a minimal sequence of filesystem checks before editing code.",
+            "capability": "reflection",
+        }
+    )
+
+    profile = plan["task_semantic_profile"]
+    assert "tool_operation" not in profile["capabilities"]
+    assert profile["coding"] == pytest.approx(0.65 * 0.05 * 0.35)
+    assert plan["semantic_routing"]["semantic_preference"] == "claude"
+
+
+@pytest.mark.asyncio
+async def test_semantic_shadow_ranking_prefers_codex_for_coding_without_reordering_execution():
+    router = CognitiveRouter(studio(), ProfiledHerdr(), ProfiledRuntimes())
+    plan = await router.plan(
+        {
+            "request_id": "COG-SHADOW-CODING",
+            "prompt": "Fix the failing TypeScript test and verify the patch.",
+            "capability": "coding",
+        }
+    )
+
+    semantic = plan["semantic_routing"]
+    assert semantic["mode"] == "shadow"
+    assert semantic["applied"] is False
+    assert semantic["current_selected"] == "claude"
+    assert semantic["semantic_preference"] == "codex"
+    assert semantic["would_select"] == "codex"
+    assert semantic["changed"] is True
+    assert semantic["ranked_order"][0] == "codex"
+    assert plan["candidates"][0]["runtime"] == "claude"
+
+    ranking = {row["runtime"]: row for row in semantic["rankings"]}
+    assert ranking["codex"]["score"] > ranking["claude"]["score"]
+    assert ranking["codex"]["components"]["capability_fit"] > ranking["claude"]["components"]["capability_fit"]
+
+
+@pytest.mark.asyncio
+async def test_semantic_shadow_ranking_prefers_claude_for_social_dialogue():
+    router = CognitiveRouter(studio(), ProfiledHerdr(), ProfiledRuntimes())
+    plan = await router.plan(
+        {
+            "request_id": "COG-SHADOW-SOCIAL",
+            "prompt": "Mali asks Nova how she feels today.",
+            "capability": "social_dialogue",
+        }
+    )
+
+    semantic = plan["semantic_routing"]
+    assert semantic["semantic_preference"] == "claude"
+    assert semantic["ranked_order"][0] == "claude"
+    assert semantic["current_selected"] == "hermes"
+    assert semantic["changed"] is True
+
+
+@pytest.mark.asyncio
+async def test_semantic_shadow_ranking_prefers_claude_for_research():
+    router = CognitiveRouter(studio(), ProfiledHerdr(), ProfiledRuntimes())
+    plan = await router.plan(
+        {
+            "request_id": "COG-SHADOW-RESEARCH",
+            "prompt": "Compare the evidence and explain the strongest interpretation.",
+            "capability": "research",
+        }
+    )
+
+    semantic = plan["semantic_routing"]
+    assert semantic["semantic_preference"] == "claude"
+    assert semantic["ranked_order"][0] == "claude"
+
+
+@pytest.mark.asyncio
+async def test_semantic_shadow_ranking_prefers_hermes_for_fast_utility():
+    router = CognitiveRouter(studio(), ProfiledHerdr(), ProfiledRuntimes())
+    plan = await router.plan(
+        {
+            "request_id": "COG-SHADOW-FAST",
+            "prompt": "Summarize these three short lines.",
+            "capability": "fast_utility",
+        }
+    )
+
+    semantic = plan["semantic_routing"]
+    assert semantic["semantic_preference"] == "hermes"
+    assert semantic["ranked_order"][0] == "hermes"
+
+
+@pytest.mark.asyncio
+async def test_semantic_shadow_ranking_skips_exhausted_codex_and_falls_back_for_coding():
+    router = CognitiveRouter(
+        studio(),
+        ProfiledHerdr(),
+        ProfiledRuntimes(codex_limit_status="exhausted"),
+    )
+    plan = await router.plan(
+        {
+            "request_id": "COG-SHADOW-CODING-QUOTA",
+            "prompt": "Repair the failing build.",
+            "capability": "coding",
+        }
+    )
+
+    semantic = plan["semantic_routing"]
+    assert "codex" not in semantic["ranked_order"]
+    assert semantic["semantic_preference"] == "claude"
+    assert semantic["would_select"] == "claude"
+
+
+@pytest.mark.asyncio
+async def test_semantic_shadow_ranking_respects_explicit_runtime_constraint():
+    cfg = studio()
+    router = CognitiveRouter(cfg, ProfiledHerdr(), ProfiledRuntimes())
+    plan = await router.plan(
+        {
+            "request_id": "COG-SHADOW-PREFERRED",
+            "prompt": "Fix the failing TypeScript test.",
+            "capability": "coding",
+            "preferred_runtime": "claude",
+        }
+    )
+
+    semantic = plan["semantic_routing"]
+    assert semantic["semantic_preference"] == "codex"
+    assert semantic["explicit_constraint"] == "preferred_runtime"
+    assert semantic["would_select"] == "claude"
+    assert semantic["changed"] is False
+
+@pytest.mark.asyncio
+async def test_semantic_canary_applies_high_margin_primary_without_enabling_fallback():
+    cfg = studio()
+    cfg.cognitive_semantic_routing_mode = "canary"
+    cfg.cognitive_semantic_canary_min_margin = 0.03
+    router = CognitiveRouter(cfg, ProfiledHerdr(), ProfiledRuntimes())
+
+    result = await router.execute(
+        {
+            "request_id": "COG-CANARY-CODING",
+            "prompt": "Fix the failing TypeScript test and verify the patch.",
+            "capability": "coding",
+            "allow_fallback": False,
+        }
+    )
+
+    semantic = result.semantic_routing
+    assert result.status == "success"
+    assert result.runtime == "codex"
+    assert result.fallback_used is False
+    assert result.semantic_authority_changed is True
+    assert semantic["mode"] == "canary"
+    assert semantic["applied"] is True
+    assert semantic["current_selected"] == "claude"
+    assert semantic["semantic_preference"] == "codex"
+    assert semantic["effective_selected"] == "codex"
+    assert semantic["top_margin"] >= semantic["min_margin"]
+    assert semantic["guard_passed"] is True
+    assert semantic["guard_reasons"] == []
+
+
+@pytest.mark.asyncio
+async def test_semantic_canary_keeps_current_route_when_margin_is_below_guard():
+    cfg = studio()
+    cfg.cognitive_semantic_routing_mode = "canary"
+    cfg.cognitive_semantic_canary_min_margin = 0.50
+    router = CognitiveRouter(cfg, ProfiledHerdr(), ProfiledRuntimes())
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-CANARY-GUARD-MARGIN",
+            "prompt": "Fix the failing TypeScript test and verify the patch.",
+            "capability": "coding",
+            "allow_fallback": True,
+        }
+    )
+
+    semantic = plan["semantic_routing"]
+    assert semantic["semantic_preference"] == "codex"
+    assert semantic["current_selected"] == "claude"
+    assert semantic["effective_selected"] == "claude"
+    assert semantic["applied"] is False
+    assert semantic["guard_passed"] is False
+    assert "semantic_margin_below_threshold" in semantic["guard_reasons"]
+    assert plan["candidates"][0]["runtime"] == "claude"
+    assert plan["semantic_authority_changed"] is False
+
+
+@pytest.mark.asyncio
+async def test_semantic_canary_never_overrides_explicit_runtime_constraint():
+    cfg = studio()
+    cfg.cognitive_semantic_routing_mode = "canary"
+    cfg.cognitive_semantic_canary_min_margin = 0.0
+    router = CognitiveRouter(cfg, ProfiledHerdr(), ProfiledRuntimes())
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-CANARY-EXPLICIT",
+            "prompt": "Fix the failing TypeScript test.",
+            "capability": "coding",
+            "preferred_runtime": "claude",
+            "allow_fallback": True,
+        }
+    )
+
+    semantic = plan["semantic_routing"]
+    assert semantic["semantic_preference"] == "codex"
+    assert semantic["explicit_constraint"] == "preferred_runtime"
+    assert semantic["applied"] is False
+    assert semantic["effective_selected"] == "claude"
+    assert "explicit_preferred_runtime" in semantic["guard_reasons"]
+    assert plan["candidates"][0]["runtime"] == "claude"
+    assert plan["semantic_authority_changed"] is False
+
+
+@pytest.mark.asyncio
+async def test_pane_routing_shadow_reports_unowned_without_changing_selection():
+    cfg = studio()
+    cfg.cognitive_pane_routing_mode = "shadow"
+    cfg.cognitive_runtime_bindings = {
+        "hermes": {
+            "machine_id": "openclaw",
+            "backend_id": "hermes-runtime",
+            "pane_name_prefixes": ["hirda-cognitive-"],
+        }
+    }
+    router = CognitiveRouter(cfg, FakeHerdr(), FakeRuntimes())
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-PANE-SHADOW",
+            "prompt": "Return exactly OK.",
+            "capability": "fast_utility",
+        }
+    )
+
+    assert plan["candidates"][0]["runtime"] == "hermes"
+    assert plan["candidates"][0]["pane_owned"] is False
+    assert plan["pane_routing"]["mode"] == "shadow"
+    assert plan["pane_routing"]["runtimes"]["hermes"]["owned_pane_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_pane_routing_enforce_uses_only_owned_runtime_pane():
+    herdr = FakeHerdr()
+    herdr.snapshot["panes"]["panes"].extend(
+        [
+            {
+                "pane_id": "wH:pShared",
+                "agent": "hermes",
+                "agent_status": "idle",
+                "name": "user-task",
+            },
+            {
+                "pane_id": "wH:pCog",
+                "agent": "hermes",
+                "agent_status": "done",
+                "name": "hirda-cognitive-hermes",
+            },
+        ]
+    )
+    cfg = studio()
+    cfg.cognitive_pane_routing_mode = "enforce"
+    cfg.cognitive_runtime_bindings = {
+        "hermes": {
+            "machine_id": "openclaw",
+            "backend_id": "hermes-runtime",
+            "pane_name_prefixes": ["hirda-cognitive-"],
+        }
+    }
+    router = CognitiveRouter(cfg, herdr, FakeRuntimes())
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-PANE-ENFORCE",
+            "prompt": "Return exactly OK.",
+            "capability": "fast_utility",
+            "preferred_runtime": "hermes",
+            "allow_fallback": False,
+        }
+    )
+
+    assert len(plan["candidates"]) == 1
+    assert plan["candidates"][0]["pane_id"] == "wH:pCog"
+    assert plan["candidates"][0]["pane_owned"] is True
+    assert plan["pane_routing"]["enforced"] is True
+    assert (
+        plan["pane_routing"]["runtimes"]["hermes"]["available_owned_pane_count"]
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_pane_routing_enforce_rejects_explicit_unowned_target():
+    herdr = FakeHerdr()
+    herdr.snapshot["panes"]["panes"].append(
+        {
+            "pane_id": "wH:pShared",
+            "agent": "hermes",
+            "agent_status": "idle",
+            "name": "user-task",
+        }
+    )
+    cfg = studio()
+    cfg.cognitive_pane_routing_mode = "enforce"
+    cfg.cognitive_runtime_bindings = {
+        "hermes": {
+            "machine_id": "openclaw",
+            "backend_id": "hermes-runtime",
+            "pane_name_prefixes": ["hirda-cognitive-"],
+        }
+    }
+    router = CognitiveRouter(cfg, herdr, FakeRuntimes())
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-PANE-UNOWNED",
+            "prompt": "Return exactly OK.",
+            "capability": "fast_utility",
+            "preferred_runtime": "hermes",
+            "target_pane_id": "wH:pShared",
+            "allow_fallback": False,
+        }
+    )
+
+    assert plan["candidates"] == []
 
 
 @pytest.mark.asyncio

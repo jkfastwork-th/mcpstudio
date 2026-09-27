@@ -16,6 +16,48 @@ from .herdr import HerdrManager, _decode_text_content
 COGNITIVE_REQUEST_SCHEMA = "hirda-cognitive-request-v1"
 COGNITIVE_RESULT_SCHEMA = "hirda-cognitive-result-v1"
 COGNITIVE_JUDGMENT_SCHEMA = "hirda-jev-cognitive-judgment-v1"
+TASK_SEMANTIC_PROFILE_SCHEMA = "hirda-task-semantic-profile-v1"
+SEMANTIC_RUNTIME_RANKING_SCHEMA = "hirda-semantic-runtime-ranking-v1"
+
+_CAPABILITY_TASK_TYPES = {
+    "social_dialogue": "conversation",
+    "reasoning_high": "general_reasoning",
+    "reflection": "reflection",
+    "fast_utility": "utility",
+    "coding": "software_engineering",
+    "research": "research",
+}
+_CAPABILITY_SEMANTIC_CAPABILITIES = {
+    "social_dialogue": ("social_reasoning", "persona_continuity"),
+    "reasoning_high": ("reasoning", "multi_step_reasoning"),
+    "reflection": ("reflection",),
+    "fast_utility": ("fast_utility",),
+    "coding": ("coding", "software_engineering"),
+    "research": ("research", "evidence_synthesis"),
+}
+_CAPABILITY_LATENCY_PRIORITIES = {
+    "social_dialogue": "high",
+    "reasoning_high": "quality",
+    "reflection": "balanced",
+    "fast_utility": "high",
+    "coding": "quality",
+    "research": "quality",
+}
+_TASK_TYPES = {
+    "conversation",
+    "software_engineering",
+    "research",
+    "planning",
+    "tool_operation",
+    "general_reasoning",
+    "reflection",
+    "utility",
+}
+_LATENCY_PRIORITIES = {"high", "balanced", "quality"}
+_JEV_TASK_TYPE_MIN_CONFIDENCE = 0.50
+_JEV_TOOL_OPERATION_MIN_CONFIDENCE = 0.25
+_JEV_TOOL_OPERATION_MIN_NEED = 0.55
+_JEV_NON_DECLARED_CODING_WEIGHT = 0.35
 
 _CAPABILITIES = {
     "social_dialogue",
@@ -65,6 +107,9 @@ class JevCognitiveJudgment:
     needs_specialist: float | None
     model: str | None
     error: str | None
+    task_type: str | None = None
+    coding: float | None = None
+    latency_priority: str | None = None
     advisory_only: bool = True
     routing_authority: bool = False
 
@@ -86,6 +131,8 @@ class CognitiveResult:
     fallback_used: bool
     attempts: tuple[dict[str, Any], ...]
     jev: dict[str, Any]
+    task_semantic_profile: dict[str, Any] = field(default_factory=dict)
+    semantic_routing: dict[str, Any] = field(default_factory=dict)
     infrastructure_routing: dict[str, Any] = field(default_factory=dict)
     identity_continuity: bool = True
     semantic_authority_changed: bool = False
@@ -170,6 +217,98 @@ def _probability(value: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
     return max(0.0, min(1.0, numeric))
+
+
+def _task_semantic_profile(
+    request: CognitiveRequest,
+    jev: JevCognitiveJudgment,
+    lane: str,
+) -> dict[str, Any]:
+    declared_task_type = _CAPABILITY_TASK_TYPES.get(
+        request.capability,
+        "reflection",
+    )
+    task_type = declared_task_type
+    source = "declared_capability"
+
+    jev_confidence = (
+        _probability(jev.confidence)
+        if jev.evaluated and jev.confidence is not None
+        else 0.0
+    )
+    tool_need = (
+        _probability(jev.needs_tool)
+        if jev.evaluated and jev.needs_tool is not None
+        else None
+    )
+
+    if (
+        request.capability == "reflection"
+        and jev.evaluated
+        and jev.task_type in _TASK_TYPES
+        and jev_confidence >= _JEV_TASK_TYPE_MIN_CONFIDENCE
+    ):
+        task_type = str(jev.task_type)
+        source = "jev_advisory"
+
+    capabilities = list(
+        _CAPABILITY_SEMANTIC_CAPABILITIES.get(
+            request.capability,
+            (request.capability,),
+        )
+    )
+    if source == "jev_advisory" and task_type not in capabilities:
+        capabilities.append(task_type)
+
+    # A reflection request with a strong tool-use signal is still anchored to
+    # its declared semantic capability, but receives an explicit tool
+    # operation modifier. This keeps JEV advisory rather than authoritative.
+    if (
+        request.capability == "reflection"
+        and tool_need is not None
+        and tool_need >= _JEV_TOOL_OPERATION_MIN_NEED
+        and jev_confidence >= _JEV_TOOL_OPERATION_MIN_CONFIDENCE
+        and "tool_operation" not in capabilities
+    ):
+        capabilities.append("tool_operation")
+
+    if request.capability == "coding":
+        coding = 1.0
+    elif jev.evaluated and jev.coding is not None:
+        coding = (
+            _probability(jev.coding)
+            * jev_confidence
+            * _JEV_NON_DECLARED_CODING_WEIGHT
+        )
+    else:
+        coding = 0.0
+
+    latency_priority = _CAPABILITY_LATENCY_PRIORITIES.get(
+        request.capability,
+        "balanced",
+    )
+    if (
+        jev.evaluated
+        and jev.latency_priority in _LATENCY_PRIORITIES
+        and jev_confidence >= _JEV_TASK_TYPE_MIN_CONFIDENCE
+    ):
+        latency_priority = str(jev.latency_priority)
+
+    return {
+        "schema": TASK_SEMANTIC_PROFILE_SCHEMA,
+        "source": source,
+        "task_type": task_type,
+        "declared_capability": request.capability,
+        "capabilities": capabilities,
+        "coding": coding,
+        "tool_need": tool_need,
+        "reasoning_depth": lane,
+        "latency_priority": latency_priority,
+        "jev_task_type": jev.task_type if jev.evaluated else None,
+        "jev_confidence": jev.confidence if jev.evaluated else None,
+        "advisory_only": True,
+        "routing_authority": False,
+    }
 
 
 def _text_fragments(value: Any) -> list[str]:
@@ -277,6 +416,7 @@ def _runtime_terminal_error(value: Any, request_id: str) -> str | None:
     if next_request >= 0:
         segment = segment[:next_request]
     lowered = segment.casefold()
+
     context_errors = (
         "input exceeds the context window",
         "maximum context length",
@@ -285,6 +425,37 @@ def _runtime_terminal_error(value: Any, request_id: str) -> str | None:
     )
     if any(marker in lowered for marker in context_errors):
         return "runtime_context_exhausted"
+
+    rate_limit_errors = (
+        "rate limited",
+        "rate limit",
+        "too many requests",
+        "http 429",
+        "retrying in ",
+    )
+    if any(marker in lowered for marker in rate_limit_errors):
+        return "runtime_rate_limited"
+
+    quota_errors = (
+        "out of funds",
+        "does not include paid service access",
+        "upgrade or add credits",
+        "insufficient credits",
+        "quota exceeded",
+    )
+    if any(marker in lowered for marker in quota_errors):
+        return "runtime_quota_exhausted"
+
+    auth_errors = (
+        "http 401",
+        "api key is invalid",
+        "rejected your sign-in",
+        "authentication failed",
+        "unauthorized",
+    )
+    if any(marker in lowered for marker in auth_errors):
+        return "runtime_auth_failed"
+
     return None
 
 
@@ -347,6 +518,36 @@ async def evaluate_cognitive_request(studio: Any, request: CognitiveRequest) -> 
         },
     }
     questions = {
+        "task_type": {
+            "type": "choice",
+            "instructions": (
+                "Classify the semantic task shape. This is advisory evidence only; "
+                "HIRDA retains routing authority and the declared capability remains authoritative."
+            ),
+            "criteria": {
+                "conversation": "Social dialogue, interpersonal response, or persona-continuous conversation.",
+                "software_engineering": "Software design, coding, debugging, repository editing, or testing.",
+                "research": "Evidence gathering, source comparison, synthesis, or investigation.",
+                "planning": "Multi-step planning, decomposition, scheduling, or strategy formation.",
+                "tool_operation": "The main need is bounded external tool or system operation.",
+                "general_reasoning": "Complex reasoning that does not fit a more specific category.",
+                "reflection": "Introspection, interpretation, or reflective synthesis.",
+                "utility": "Routine transformation, formatting, extraction, or lightweight assistance.",
+            },
+        },
+        "coding": {
+            "type": "noul",
+            "instructions": "How strongly does this task require software-engineering or coding capability?",
+        },
+        "latency_priority": {
+            "type": "choice",
+            "instructions": "Choose the task latency preference, not a provider or runtime.",
+            "criteria": {
+                "high": "Low latency materially improves the interaction and short reasoning is acceptable.",
+                "balanced": "Balance response time and reasoning quality.",
+                "quality": "Reasoning quality should dominate latency for this task.",
+            },
+        },
         "compute_lane": {
             "type": "choice",
             "instructions": (
@@ -400,6 +601,13 @@ async def evaluate_cognitive_request(studio: Any, request: CognitiveRequest) -> 
             return None
         return _probability(value.get("noul"), 0.5)
 
+    def choice(name: str, allowed: set[str]) -> str | None:
+        value = answers.get(name)
+        if not isinstance(value, dict):
+            return None
+        selected = str(value.get("choice") or "").strip().casefold()
+        return selected if selected in allowed else None
+
     return JevCognitiveJudgment(
         schema=COGNITIVE_JUDGMENT_SCHEMA,
         enabled=True,
@@ -412,6 +620,9 @@ async def evaluate_cognitive_request(studio: Any, request: CognitiveRequest) -> 
         needs_specialist=noul("needs_specialist"),
         model=str(body.get("model") or model),
         error=None,
+        task_type=choice("task_type", _TASK_TYPES),
+        coding=noul("coding"),
+        latency_priority=choice("latency_priority", _LATENCY_PRIORITIES),
     )
 
 
@@ -435,6 +646,62 @@ class CognitiveRouter:
         self.runtimes = runtimes
         self.capsules = capsules
         self.capability_router = capability_router
+        self._runtime_recovery_streaks: dict[str, int] = {}
+        self._runtime_recovery_task: asyncio.Task[None] | None = None
+        # A Herdr pane is a single interactive agent stream. Parallel prompts to
+        # the same pane can overwrite request correlation and interleave output,
+        # so cognitive execution must be serialized per pane.
+        self._pane_execution_locks: dict[str, asyncio.Lock] = {}
+
+    async def start_runtime_recovery(self) -> None:
+        if self.capsules is None or not bool(
+            getattr(self.studio, "cognitive_runtime_auto_recovery_enabled", True)
+        ):
+            return
+        if self._runtime_recovery_task is not None and not self._runtime_recovery_task.done():
+            return
+        self._runtime_recovery_task = asyncio.create_task(
+            self._runtime_recovery_loop(),
+            name="hirda-runtime-recovery",
+        )
+
+    async def stop_runtime_recovery(self) -> None:
+        task = self._runtime_recovery_task
+        self._runtime_recovery_task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _runtime_recovery_loop(self) -> None:
+        interval = max(
+            5.0,
+            float(getattr(self.studio, "cognitive_runtime_recovery_interval_seconds", 15.0) or 15.0),
+        )
+        while True:
+            try:
+                await self.herdr.refresh()
+                runtime_snapshot = self.runtimes.snapshot(force=True)
+                lane_states = await self.capsules.lane_states()
+                await self._reconcile_runtime_lane_health(runtime_snapshot, lane_states)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                db = getattr(self.capsules, "db", None)
+                if db is not None and hasattr(db, "add_event"):
+                    try:
+                        await db.add_event(
+                            "cognitive.runtime_recovery_error",
+                            "Runtime recovery health loop failed.",
+                            severity="warning",
+                            data={"error": type(exc).__name__, "detail": str(exc)[:240]},
+                        )
+                    except Exception:
+                        pass
+            await asyncio.sleep(interval)
 
 
     def _node_routing_mode(self) -> str:
@@ -609,6 +876,92 @@ class CognitiveRouter:
         return True
 
     @staticmethod
+    def _runtime_health_reason(row: dict[str, Any]) -> str:
+        if not bool(row.get("installed") or row.get("observed")):
+            return "runtime_unavailable"
+        status = str(row.get("status") or "").strip().casefold()
+        if status in {"down", "error", "unavailable"}:
+            return f"runtime_status_{status}"
+        auth = row.get("auth_health")
+        if isinstance(auth, dict):
+            auth_status = str(auth.get("status") or "").strip().casefold()
+            if auth_status in {"invalid", "expired", "missing", "error"}:
+                return f"auth_{auth_status}"
+        limit = row.get("limit_health")
+        if isinstance(limit, dict):
+            limit_status = str(limit.get("status") or "").strip().casefold()
+            if limit_status == "exhausted":
+                return "limit_exhausted"
+        return "healthy"
+
+    async def _reconcile_runtime_lane_health(
+        self,
+        runtime_snapshot: dict[str, Any],
+        lane_states: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        if self.capsules is None or not bool(
+            getattr(self.studio, "cognitive_runtime_auto_recovery_enabled", True)
+        ):
+            return lane_states
+
+        threshold = max(
+            1,
+            int(getattr(self.studio, "cognitive_runtime_recovery_successes", 3) or 3),
+        )
+        rows = {
+            str(row.get("id") or "").strip().casefold(): dict(row)
+            for row in runtime_snapshot.get("runtimes", [])
+            if isinstance(row, dict) and str(row.get("id") or "").strip()
+        }
+        current_states = dict(lane_states)
+
+        for runtime_id, row in rows.items():
+            lane = dict(current_states.get(runtime_id) or {})
+            state = str(lane.get("state") or "normal").strip().casefold()
+            actor = str(lane.get("actor") or "").strip().casefold()
+            known_runtime = bool(row.get("installed") or row.get("observed"))
+            healthy = self._runtime_healthy(row)
+
+            if not known_runtime:
+                self._runtime_recovery_streaks[runtime_id] = 0
+                continue
+
+            if not healthy:
+                self._runtime_recovery_streaks[runtime_id] = 0
+                if state == "normal":
+                    reason = self._runtime_health_reason(row)
+                    result = await self.capsules.set_lane_state(
+                        runtime_id,
+                        "emergency",
+                        reason=f"runtime_health:{reason}",
+                        actor="hirda/runtime-health",
+                        auto_handoff=True,
+                    )
+                    current_states[runtime_id] = dict(result.get("lane") or lane)
+                continue
+
+            if actor != "hirda/runtime-health" or state == "normal":
+                self._runtime_recovery_streaks[runtime_id] = 0
+                continue
+
+            streak = self._runtime_recovery_streaks.get(runtime_id, 0) + 1
+            self._runtime_recovery_streaks[runtime_id] = streak
+            if streak < threshold:
+                continue
+
+            result = await self.capsules.set_lane_state(
+                runtime_id,
+                "normal",
+                reason=f"runtime_recovered_after_{streak}_healthy_checks",
+                actor="hirda/runtime-health",
+                auto_handoff=False,
+            )
+            current_states[runtime_id] = dict(result.get("lane") or lane)
+            self._runtime_recovery_streaks[runtime_id] = 0
+
+        return current_states
+
+    @staticmethod
     def _pane_reserved(pane: dict[str, Any]) -> bool:
         """Keep dedicated certification and rollover panes out of ordinary routing."""
         prefixes = (
@@ -619,6 +972,115 @@ class CognitiveRouter:
         name = str(pane.get("name") or "").strip().casefold()
         label = str(pane.get("label") or "").strip().casefold()
         return name.startswith(prefixes) or label.startswith(prefixes)
+
+    def _pane_routing_mode(self) -> str:
+        mode = str(
+            getattr(self.studio, "cognitive_pane_routing_mode", "off")
+            or "off"
+        ).strip().casefold()
+        return mode if mode in {"off", "shadow", "enforce"} else "off"
+
+    def _runtime_pane_selectors(self, runtime_id: str) -> dict[str, tuple[str, ...]]:
+        raw_bindings = getattr(self.studio, "cognitive_runtime_bindings", {})
+        selected: Any = None
+        if isinstance(raw_bindings, dict):
+            for key, value in raw_bindings.items():
+                if str(key or "").strip().casefold() == runtime_id.casefold():
+                    selected = value
+                    break
+        if not isinstance(selected, dict):
+            selected = {}
+
+        def values(key: str) -> tuple[str, ...]:
+            raw = selected.get(key, [])
+            if not isinstance(raw, list):
+                return ()
+            return tuple(
+                str(value).strip()
+                for value in raw
+                if str(value or "").strip()
+            )
+
+        return {
+            "pane_ids": values("pane_ids"),
+            "pane_name_prefixes": tuple(
+                value.casefold() for value in values("pane_name_prefixes")
+            ),
+            "pane_label_prefixes": tuple(
+                value.casefold() for value in values("pane_label_prefixes")
+            ),
+        }
+
+    def _pane_owned_by_runtime(
+        self,
+        pane: dict[str, Any],
+        runtime_id: str,
+    ) -> bool:
+        if str(pane.get("agent") or "").strip().casefold() != runtime_id.casefold():
+            return False
+        selectors = self._runtime_pane_selectors(runtime_id)
+        pane_id = str(pane.get("pane_id") or "").strip()
+        name = str(pane.get("name") or "").strip().casefold()
+        label = str(pane.get("label") or "").strip().casefold()
+        if pane_id and pane_id in selectors["pane_ids"]:
+            return True
+        if name and any(name.startswith(prefix) for prefix in selectors["pane_name_prefixes"]):
+            return True
+        if label and any(label.startswith(prefix) for prefix in selectors["pane_label_prefixes"]):
+            return True
+        return False
+
+    def pane_routing_status(self) -> dict[str, Any]:
+        snapshot = getattr(self.herdr, "snapshot", {})
+        panes_block = snapshot.get("panes") if isinstance(snapshot, dict) else {}
+        panes = panes_block.get("panes", []) if isinstance(panes_block, dict) else []
+        raw_bindings = getattr(self.studio, "cognitive_runtime_bindings", {})
+        runtime_ids = sorted(
+            str(key or "").strip().casefold()
+            for key in raw_bindings
+            if str(key or "").strip()
+        ) if isinstance(raw_bindings, dict) else []
+        runtimes: dict[str, Any] = {}
+        for runtime_id in runtime_ids:
+            matched = [
+                dict(pane)
+                for pane in panes
+                if isinstance(pane, dict)
+                and self._pane_owned_by_runtime(pane, runtime_id)
+            ]
+            runtimes[runtime_id] = {
+                "selectors": {
+                    key: list(value)
+                    for key, value in self._runtime_pane_selectors(runtime_id).items()
+                },
+                "owned_pane_count": len(matched),
+                "available_owned_pane_count": sum(
+                    1
+                    for pane in matched
+                    if str(pane.get("agent_status") or "").casefold()
+                    in {"idle", "done"}
+                ),
+                "owned_panes": [
+                    {
+                        "pane_id": pane.get("pane_id"),
+                        "name": pane.get("name"),
+                        "label": pane.get("label"),
+                        "status": pane.get("agent_status"),
+                    }
+                    for pane in matched
+                ],
+            }
+        return {
+            "schema": "hirda-cognitive-pane-routing-v1",
+            "mode": self._pane_routing_mode(),
+            "enforced": self._pane_routing_mode() == "enforce",
+            "runtimes": runtimes,
+            "ready_runtime_count": sum(
+                1
+                for value in runtimes.values()
+                if value["available_owned_pane_count"] > 0
+            ),
+        }
 
     def _find_runtime_pane(self, runtime_id: str) -> dict[str, Any] | None:
         snapshot = getattr(self.herdr, "snapshot", {})
@@ -631,6 +1093,12 @@ class CognitiveRouter:
             and str(pane.get("agent") or "").casefold() == runtime_id
             and not self._pane_reserved(pane)
         ]
+        if self._pane_routing_mode() == "enforce":
+            candidates = [
+                pane
+                for pane in candidates
+                if self._pane_owned_by_runtime(pane, runtime_id)
+            ]
         if not candidates:
             return None
         rank = {"idle": 0, "done": 1, "unknown": 2}
@@ -642,6 +1110,404 @@ class CognitiveRouter:
                 str(pane.get("pane_id") or ""),
             ),
         )[0]
+
+    async def _wait_for_owned_pane_available(
+        self,
+        runtime_id: str,
+        pane_id: str,
+        *,
+        timeout_seconds: float,
+    ) -> dict[str, Any] | None:
+        """Wait for an owned cognitive pane to settle within the caller budget.
+
+        Dedicated cognitive panes are queueable resources. A transient
+        working state may outlive the request that produced the answer
+        (for example while the harness finishes auxiliary/title work), so
+        enforce mode waits for the owned pane instead of falling through to a
+        different shared lane.
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        current = self.herdr.find_pane(pane_id=pane_id)
+        while current is not None:
+            status = str(current.get("agent_status") or "unknown").casefold()
+            if status in {"idle", "done"}:
+                return current
+            if not self._pane_owned_by_runtime(current, runtime_id):
+                return current
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return current
+            await asyncio.sleep(min(0.5, remaining))
+            await self.herdr.refresh()
+            current = self.herdr.find_pane(pane_id=pane_id)
+        return None
+
+    def _runtime_capability_profile(self, row: dict[str, Any]) -> dict[str, Any]:
+        runtime_id = str(row.get("id") or "").strip().casefold()
+        base = row.get("capability_profile")
+        profile = dict(base) if isinstance(base, dict) else {}
+        profile["skills"] = dict(profile.get("skills") or {})
+
+        overrides = getattr(
+            self.studio,
+            "cognitive_runtime_capability_overrides",
+            {},
+        )
+        override = (
+            overrides.get(runtime_id)
+            if isinstance(overrides, dict)
+            else None
+        )
+        if isinstance(override, dict):
+            override_skills = override.get("skills")
+            for key, value in override.items():
+                if key != "skills":
+                    profile[key] = value
+            if isinstance(override_skills, dict):
+                profile["skills"].update(override_skills)
+            profile["source"] = (
+                "config_override"
+                if not base
+                else "builtin_runtime_profile+config_override"
+            )
+
+        profile.setdefault("schema", "hirda-runtime-capability-profile-v1")
+        profile.setdefault("source", "unprofiled_runtime")
+        return profile
+
+    @staticmethod
+    def _semantic_score(value: Any, default: float = 0.5) -> float:
+        return _probability(value, default)
+
+    @staticmethod
+    def _runtime_quota_score(row: dict[str, Any]) -> float:
+        limit = row.get("limit_health")
+        status = (
+            str(limit.get("status") or "").strip().casefold()
+            if isinstance(limit, dict)
+            else ""
+        )
+        if status == "limited":
+            return 0.40
+        if status == "exhausted":
+            return 0.0
+        if status in {"healthy", "available", "ok", "unlimited"}:
+            return 1.0
+        if status == "interactive_only":
+            return 0.80
+        return 0.70
+
+    @staticmethod
+    def _semantic_ranking_weights(task_profile: dict[str, Any]) -> dict[str, float]:
+        declared = str(
+            task_profile.get("declared_capability") or ""
+        ).strip().casefold()
+        if declared == "social_dialogue":
+            return {
+                "capability_fit": 0.64,
+                "quality": 0.15,
+                "latency": 0.08,
+                "cost": 0.05,
+                "quota": 0.05,
+                "tool_fit": 0.03,
+            }
+
+        capabilities = {
+            str(item).strip().casefold()
+            for item in task_profile.get("capabilities", [])
+            if str(item).strip()
+        }
+        if "tool_operation" in capabilities:
+            return {
+                "capability_fit": 0.51,
+                "quality": 0.08,
+                "latency": 0.08,
+                "cost": 0.06,
+                "quota": 0.07,
+                "tool_fit": 0.20,
+            }
+
+        priority = str(
+            task_profile.get("latency_priority") or "balanced"
+        ).strip().casefold()
+        if priority == "high":
+            return {
+                "capability_fit": 0.56,
+                "quality": 0.05,
+                "latency": 0.18,
+                "cost": 0.10,
+                "quota": 0.06,
+                "tool_fit": 0.05,
+            }
+        if priority == "quality":
+            return {
+                "capability_fit": 0.62,
+                "quality": 0.16,
+                "latency": 0.04,
+                "cost": 0.05,
+                "quota": 0.07,
+                "tool_fit": 0.06,
+            }
+        return {
+            "capability_fit": 0.60,
+            "quality": 0.10,
+            "latency": 0.10,
+            "cost": 0.07,
+            "quota": 0.07,
+            "tool_fit": 0.06,
+        }
+
+    def _score_semantic_candidate(
+        self,
+        row: dict[str, Any],
+        task_profile: dict[str, Any],
+    ) -> dict[str, Any]:
+        runtime_id = str(row.get("id") or "").strip().casefold()
+        runtime_profile = self._runtime_capability_profile(row)
+        skills = runtime_profile.get("skills")
+        skills = skills if isinstance(skills, dict) else {}
+
+        requested = [
+            str(item).strip().casefold()
+            for item in task_profile.get("capabilities", [])
+            if str(item).strip()
+        ]
+        weighted_skill_scores: list[tuple[float, float]] = [
+            (
+                self._semantic_score(skills.get(capability), 0.5),
+                1.0,
+            )
+            for capability in requested
+        ]
+
+        coding_need = self._semantic_score(
+            task_profile.get("coding"),
+            0.0,
+        )
+        if coding_need > 0.0:
+            weighted_skill_scores.append(
+                (
+                    self._semantic_score(skills.get("coding"), 0.5),
+                    max(0.25, 2.0 * coding_need),
+                )
+            )
+
+        if weighted_skill_scores:
+            skill_weight = sum(weight for _, weight in weighted_skill_scores)
+            capability_fit = sum(
+                score * weight for score, weight in weighted_skill_scores
+            ) / skill_weight
+        else:
+            capability_fit = 0.5
+
+        tool_need_raw = task_profile.get("tool_need")
+        tool_need = (
+            self._semantic_score(tool_need_raw, 0.5)
+            if tool_need_raw is not None
+            else 0.5
+        )
+        tool_use = self._semantic_score(
+            runtime_profile.get("tool_use"),
+            self._semantic_score(skills.get("tool_operation"), 0.5),
+        )
+        tool_fit = ((1.0 - tool_need) * 1.0) + (tool_need * tool_use)
+
+        free = bool(row.get("free"))
+        components = {
+            "capability_fit": capability_fit,
+            "quality": self._semantic_score(runtime_profile.get("quality"), 0.5),
+            "latency": self._semantic_score(runtime_profile.get("latency"), 0.5),
+            "cost": (
+                1.0
+                if free
+                else self._semantic_score(
+                    runtime_profile.get("cost_efficiency"),
+                    0.5,
+                )
+            ),
+            "quota": self._runtime_quota_score(row),
+            "tool_fit": tool_fit,
+        }
+        weights = self._semantic_ranking_weights(task_profile)
+        score = sum(
+            components[name] * weight
+            for name, weight in weights.items()
+        )
+
+        return {
+            "runtime": runtime_id,
+            "score": round(score, 4),
+            "profile_source": runtime_profile.get("source"),
+            "components": {
+                key: round(value, 4)
+                for key, value in components.items()
+            },
+            "weights": dict(weights),
+            "free": free,
+            "status": row.get("status"),
+        }
+
+    def _semantic_runtime_ranking(
+        self,
+        request: CognitiveRequest,
+        task_profile: dict[str, Any],
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        mode = str(
+            getattr(
+                self.studio,
+                "cognitive_semantic_routing_mode",
+                "shadow",
+            )
+            or "shadow"
+        ).strip().casefold()
+        current_order = [
+            str(row.get("id") or "").strip().casefold()
+            for row in candidates
+            if str(row.get("id") or "").strip()
+        ]
+        current_selected = current_order[0] if current_order else None
+
+        if mode == "off":
+            return {
+                "schema": SEMANTIC_RUNTIME_RANKING_SCHEMA,
+                "mode": "off",
+                "applied": False,
+                "authority": "disabled",
+                "explicit_constraint": None,
+                "current_order": current_order,
+                "ranked_order": current_order,
+                "current_selected": current_selected,
+                "semantic_preference": current_selected,
+                "would_select": current_selected,
+                "effective_selected": current_selected,
+                "changed": False,
+                "top_margin": None,
+                "min_margin": None,
+                "guard_passed": False,
+                "guard_reasons": ["semantic_routing_disabled"],
+                "rankings": [],
+            }
+
+        current_position = {
+            runtime_id: index for index, runtime_id in enumerate(current_order)
+        }
+        rankings = [
+            self._score_semantic_candidate(row, task_profile)
+            for row in candidates
+        ]
+        rankings.sort(
+            key=lambda item: (
+                -float(item.get("score") or 0.0),
+                current_position.get(
+                    str(item.get("runtime") or ""),
+                    10_000,
+                ),
+            )
+        )
+        ranked_order = [
+            str(item.get("runtime") or "")
+            for item in rankings
+            if str(item.get("runtime") or "")
+        ]
+        semantic_preference = ranked_order[0] if ranked_order else None
+
+        top_margin: float | None = None
+        if len(rankings) >= 2:
+            top_margin = max(
+                0.0,
+                float(rankings[0].get("score") or 0.0)
+                - float(rankings[1].get("score") or 0.0),
+            )
+        elif len(rankings) == 1:
+            top_margin = 1.0
+
+        explicit_constraint = None
+        if request.target_pane_id:
+            explicit_constraint = "target_pane_id"
+        elif request.preferred_runtime:
+            explicit_constraint = "preferred_runtime"
+
+        would_select = (
+            current_selected
+            if explicit_constraint and current_selected
+            else semantic_preference
+        )
+        changed = bool(
+            would_select
+            and current_selected
+            and would_select != current_selected
+        )
+
+        min_margin = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    getattr(
+                        self.studio,
+                        "cognitive_semantic_canary_min_margin",
+                        0.03,
+                    )
+                    or 0.0
+                ),
+            ),
+        )
+        guard_reasons: list[str] = []
+        guard_passed = False
+        applied = False
+        effective_selected = current_selected
+
+        if explicit_constraint:
+            guard_reasons.append(f"explicit_{explicit_constraint}")
+        elif not semantic_preference or not current_selected:
+            guard_reasons.append("semantic_candidate_unavailable")
+        elif not changed:
+            guard_reasons.append("semantic_matches_current")
+            guard_passed = True
+        elif mode == "canary":
+            if top_margin is None or top_margin < min_margin:
+                guard_reasons.append("semantic_margin_below_threshold")
+            else:
+                guard_passed = True
+                applied = True
+                effective_selected = semantic_preference
+        else:
+            # Shadow mode reports the semantic preference but never changes
+            # execution authority.
+            guard_reasons.append("shadow_observation_only")
+
+        return {
+            "schema": SEMANTIC_RUNTIME_RANKING_SCHEMA,
+            "mode": mode,
+            "applied": applied,
+            "authority": (
+                "hirda_canary"
+                if applied
+                else "external"
+            ),
+            "explicit_constraint": explicit_constraint,
+            "current_order": current_order,
+            "ranked_order": ranked_order,
+            "current_selected": current_selected,
+            "semantic_preference": semantic_preference,
+            "would_select": would_select,
+            "effective_selected": effective_selected,
+            "changed": changed,
+            "top_margin": (
+                round(top_margin, 4)
+                if top_margin is not None
+                else None
+            ),
+            "min_margin": (
+                round(min_margin, 4)
+                if mode == "canary"
+                else None
+            ),
+            "guard_passed": guard_passed,
+            "guard_reasons": guard_reasons,
+            "rankings": rankings,
+        }
 
     def _ordered_candidates(
         self,
@@ -676,6 +1542,11 @@ class CognitiveRouter:
             row = by_id.get(runtime_id)
             if row is None:
                 return []
+            if (
+                self._pane_routing_mode() == "enforce"
+                and not self._pane_owned_by_runtime(pane, runtime_id)
+            ):
+                return []
             primary = dict(row)
             primary["_pane"] = dict(pane)
             selected = [primary]
@@ -685,7 +1556,22 @@ class CognitiveRouter:
                 if fallback_pane:
                     fallback_runtime_id = str(fallback_pane.get("agent") or "").casefold()
                     fallback_row = by_id.get(fallback_runtime_id)
-                    if fallback_runtime_id and fallback_runtime_id != runtime_id and fallback_row is not None:
+                    fallback_owned = (
+                        bool(fallback_runtime_id)
+                        and self._pane_owned_by_runtime(
+                            fallback_pane,
+                            fallback_runtime_id,
+                        )
+                    )
+                    if (
+                        fallback_runtime_id
+                        and fallback_runtime_id != runtime_id
+                        and fallback_row is not None
+                        and (
+                            self._pane_routing_mode() != "enforce"
+                            or fallback_owned
+                        )
+                    ):
                         fallback = dict(fallback_row)
                         fallback["_pane"] = dict(fallback_pane)
                         selected.append(fallback)
@@ -712,8 +1598,6 @@ class CognitiveRouter:
             candidate = dict(row)
             candidate["_pane"] = pane
             selected.append(candidate)
-            if not request.allow_fallback:
-                break
         return selected
 
     async def plan(self, payload: CognitiveRequest | dict[str, Any]) -> dict[str, Any]:
@@ -736,6 +1620,10 @@ class CognitiveRouter:
             await self.capsules.lane_states()
             if self.capsules is not None
             else {}
+        )
+        lane_states = await self._reconcile_runtime_lane_health(
+            runtime_snapshot,
+            lane_states,
         )
         jev = await evaluate_cognitive_request(self.studio, request)
         deterministic = self._deterministic_lane(request)
@@ -761,6 +1649,8 @@ class CognitiveRouter:
         ):
             lane = "deep"
 
+        task_semantic_profile = _task_semantic_profile(request, jev, lane)
+
         candidates = self._ordered_candidates(
             request,
             lane,
@@ -773,6 +1663,29 @@ class CognitiveRouter:
                 candidates,
             )
         )
+        semantic_routing = self._semantic_runtime_ranking(
+            request,
+            task_semantic_profile,
+            candidates,
+        )
+
+        if semantic_routing.get("applied"):
+            semantic_position = {
+                runtime_id: index
+                for index, runtime_id in enumerate(
+                    semantic_routing.get("ranked_order") or []
+                )
+            }
+            candidates = sorted(
+                candidates,
+                key=lambda row: semantic_position.get(
+                    str(row.get("id") or "").strip().casefold(),
+                    10_000,
+                ),
+            )
+
+        if not request.allow_fallback and not request.target_pane_id:
+            candidates = candidates[:1]
 
         return {
             "schema": "hirda-cognitive-plan-v1",
@@ -781,6 +1694,9 @@ class CognitiveRouter:
             "deterministic_lane": deterministic,
             "lane_states": lane_states,
             "jev": jev.as_dict(),
+            "task_semantic_profile": task_semantic_profile,
+            "semantic_routing": semantic_routing,
+            "pane_routing": self.pane_routing_status(),
             "infrastructure_routing": infrastructure_routing,
             "candidates": [
                 {
@@ -791,6 +1707,11 @@ class CognitiveRouter:
                     "free": bool(row.get("free")),
                     "status": row.get("status"),
                     "pane_id": (row.get("_pane") or {}).get("pane_id"),
+                    "pane_owned": self._pane_owned_by_runtime(
+                        row.get("_pane") or {},
+                        str(row.get("id") or ""),
+                    ),
+                    "capability_profile": self._runtime_capability_profile(row),
                     "infrastructure_route": (
                         dict(row.get("_infrastructure_route"))
                         if isinstance(
@@ -803,7 +1724,9 @@ class CognitiveRouter:
                 for row in candidates
             ],
             "identity_continuity": True,
-            "semantic_authority_changed": False,
+            "semantic_authority_changed": bool(
+                semantic_routing.get("applied")
+            ),
         }
 
     async def _invoke_runtime(
@@ -877,15 +1800,64 @@ class CognitiveRouter:
             )
             if prompt_waits_for_completion:
                 args["wait"] = True
-            raw_prompt = await cognitive_client.call_tool(
-                "herdr_prompt_agent",
-                args,
-                client_name=f"hirda-cognition-{request.request_id.lower()}",
-            )
+            try:
+                raw_prompt = await cognitive_client.call_tool(
+                    "herdr_prompt_agent",
+                    args,
+                    client_name=f"hirda-cognition-{request.request_id.lower()}",
+                )
+            except Exception:
+                # A provider-side rate limit/auth/quota failure may surface in
+                # the terminal while prompt_agent itself times out. Read the
+                # correlated pane segment once so we can fail fast with a
+                # meaningful code and allow normal fallback routing.
+                error_read_tool = self.herdr.tool("herdr_read_agent")
+                if error_read_tool:
+                    error_read_args = build_tool_arguments(
+                        error_read_tool,
+                        pane=pane,
+                        pane_id=pane.get("pane_id"),
+                        agent=runtime_id,
+                    )
+                    error_read_schema = (
+                        error_read_tool.get("inputSchema")
+                        or error_read_tool.get("input_schema")
+                        or {}
+                    )
+                    error_read_props = (
+                        error_read_schema.get("properties")
+                        if isinstance(error_read_schema, dict)
+                        else {}
+                    )
+                    if isinstance(error_read_props, dict) and "lines" in error_read_props:
+                        error_read_args["lines"] = 120
+                    try:
+                        raw_error_read = await cognitive_client.call_tool(
+                            "herdr_read_agent",
+                            error_read_args,
+                            client_name=(
+                                f"hirda-cognition-error-read-"
+                                f"{request.request_id.lower()}"
+                            ),
+                        )
+                    except Exception:
+                        raw_error_read = None
+                    runtime_error = _runtime_terminal_error(
+                        raw_error_read,
+                        request.request_id,
+                    )
+                    if runtime_error:
+                        raise CognitiveRouterError(runtime_error)
+                raise
             prompt_result = _decode_text_content(raw_prompt)
 
             wait_tool = self.herdr.tool("herdr_wait_agent")
-            if wait_tool:
+            wait_performed = False
+
+            async def wait_for_settle() -> None:
+                nonlocal wait_performed
+                if not wait_tool or wait_performed:
+                    return
                 remaining = float(request.timeout_seconds) - (time.monotonic() - started_at)
                 if remaining <= 0:
                     raise CognitiveRouterError("cognitive_runtime_deadline_exhausted")
@@ -905,6 +1877,14 @@ class CognitiveRouter:
                     wait_args,
                     client_name=f"hirda-cognition-wait-{request.request_id.lower()}",
                 )
+                wait_performed = True
+
+            # If prompt_agent supports wait=True it already waits for the agent to
+            # settle. Read immediately so completed output is not lost behind a
+            # redundant second wait. Fall back to wait_agent only when the read
+            # still cannot observe the framed result.
+            if wait_tool and not prompt_waits_for_completion:
+                await wait_for_settle()
 
             read_tool = self.herdr.tool("herdr_read_agent")
             if not read_tool:
@@ -941,6 +1921,27 @@ class CognitiveRouter:
                 except CognitiveRouterError as exc:
                     if str(exc) not in transient_marker_errors:
                         raise
+
+                    transcript_reader = getattr(
+                        self.herdr,
+                        "read_session_result",
+                        None,
+                    )
+                    if callable(transcript_reader):
+                        session_output = transcript_reader(
+                            pane,
+                            request.request_id,
+                        )
+                        if session_output:
+                            try:
+                                return _extract_marked_result(
+                                    [session_output],
+                                    result_start,
+                                    result_end,
+                                )
+                            except CognitiveRouterError:
+                                pass
+
                     runtime_error = _runtime_terminal_error(
                         [output, raw_read],
                         request.request_id,
@@ -948,6 +1949,9 @@ class CognitiveRouter:
                     if runtime_error:
                         raise CognitiveRouterError(runtime_error)
                     last_marker_error = exc
+                    if prompt_waits_for_completion and wait_tool and not wait_performed:
+                        await wait_for_settle()
+                        continue
                     remaining = float(request.timeout_seconds) - (time.monotonic() - started_at)
                     if read_attempt >= 7 or remaining <= 0.5:
                         raise
@@ -988,7 +1992,12 @@ class CognitiveRouter:
                 fallback_used=False,
                 attempts=tuple(attempts),
                 jev=dict(plan["jev"]),
+                task_semantic_profile=dict(plan["task_semantic_profile"]),
+                semantic_routing=dict(plan["semantic_routing"]),
                 infrastructure_routing=infrastructure_routing,
+                semantic_authority_changed=bool(
+                    plan.get("semantic_authority_changed")
+                ),
                 error="no_healthy_cognitive_runtime",
             )
 
@@ -1025,20 +2034,89 @@ class CognitiveRouter:
                 if alternate is not None and alternate_status in {"idle", "done"}:
                     pane = alternate
                     pane_status = alternate_status
-            if pane is not None and pane_status not in {"idle", "done"}:
-                attempts.append(
-                    {
-                        "runtime": runtime_id,
-                        "status": "failed",
-                        "error": "runtime_busy",
-                        "detail": f"cognitive runtime pane is {pane_status}",
-                    }
-                )
-                continue
-            if pane:
-                row["_pane"] = pane
+
+            pane_key = str((pane or {}).get("pane_id") or "").strip()
+            pane_lock = (
+                self._pane_execution_locks.setdefault(pane_key, asyncio.Lock())
+                if pane_key
+                else None
+            )
+            lock_acquired = False
+            attempt_started = time.monotonic()
             try:
-                output = await self._invoke_runtime(attempt_request, row)
+                if pane_lock is not None:
+                    queue_timeout = min(
+                        attempt_timeout,
+                        max(0.0, deadline - time.monotonic()),
+                    )
+                    if queue_timeout <= 0:
+                        raise CognitiveRouterError("cognitive_runtime_queue_timeout")
+                    try:
+                        await asyncio.wait_for(
+                            pane_lock.acquire(),
+                            timeout=queue_timeout,
+                        )
+                    except asyncio.TimeoutError as exc:
+                        raise CognitiveRouterError(
+                            "cognitive_runtime_queue_timeout"
+                        ) from exc
+                    lock_acquired = True
+
+                # Re-read pane lifecycle after acquiring the lock. A sibling
+                # request may have been running when this request was planned,
+                # and dedicated cognitive panes are queueable resources.
+                if pane_key:
+                    await self.herdr.refresh()
+                    current_pane = self.herdr.find_pane(pane_id=pane_key)
+                    if current_pane is not None:
+                        pane = current_pane
+                        pane_status = str(
+                            pane.get("agent_status") or "unknown"
+                        ).casefold()
+
+                remaining_after_queue = min(
+                    max(0.0, attempt_timeout - (time.monotonic() - attempt_started)),
+                    max(0.0, deadline - time.monotonic()),
+                )
+                if remaining_after_queue <= 0:
+                    raise CognitiveRouterError("cognitive_runtime_queue_timeout")
+
+                if (
+                    pane is not None
+                    and pane_status not in {"idle", "done"}
+                    and self._pane_routing_mode() == "enforce"
+                    and self._pane_owned_by_runtime(pane, runtime_id)
+                    and pane_key
+                ):
+                    pane = await self._wait_for_owned_pane_available(
+                        runtime_id,
+                        pane_key,
+                        timeout_seconds=remaining_after_queue,
+                    )
+                    pane_status = str(
+                        (pane or {}).get("agent_status") or "unknown"
+                    ).casefold()
+                    remaining_after_queue = min(
+                        max(
+                            0.0,
+                            attempt_timeout - (time.monotonic() - attempt_started),
+                        ),
+                        max(0.0, deadline - time.monotonic()),
+                    )
+
+                if pane is not None and pane_status not in {"idle", "done"}:
+                    raise CognitiveRouterError("runtime_busy")
+
+                if pane:
+                    row["_pane"] = pane
+
+                if remaining_after_queue <= 0:
+                    raise CognitiveRouterError("cognitive_runtime_queue_timeout")
+                invoke_request = replace(
+                    attempt_request,
+                    timeout_seconds=remaining_after_queue,
+                )
+                output = await self._invoke_runtime(invoke_request, row)
                 if not output.strip():
                     raise CognitiveRouterError("empty_cognitive_result")
             except Exception as exc:
@@ -1052,10 +2130,17 @@ class CognitiveRouter:
                         "runtime": runtime_id,
                         "status": "failed",
                         "error": error_code,
-                        "detail": str(exc)[:240],
+                        "detail": (
+                            f"cognitive runtime pane is {pane_status}"
+                            if error_code == "runtime_busy"
+                            else str(exc)[:240]
+                        ),
                     }
                 )
                 continue
+            finally:
+                if pane_lock is not None and lock_acquired:
+                    pane_lock.release()
 
             attempts.append({"runtime": runtime_id, "status": "success"})
             return CognitiveResult(
@@ -1071,7 +2156,12 @@ class CognitiveRouter:
                 fallback_used=index > 0,
                 attempts=tuple(attempts),
                 jev=dict(plan["jev"]),
+                task_semantic_profile=dict(plan["task_semantic_profile"]),
+                semantic_routing=dict(plan["semantic_routing"]),
                 infrastructure_routing=infrastructure_routing,
+                semantic_authority_changed=bool(
+                    plan.get("semantic_authority_changed")
+                ),
             )
 
         return CognitiveResult(
@@ -1087,6 +2177,11 @@ class CognitiveRouter:
             fallback_used=len(attempts) > 1,
             attempts=tuple(attempts),
             jev=dict(plan["jev"]),
+            task_semantic_profile=dict(plan["task_semantic_profile"]),
+            semantic_routing=dict(plan["semantic_routing"]),
             infrastructure_routing=infrastructure_routing,
+            semantic_authority_changed=bool(
+                plan.get("semantic_authority_changed")
+            ),
             error="all_cognitive_runtimes_failed",
         )
