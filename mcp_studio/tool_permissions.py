@@ -170,6 +170,19 @@ def _segment_class(segment: str) -> ToolClass:
         if sub in {"status", "ip", "ping", "netcheck"}:
             return "read"
         return "unknown"
+    if command == "corepack":
+        args = tokens[1:]
+        if not args:
+            return "unknown"
+        sub = args[0]
+        if sub in {"--version", "-v", "help"}:
+            return "read"
+        if sub in {"enable", "disable", "install", "pack", "up", "use"}:
+            return "write"
+        if sub in {"pnpm", "npm", "yarn"}:
+            nested = " ".join(shlex.quote(part) for part in args)
+            return _segment_class(nested)
+        return "unknown"
     if command in _READ_COMMANDS:
         return "read"
     if command in _EXECUTE_COMMANDS:
