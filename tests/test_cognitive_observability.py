@@ -435,6 +435,40 @@ def test_semantic_routing_defaults_to_shadow_and_validates_configuration():
             cognitive_runtime_capability_overrides={"codex": "invalid"}
         )
 
+
+def test_supervisor_and_team_delegation_settings_validate():
+    cfg = StudioConfig()
+    assert cfg.cognitive_supervisor_policy_mode == "shadow"
+    assert cfg.cognitive_supervisor_runtime == "claude"
+    assert cfg.cognitive_hermes_team_delegation_mode == "shadow"
+    assert cfg.cognitive_hermes_team_require_opt_in is True
+    assert cfg.cognitive_hermes_team_timeout_seconds == 600.0
+    assert cfg.cognitive_hermes_team_profiles == {
+        "coder": "coder",
+        "tester": "tester",
+        "reviewer": "reviewer",
+    }
+
+    enabled = StudioConfig(
+        cognitive_supervisor_policy_mode="enforce",
+        cognitive_hermes_team_delegation_mode="canary",
+        cognitive_hermes_team_timeout_seconds=420,
+    )
+    assert enabled.cognitive_supervisor_policy_mode == "enforce"
+    assert enabled.cognitive_hermes_team_delegation_mode == "canary"
+    assert enabled.cognitive_hermes_team_timeout_seconds == 420.0
+
+    with pytest.raises(ValueError, match="cognitive_supervisor_policy_mode"):
+        StudioConfig(cognitive_supervisor_policy_mode="magic")
+    with pytest.raises(ValueError, match="cognitive_hermes_team_delegation_mode"):
+        StudioConfig(cognitive_hermes_team_delegation_mode="enforce")
+    with pytest.raises(ValueError, match="cognitive_hermes_team_min_skill"):
+        StudioConfig(cognitive_hermes_team_min_skill=1.1)
+    with pytest.raises(ValueError, match="cognitive_hermes_team_timeout_seconds"):
+        StudioConfig(cognitive_hermes_team_timeout_seconds=0)
+    with pytest.raises(ValueError, match="cognitive_hermes_team_profiles"):
+        StudioConfig(cognitive_hermes_team_profiles={"coder": "coder"})
+
 def test_soak_settings_validate_bounds():
     with pytest.raises(ValueError, match="cognitive_soak_window_minutes"):
         StudioConfig(cognitive_soak_window_minutes=0)

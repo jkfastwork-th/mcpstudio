@@ -73,6 +73,8 @@ class AgentRuntimeInventory:
                 "software_engineering": 0.62,
                 "fast_utility": 0.96,
                 "tool_operation": 0.80,
+                "team_orchestration": 0.94,
+                "bot_delegation": 0.96,
             },
             "quality": 0.78,
             "latency": 0.96,

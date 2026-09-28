@@ -243,6 +243,29 @@ class StudioConfig:
     cognitive_runtime_recovery_interval_seconds: float = 15.0
     cognitive_semantic_routing_mode: str = "shadow"
     cognitive_semantic_canary_min_margin: float = 0.03
+    # Supervisor authority is intentionally separate from semantic specialist
+    # ranking. Enforce may appoint a strategic supervisor without reordering the
+    # specialist execution candidates selected by semantic routing.
+    cognitive_supervisor_policy_mode: str = "shadow"
+    cognitive_supervisor_runtime: str = "claude"
+    # P2 controlled team delegation. Canary execution requires an explicit
+    # request context opt-in so production traffic cannot silently fan out.
+    cognitive_hermes_team_delegation_mode: str = "shadow"
+    cognitive_hermes_team_min_skill: float = 0.80
+    cognitive_hermes_team_require_opt_in: bool = True
+    cognitive_hermes_team_timeout_seconds: float = 600.0
+    cognitive_hermes_team_profiles: dict[str, str] = field(
+        default_factory=lambda: {
+            "coder": "coder",
+            "tester": "tester",
+            "reviewer": "reviewer",
+        }
+    )
+    cognitive_hermes_group_ws_url: str = ""
+    cognitive_hermes_group_token_env: str = "HIRDA_HERMES_GROUP_TOKEN"
+    cognitive_hermes_group_token_file: str = ""
+    cognitive_hermes_group_room_id: str = "hirda-cognitive-team"
+    cognitive_hermes_group_room_name: str = "HIRDA Cognitive Team"
     cognitive_runtime_capability_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     cognitive_node_routing_mode: str = "off"
     # Pane ownership is independent from semantic/runtime ranking. In shadow
@@ -414,6 +437,59 @@ class StudioConfig:
                 "studio.cognitive_semantic_canary_min_margin must be between 0 and 1"
             )
         self.cognitive_semantic_canary_min_margin = semantic_canary_margin
+
+        supervisor_mode = str(
+            self.cognitive_supervisor_policy_mode or "shadow"
+        ).strip().lower()
+        if supervisor_mode not in {"off", "shadow", "enforce"}:
+            raise ValueError(
+                "studio.cognitive_supervisor_policy_mode must be off, shadow, or enforce"
+            )
+        self.cognitive_supervisor_policy_mode = supervisor_mode
+        supervisor_runtime = str(
+            self.cognitive_supervisor_runtime or ""
+        ).strip().casefold()
+        if not supervisor_runtime:
+            raise ValueError("studio.cognitive_supervisor_runtime must be non-empty")
+        self.cognitive_supervisor_runtime = supervisor_runtime
+
+        team_mode = str(
+            self.cognitive_hermes_team_delegation_mode or "shadow"
+        ).strip().lower()
+        if team_mode not in {"off", "shadow", "canary"}:
+            raise ValueError(
+                "studio.cognitive_hermes_team_delegation_mode must be off, shadow, or canary"
+            )
+        self.cognitive_hermes_team_delegation_mode = team_mode
+        team_min_skill = float(self.cognitive_hermes_team_min_skill)
+        if not 0.0 <= team_min_skill <= 1.0:
+            raise ValueError(
+                "studio.cognitive_hermes_team_min_skill must be between 0 and 1"
+            )
+        self.cognitive_hermes_team_min_skill = team_min_skill
+        team_timeout = float(self.cognitive_hermes_team_timeout_seconds)
+        if team_timeout <= 0:
+            raise ValueError(
+                "studio.cognitive_hermes_team_timeout_seconds must be positive"
+            )
+        self.cognitive_hermes_team_timeout_seconds = team_timeout
+        if not isinstance(self.cognitive_hermes_team_profiles, dict):
+            raise ValueError(
+                "studio.cognitive_hermes_team_profiles must be an object"
+            )
+        required_team_roles = {"coder", "tester", "reviewer"}
+        if not required_team_roles.issubset(self.cognitive_hermes_team_profiles):
+            raise ValueError(
+                "studio.cognitive_hermes_team_profiles must define coder, tester, and reviewer"
+            )
+        for role in required_team_roles:
+            profile = str(self.cognitive_hermes_team_profiles.get(role) or "").strip().casefold()
+            if not profile or not profile.isalnum():
+                raise ValueError(
+                    "studio.cognitive_hermes_team_profiles values must be lowercase alphanumeric names"
+                )
+            self.cognitive_hermes_team_profiles[role] = profile
+
         if not isinstance(self.cognitive_runtime_capability_overrides, dict):
             raise ValueError(
                 "studio.cognitive_runtime_capability_overrides must be an object"

@@ -63,6 +63,7 @@ from .reflex_metrics import ReflexMetrics
 from .action_adapter import evaluate_action_envelope
 from .action_registry import ActionProviderRegistryError, build_action_provider_registry
 from .cognitive_router import CognitiveRouter, CognitiveRouterError
+from .hermes_groups import HermesGroupClient
 from .cognitive_observability import CognitiveObservability
 from .pixel_art_studio import (
     PixelArtStudioError,
@@ -163,12 +164,14 @@ operations = OperationsManager(settings, db)
 observability = ObservabilityManager(settings, db)
 reflex_metrics = ReflexMetrics(settings.studio)
 action_provider_registry = build_action_provider_registry(settings.studio)
+hermes_groups = HermesGroupClient(settings.studio)
 cognitive_router = CognitiveRouter(
     settings.studio,
     herdr,
     agent_runtimes,
     capsules,
     machine_router,
+    hermes_groups,
 )
 cognitive_observability = CognitiveObservability(
     db,
@@ -712,6 +715,26 @@ async def cognitive_router_status():
             "mode": settings.studio.cognitive_semantic_routing_mode,
             "runtime_capability_override_count": len(
                 settings.studio.cognitive_runtime_capability_overrides
+            ),
+        },
+        "supervisor_policy": {
+            "mode": settings.studio.cognitive_supervisor_policy_mode,
+            "runtime": settings.studio.cognitive_supervisor_runtime,
+            "semantic_authority": "unchanged",
+        },
+        "team_delegation": {
+            "mode": settings.studio.cognitive_hermes_team_delegation_mode,
+            "topology": "claude>hermes>bots>hermes>claude",
+            "require_opt_in": bool(
+                settings.studio.cognitive_hermes_team_require_opt_in
+            ),
+            "profiles": dict(settings.studio.cognitive_hermes_team_profiles),
+            "timeout_seconds": settings.studio.cognitive_hermes_team_timeout_seconds,
+            "group_runtime": hermes_groups.status(),
+            "execution_authority": (
+                "hirda_canary"
+                if settings.studio.cognitive_hermes_team_delegation_mode == "canary"
+                else "external"
             ),
         },
         "node_routing": {

@@ -222,6 +222,17 @@ studio:
   # HCR cognitive fabric. Plan/shadow mode and execution are separate gates.
   #cognitive_router_enabled: false
   #cognitive_router_execute_enabled: false
+  #cognitive_supervisor_policy_mode: shadow  # off | shadow | enforce
+  #cognitive_supervisor_runtime: claude
+  #cognitive_hermes_team_delegation_mode: shadow  # off | shadow | canary
+  #cognitive_hermes_team_require_opt_in: true
+  #cognitive_hermes_team_timeout_seconds: 600.0
+  #cognitive_hermes_team_profiles: {coder: coder, tester: tester, reviewer: reviewer}
+  #cognitive_hermes_group_ws_url: ws://127.0.0.1:9119/api/ws
+  #cognitive_hermes_group_token_env: HERMES_DASHBOARD_SESSION_TOKEN
+  #cognitive_hermes_group_token_file: /home/user/.config/hirda/hermes-group.env
+  #cognitive_hermes_group_room_id: hirda-cognitive-team
+  #cognitive_hermes_group_room_name: HIRDA Cognitive Team
   #cognitive_router_default_timeout_seconds: 30.0
   # N8 infrastructure routing integration. Start with shadow, then enforce after
   # capability advertisements and runtime bindings are certified.

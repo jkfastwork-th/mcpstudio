@@ -1443,6 +1443,263 @@ async def test_semantic_shadow_ranking_prefers_codex_for_coding_without_reorderi
 
 
 @pytest.mark.asyncio
+async def test_hermes_team_delegation_shadow_observes_claude_supervised_coding():
+    router = CognitiveRouter(studio(), ProfiledHerdr(), ProfiledRuntimes())
+    plan = await router.plan(
+        {
+            "request_id": "COG-TEAM-SHADOW-CODING",
+            "prompt": "Implement the guarded router change and verify the regression suite.",
+            "capability": "coding",
+        }
+    )
+
+    team = plan["team_delegation"]
+    assert team["schema"] == "hirda-hermes-team-delegation-v1"
+    assert team["mode"] == "shadow"
+    assert team["applied"] is False
+    assert team["eligible"] is True
+    assert team["would_delegate"] is True
+    assert team["topology"] == "claude>hermes>bots>hermes>claude"
+    assert team["supervisor_runtime"] == "claude"
+    assert team["team_lead_runtime"] == "hermes"
+    assert team["guard_passed"] is True
+    assert team["guard_reasons"] == ["shadow_observation_only"]
+    assert team["semantic_authority_changed"] is False
+    assert team["execution_authority_changed"] is False
+    assert plan["candidates"][0]["runtime"] == "claude"
+
+
+@pytest.mark.asyncio
+async def test_hermes_team_delegation_shadow_rejects_non_coding_task():
+    router = CognitiveRouter(studio(), ProfiledHerdr(), ProfiledRuntimes())
+    plan = await router.plan(
+        {
+            "request_id": "COG-TEAM-SHADOW-SOCIAL",
+            "prompt": "Reply naturally to the user.",
+            "capability": "social_dialogue",
+        }
+    )
+
+    team = plan["team_delegation"]
+    assert team["applied"] is False
+    assert team["eligible"] is False
+    assert team["would_delegate"] is False
+    assert "task_not_software_engineering" in team["guard_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_hermes_team_delegation_never_overrides_explicit_non_claude_runtime():
+    router = CognitiveRouter(studio(), ProfiledHerdr(), ProfiledRuntimes())
+    plan = await router.plan(
+        {
+            "request_id": "COG-TEAM-EXPLICIT-CODEX",
+            "prompt": "Implement this directly with Codex.",
+            "capability": "coding",
+            "preferred_depth": "deep",
+            "preferred_runtime": "codex",
+        }
+    )
+
+    team = plan["team_delegation"]
+    assert team["applied"] is False
+    assert team["eligible"] is False
+    assert team["would_delegate"] is False
+    assert team["explicit_constraint"] == "preferred_runtime"
+    assert team["guard_reasons"] == ["explicit_preferred_runtime"]
+
+
+@pytest.mark.asyncio
+async def test_hermes_team_delegation_accepts_explicit_claude_supervisor():
+    router = CognitiveRouter(studio(), ProfiledHerdr(), ProfiledRuntimes())
+    plan = await router.plan(
+        {
+            "request_id": "COG-TEAM-EXPLICIT-CLAUDE",
+            "prompt": "Supervise this implementation through the Hermes team.",
+            "capability": "coding",
+            "preferred_depth": "deep",
+            "preferred_runtime": "claude",
+        }
+    )
+
+    team = plan["team_delegation"]
+    assert team["applied"] is False
+    assert team["eligible"] is True
+    assert team["would_delegate"] is True
+    assert team["topology"] == "claude>hermes>bots>hermes>claude"
+    assert team["supervisor_runtime"] == "claude"
+    assert team["explicit_constraint"] == "preferred_runtime"
+    assert team["guard_reasons"] == ["shadow_observation_only"]
+
+
+@pytest.mark.asyncio
+async def test_supervisor_policy_enforce_keeps_codex_specialist_but_appoints_claude():
+    cfg = studio()
+    cfg.cognitive_semantic_routing_mode = "canary"
+    cfg.cognitive_supervisor_policy_mode = "enforce"
+    router = CognitiveRouter(cfg, ProfiledHerdr(), ProfiledRuntimes())
+    plan = await router.plan(
+        {
+            "request_id": "COG-SUPERVISOR-CODING",
+            "prompt": "Implement and verify a multi-file routing change.",
+            "capability": "coding",
+            "preferred_depth": "deep",
+        }
+    )
+
+    semantic = plan["semantic_routing"]
+    supervisor = plan["supervisor_policy"]
+    assert semantic["effective_selected"] == "codex"
+    assert plan["candidates"][0]["runtime"] == "codex"
+    assert supervisor["mode"] == "enforce"
+    assert supervisor["applied"] is True
+    assert supervisor["effective_supervisor"] == "claude"
+    assert supervisor["specialist_runtime"] == "codex"
+    assert supervisor["semantic_execution_runtime"] == "codex"
+    assert supervisor["semantic_authority_changed"] is False
+    assert supervisor["execution_order_changed"] is False
+
+
+@pytest.mark.asyncio
+async def test_team_canary_requires_explicit_request_opt_in():
+    cfg = studio()
+    cfg.cognitive_semantic_routing_mode = "canary"
+    cfg.cognitive_supervisor_policy_mode = "enforce"
+    cfg.cognitive_hermes_team_delegation_mode = "canary"
+    cfg.cognitive_hermes_team_require_opt_in = True
+    router = CognitiveRouter(cfg, ProfiledHerdr(), ProfiledRuntimes())
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-TEAM-CANARY-NO-OPTIN",
+            "prompt": "Implement and test this routing change.",
+            "capability": "coding",
+            "preferred_depth": "deep",
+        }
+    )
+    team = plan["team_delegation"]
+    assert team["eligible"] is True
+    assert team["applied"] is False
+    assert team["guard_reasons"] == ["canary_opt_in_required"]
+
+    opted_in = await router.plan(
+        {
+            "request_id": "COG-TEAM-CANARY-OPTIN",
+            "prompt": "Implement and test this routing change.",
+            "capability": "coding",
+            "preferred_depth": "deep",
+            "context": {"team_delegation": True},
+        }
+    )
+    opted_team = opted_in["team_delegation"]
+    assert opted_team["eligible"] is True
+    assert opted_team["applied"] is True
+    assert opted_team["authority"] == "hirda_canary"
+    assert opted_team["topology"] == "claude>hermes>bots>hermes>claude"
+    assert opted_team["guard_reasons"] == ["controlled_canary_opt_in"]
+
+
+@pytest.mark.asyncio
+async def test_controlled_team_execute_runs_supervisor_team_and_review():
+    cfg = studio()
+    cfg.cognitive_semantic_routing_mode = "canary"
+    cfg.cognitive_supervisor_policy_mode = "enforce"
+    cfg.cognitive_supervisor_runtime = "claude"
+    cfg.cognitive_hermes_team_delegation_mode = "canary"
+    cfg.cognitive_hermes_team_require_opt_in = True
+    cfg.cognitive_hermes_team_timeout_seconds = 600.0
+    cfg.cognitive_hermes_team_profiles = {
+        "coder": "coder",
+        "tester": "tester",
+        "reviewer": "reviewer",
+    }
+    router = CognitiveRouter(cfg, ProfiledHerdr(), ProfiledRuntimes())
+    runtime_calls = []
+
+    async def fake_invoke_specific(runtime_id, request, runtime_rows):
+        runtime_calls.append((runtime_id, request.request_id, request.prompt))
+        if request.request_id.endswith("-SUPERVISOR"):
+            return "MISSION_CONTRACT"
+        if request.request_id.endswith("-REVIEW"):
+            assert "HIRDA EXECUTION ENVELOPE" in request.prompt
+            assert '"status": "success"' in request.prompt
+            assert '"backend": "hermes_group_chat"' in request.prompt
+            assert '"member_output_roles": ["coder", "reviewer", "tester"]' in request.prompt
+            assert '"recovery_rounds": 1' in request.prompt
+            assert "HERMES GROUP FINAL ROLE REPORTS" in request.prompt
+            return "FINAL_REVIEW"
+        raise AssertionError(request.request_id)
+
+    class FakeGroupClient:
+        async def run_mission(
+            self,
+            mission,
+            *,
+            request_id,
+            timeout_seconds,
+        ):
+            assert request_id == "COG-TEAM-EXEC"
+            assert timeout_seconds == 600.0
+            assert "@coder" in mission
+            assert "@tester" in mission
+            assert "@reviewer" in mission
+            assert "MISSION_CONTRACT" in mission
+            return SimpleNamespace(
+                room_id="hirda-cognitive-team",
+                output="TEAM_REPORT",
+                events=[{"kind": "message.member"}],
+                latest_seq=7,
+                driver_status={"working": False},
+                member_outputs={
+                    "coder": "CODER_FINAL",
+                    "tester": "TESTER_FINAL",
+                    "reviewer": "REVIEWER_FINAL",
+                },
+                recovery_rounds=1,
+            )
+
+    router._invoke_specific_runtime = fake_invoke_specific
+    router.hermes_groups = FakeGroupClient()
+
+    result = await router.execute(
+        {
+            "request_id": "COG-TEAM-EXEC",
+            "prompt": "Implement the change.",
+            "capability": "coding",
+            "preferred_depth": "deep",
+            "timeout_seconds": 120,
+            "context": {
+                "team_delegation": True,
+                "workspace_path": "/tmp/project",
+            },
+        }
+    )
+
+    assert result.status == "success"
+    assert result.runtime == "claude"
+    assert result.output == "FINAL_REVIEW"
+    assert result.fallback_used is False
+    assert [item["stage"] for item in result.attempts] == [
+        "supervisor_plan",
+        "team_execution",
+        "supervisor_review",
+    ]
+    assert [call[1] for call in runtime_calls] == [
+        "COG-TEAM-EXEC-SUPERVISOR",
+        "COG-TEAM-EXEC-REVIEW",
+    ]
+    assert result.supervisor_policy["effective_supervisor"] == "claude"
+    assert result.team_delegation["applied"] is True
+    assert result.team_delegation["execution"]["status"] == "success"
+    assert result.team_delegation["execution"]["native_bot_mode"] is True
+    assert result.team_delegation["execution"]["member_output_roles"] == [
+        "coder",
+        "reviewer",
+        "tester",
+    ]
+    assert result.team_delegation["execution"]["recovery_rounds"] == 1
+
+
+@pytest.mark.asyncio
 async def test_semantic_shadow_ranking_prefers_claude_for_social_dialogue():
     router = CognitiveRouter(studio(), ProfiledHerdr(), ProfiledRuntimes())
     plan = await router.plan(

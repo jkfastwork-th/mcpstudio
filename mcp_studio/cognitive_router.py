@@ -11,6 +11,7 @@ import httpx
 
 from .execution import ToolSchemaError, build_tool_arguments
 from .herdr import HerdrManager, _decode_text_content
+from .hermes_groups import HermesGroupClient, HermesGroupError
 
 
 COGNITIVE_REQUEST_SCHEMA = "hirda-cognitive-request-v1"
@@ -18,6 +19,8 @@ COGNITIVE_RESULT_SCHEMA = "hirda-cognitive-result-v1"
 COGNITIVE_JUDGMENT_SCHEMA = "hirda-jev-cognitive-judgment-v1"
 TASK_SEMANTIC_PROFILE_SCHEMA = "hirda-task-semantic-profile-v1"
 SEMANTIC_RUNTIME_RANKING_SCHEMA = "hirda-semantic-runtime-ranking-v1"
+SUPERVISOR_POLICY_SCHEMA = "hirda-supervisor-policy-v1"
+HERMES_TEAM_DELEGATION_SCHEMA = "hirda-hermes-team-delegation-v1"
 
 _CAPABILITY_TASK_TYPES = {
     "social_dialogue": "conversation",
@@ -133,7 +136,9 @@ class CognitiveResult:
     jev: dict[str, Any]
     task_semantic_profile: dict[str, Any] = field(default_factory=dict)
     semantic_routing: dict[str, Any] = field(default_factory=dict)
+    supervisor_policy: dict[str, Any] = field(default_factory=dict)
     infrastructure_routing: dict[str, Any] = field(default_factory=dict)
+    team_delegation: dict[str, Any] = field(default_factory=dict)
     identity_continuity: bool = True
     semantic_authority_changed: bool = False
     error: str | None = None
@@ -640,12 +645,14 @@ class CognitiveRouter:
         runtimes: Any,
         capsules: Any | None = None,
         capability_router: Any | None = None,
+        hermes_groups: HermesGroupClient | None = None,
     ) -> None:
         self.studio = studio
         self.herdr = herdr
         self.runtimes = runtimes
         self.capsules = capsules
         self.capability_router = capability_router
+        self.hermes_groups = hermes_groups or HermesGroupClient(studio)
         self._runtime_recovery_streaks: dict[str, int] = {}
         self._runtime_recovery_task: asyncio.Task[None] | None = None
         # A Herdr pane is a single interactive agent stream. Parallel prompts to
@@ -1509,6 +1516,250 @@ class CognitiveRouter:
             "rankings": rankings,
         }
 
+
+    def _supervisor_policy(
+        self,
+        request: CognitiveRequest,
+        task_profile: dict[str, Any],
+        semantic_routing: dict[str, Any],
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Choose strategic supervision without taking semantic specialist authority."""
+        mode = str(
+            getattr(
+                self.studio,
+                "cognitive_supervisor_policy_mode",
+                "shadow",
+            )
+            or "shadow"
+        ).strip().casefold()
+        preferred_supervisor = str(
+            getattr(
+                self.studio,
+                "cognitive_supervisor_runtime",
+                "claude",
+            )
+            or "claude"
+        ).strip().casefold()
+        semantic_execution_runtime = str(
+            semantic_routing.get("effective_selected") or ""
+        ).strip().casefold() or None
+        specialist_runtime = str(
+            semantic_routing.get("semantic_preference")
+            or semantic_execution_runtime
+            or ""
+        ).strip().casefold() or None
+        candidate_ids = {
+            str(row.get("id") or "").strip().casefold()
+            for row in candidates
+            if str(row.get("id") or "").strip()
+        }
+        explicit_runtime = str(
+            request.preferred_runtime or ""
+        ).strip().casefold() or None
+
+        reasons: list[str] = []
+        eligible = False
+        if mode == "off":
+            reasons.append("supervisor_policy_disabled")
+        elif request.target_pane_id:
+            reasons.append("explicit_target_pane_id")
+        elif explicit_runtime and explicit_runtime != preferred_supervisor:
+            reasons.append("explicit_preferred_runtime")
+        elif task_profile.get("task_type") != "software_engineering":
+            reasons.append("task_not_software_engineering")
+        elif task_profile.get("reasoning_depth") != "deep":
+            reasons.append("task_not_deep")
+        elif preferred_supervisor not in candidate_ids:
+            reasons.append("supervisor_runtime_unavailable")
+        else:
+            eligible = True
+            reasons.append(
+                "supervisor_policy_enforced"
+                if mode == "enforce"
+                else "shadow_observation_only"
+            )
+
+        applied = bool(eligible and mode == "enforce")
+        effective_supervisor = (
+            preferred_supervisor
+            if applied
+            else semantic_execution_runtime
+        )
+        return {
+            "schema": SUPERVISOR_POLICY_SCHEMA,
+            "mode": mode,
+            "applied": applied,
+            "authority": (
+                "hirda_supervisor_policy"
+                if applied
+                else "external"
+            ),
+            "eligible": eligible,
+            "preferred_supervisor": preferred_supervisor,
+            "effective_supervisor": effective_supervisor,
+            "semantic_execution_runtime": semantic_execution_runtime,
+            "specialist_runtime": specialist_runtime,
+            "explicit_runtime": explicit_runtime,
+            "guard_passed": eligible,
+            "guard_reasons": reasons,
+            "semantic_authority_changed": False,
+            "execution_order_changed": False,
+        }
+
+    def _hermes_team_delegation(
+        self,
+        request: CognitiveRequest,
+        task_profile: dict[str, Any],
+        supervisor_policy: dict[str, Any],
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Guard controlled Claude -> Hermes -> Bots delegation."""
+        mode = str(
+            getattr(
+                self.studio,
+                "cognitive_hermes_team_delegation_mode",
+                "shadow",
+            )
+            or "shadow"
+        ).strip().casefold()
+        min_skill = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    getattr(
+                        self.studio,
+                        "cognitive_hermes_team_min_skill",
+                        0.80,
+                    )
+                    or 0.0
+                ),
+            ),
+        )
+        supervisor_runtime = str(
+            supervisor_policy.get("effective_supervisor") or ""
+        ).strip().casefold() or None
+        hermes_row = next(
+            (
+                row
+                for row in candidates
+                if str(row.get("id") or "").strip().casefold() == "hermes"
+            ),
+            None,
+        )
+        hermes_profile = (
+            self._runtime_capability_profile(hermes_row)
+            if isinstance(hermes_row, dict)
+            else {}
+        )
+        hermes_skills = dict(hermes_profile.get("skills") or {})
+        team_skill = max(
+            float(hermes_skills.get("team_orchestration") or 0.0),
+            float(hermes_skills.get("bot_delegation") or 0.0),
+        )
+        configured_profiles = dict(
+            getattr(
+                self.studio,
+                "cognitive_hermes_team_profiles",
+                {
+                    "coder": "coder",
+                    "tester": "tester",
+                    "reviewer": "reviewer",
+                },
+            )
+            or {}
+        )
+        profiles = {
+            role: str(configured_profiles.get(role) or role).strip().casefold()
+            for role in ("coder", "tester", "reviewer")
+        }
+
+        reasons: list[str] = []
+        explicit_constraint = None
+        if request.target_pane_id:
+            explicit_constraint = "target_pane_id"
+        elif request.preferred_runtime:
+            explicit_constraint = "preferred_runtime"
+
+        context_team = request.context.get("team_delegation")
+        preferred_runtime = str(request.preferred_runtime or "").strip().casefold()
+        base_eligible = False
+        if mode == "off":
+            reasons.append("team_delegation_disabled")
+        elif request.target_pane_id:
+            reasons.append("explicit_target_pane_id")
+        elif preferred_runtime and preferred_runtime != "claude":
+            reasons.append("explicit_preferred_runtime")
+        elif context_team is False:
+            reasons.append("request_disabled_team_delegation")
+        elif task_profile.get("task_type") != "software_engineering":
+            reasons.append("task_not_software_engineering")
+        elif task_profile.get("reasoning_depth") != "deep":
+            reasons.append("task_not_deep")
+        elif supervisor_runtime != "claude":
+            reasons.append("supervisor_not_claude")
+        elif hermes_row is None:
+            reasons.append("hermes_candidate_unavailable")
+        elif team_skill < min_skill:
+            reasons.append("hermes_team_skill_below_threshold")
+        else:
+            base_eligible = True
+
+        require_opt_in = bool(
+            getattr(
+                self.studio,
+                "cognitive_hermes_team_require_opt_in",
+                True,
+            )
+        )
+        applied = False
+        if base_eligible:
+            if mode == "shadow":
+                reasons.append("shadow_observation_only")
+            elif mode == "canary":
+                if require_opt_in and context_team is not True:
+                    reasons.append("canary_opt_in_required")
+                else:
+                    applied = True
+                    reasons.append("controlled_canary_opt_in")
+            else:
+                reasons.append("unsupported_team_delegation_mode")
+
+        return {
+            "schema": HERMES_TEAM_DELEGATION_SCHEMA,
+            "mode": mode,
+            "applied": applied,
+            "authority": (
+                "hirda_canary"
+                if applied
+                else "external"
+            ),
+            "eligible": base_eligible,
+            "would_delegate": base_eligible,
+            "topology": (
+                "claude>hermes>bots>hermes>claude"
+                if base_eligible
+                else None
+            ),
+            "supervisor_runtime": supervisor_runtime,
+            "team_lead_runtime": "hermes" if hermes_row is not None else None,
+            "profiles": profiles,
+            "hermes_team_skill": round(team_skill, 4),
+            "min_skill": round(min_skill, 4),
+            "explicit_constraint": explicit_constraint,
+            "guard_passed": bool(
+                base_eligible
+                and (
+                    mode == "shadow"
+                    or applied
+                )
+            ),
+            "guard_reasons": reasons,
+            "semantic_authority_changed": False,
+            "execution_authority_changed": applied,
+        }
+
     def _ordered_candidates(
         self,
         request: CognitiveRequest,
@@ -1684,6 +1935,19 @@ class CognitiveRouter:
                 ),
             )
 
+        supervisor_policy = self._supervisor_policy(
+            request,
+            task_semantic_profile,
+            semantic_routing,
+            candidates,
+        )
+        team_delegation = self._hermes_team_delegation(
+            request,
+            task_semantic_profile,
+            supervisor_policy,
+            candidates,
+        )
+
         if not request.allow_fallback and not request.target_pane_id:
             candidates = candidates[:1]
 
@@ -1696,6 +1960,8 @@ class CognitiveRouter:
             "jev": jev.as_dict(),
             "task_semantic_profile": task_semantic_profile,
             "semantic_routing": semantic_routing,
+            "supervisor_policy": supervisor_policy,
+            "team_delegation": team_delegation,
             "pane_routing": self.pane_routing_status(),
             "infrastructure_routing": infrastructure_routing,
             "candidates": [
@@ -1970,6 +2236,319 @@ class CognitiveRouter:
                 raise
             return await submit_and_extract(repair_prompt)
 
+    async def _invoke_specific_runtime(
+        self,
+        runtime_id: str,
+        request: CognitiveRequest,
+        runtime_rows: dict[str, dict[str, Any]],
+    ) -> str:
+        row = dict(runtime_rows.get(runtime_id) or {})
+        pane = self._find_runtime_pane(runtime_id)
+        if pane is None:
+            raise CognitiveRouterError(
+                f"cognitive_{runtime_id}_pane_unavailable"
+            )
+        pane_key = str(pane.get("pane_id") or "").strip()
+        if not pane_key:
+            raise CognitiveRouterError(
+                f"cognitive_{runtime_id}_pane_missing_id"
+            )
+        pane_lock = self._pane_execution_locks.setdefault(
+            pane_key,
+            asyncio.Lock(),
+        )
+        async with pane_lock:
+            await self.herdr.refresh()
+            current = self.herdr.find_pane(pane_id=pane_key) or pane
+            status = str(
+                current.get("agent_status") or "unknown"
+            ).casefold()
+            if (
+                status not in {"idle", "done"}
+                and self._pane_routing_mode() == "enforce"
+                and self._pane_owned_by_runtime(current, runtime_id)
+            ):
+                current = await self._wait_for_owned_pane_available(
+                    runtime_id,
+                    pane_key,
+                    timeout_seconds=request.timeout_seconds,
+                )
+                status = str(
+                    (current or {}).get("agent_status") or "unknown"
+                ).casefold()
+            if status not in {"idle", "done"}:
+                raise CognitiveRouterError("runtime_busy")
+            row["_pane"] = current
+            output = await self._invoke_runtime(request, row)
+            if not output.strip():
+                raise CognitiveRouterError("empty_cognitive_result")
+            return output
+
+    async def _execute_controlled_team(
+        self,
+        request: CognitiveRequest,
+        plan: dict[str, Any],
+        runtime_rows: dict[str, dict[str, Any]],
+    ) -> CognitiveResult:
+        attempts: list[dict[str, Any]] = []
+        team = dict(plan.get("team_delegation") or {})
+        supervisor = dict(plan.get("supervisor_policy") or {})
+        claude_row = dict(runtime_rows.get("claude") or {})
+        workers = dict(team.get("profiles") or {})
+        workspace_path = str(
+            request.context.get("workspace_path") or ""
+        ).strip() or None
+        configured_team_timeout = max(
+            1.0,
+            float(
+                getattr(
+                    self.studio,
+                    "cognitive_hermes_team_timeout_seconds",
+                    300.0,
+                )
+                or 300.0
+            ),
+        )
+        request_timeout = max(1.0, float(request.timeout_seconds))
+        supervisor_timeout = max(30.0, min(request_timeout, 120.0))
+        team_timeout = configured_team_timeout
+        review_timeout = max(30.0, min(request_timeout, 120.0))
+
+        def failed(stage: str, error: str) -> CognitiveResult:
+            team["execution"] = {
+                "status": "failed",
+                "stage": stage,
+                "backend": "hermes_group_chat",
+                "workers": workers,
+            }
+            return CognitiveResult(
+                schema=COGNITIVE_RESULT_SCHEMA,
+                request_id=request.request_id,
+                status="failed",
+                output=None,
+                lane=str(plan["lane"]),
+                runtime="claude",
+                provider=str(claude_row.get("provider") or "") or None,
+                model=str(
+                    claude_row.get("model")
+                    or claude_row.get("last_used_model")
+                    or ""
+                ) or None,
+                degraded=True,
+                fallback_used=False,
+                attempts=tuple(attempts),
+                jev=dict(plan["jev"]),
+                task_semantic_profile=dict(plan["task_semantic_profile"]),
+                semantic_routing=dict(plan["semantic_routing"]),
+                supervisor_policy=supervisor,
+                infrastructure_routing=dict(
+                    plan.get("infrastructure_routing") or {}
+                ),
+                team_delegation=team,
+                semantic_authority_changed=bool(
+                    plan.get("semantic_authority_changed")
+                ),
+                error=error,
+            )
+
+        mission_prompt = (
+            "You are the HIRDA strategic supervisor. Produce a concise mission contract "
+            "for a Hermes Bot Mode group containing coder, tester, and reviewer Bots. "
+            "Do not implement the task yourself. State objective, constraints, acceptance "
+            "criteria, verification requirements, and risks. Preserve the user's intent.\n\n"
+            f"ORIGINAL REQUEST:\n{request.prompt}\n\n"
+            f"SEMANTIC SPECIALIST HINT: {supervisor.get('specialist_runtime')}\n"
+            f"WORKSPACE: {workspace_path or 'not specified'}"
+        )
+        try:
+            mission = await self._invoke_specific_runtime(
+                "claude",
+                replace(
+                    request,
+                    request_id=f"{request.request_id}-SUPERVISOR",
+                    prompt=mission_prompt,
+                    timeout_seconds=supervisor_timeout,
+                    allow_fallback=False,
+                    preferred_runtime="claude",
+                ),
+                runtime_rows,
+            )
+            attempts.append(
+                {
+                    "stage": "supervisor_plan",
+                    "runtime": "claude",
+                    "status": "success",
+                }
+            )
+        except Exception as exc:
+            attempts.append(
+                {
+                    "stage": "supervisor_plan",
+                    "runtime": "claude",
+                    "status": "failed",
+                    "error": str(exc)[:240],
+                }
+            )
+            return failed(
+                "supervisor_plan",
+                "controlled_team_supervisor_failed",
+            )
+
+        coder = workers.get("coder", "coder")
+        tester = workers.get("tester", "tester")
+        reviewer = workers.get("reviewer", "reviewer")
+        group_prompt = (
+            "HIRDA CONTROLLED TEAM MISSION\n"
+            f"@{coder} implement the mission in the specified workspace. "
+            f"@{tester} verify the implementation and run the relevant tests. "
+            f"@{reviewer} independently review correctness, regressions, and acceptance "
+            "criteria. Coordinate through this Group Chat, use additional @mentions when "
+            "needed, and surface blockers instead of pretending success. "
+            "When the room settles, the transcript will be returned to Claude for final "
+            "supervisor review.\n\n"
+            f"WORKSPACE: {workspace_path or 'not specified'}\n\n"
+            f"CLAUDE MISSION CONTRACT:\n{mission}"
+        )
+        try:
+            group_result = await self.hermes_groups.run_mission(
+                group_prompt,
+                request_id=request.request_id,
+                timeout_seconds=team_timeout,
+            )
+            attempts.append(
+                {
+                    "stage": "team_execution",
+                    "runtime": "hermes",
+                    "backend": "group_chat",
+                    "room_id": group_result.room_id,
+                    "workers": [coder, tester, reviewer],
+                    "event_count": len(group_result.events),
+                    "member_output_roles": sorted(group_result.member_outputs),
+                    "recovery_rounds": group_result.recovery_rounds,
+                    "status": "success",
+                }
+            )
+        except Exception as exc:
+            attempts.append(
+                {
+                    "stage": "team_execution",
+                    "runtime": "hermes",
+                    "backend": "group_chat",
+                    "status": "failed",
+                    "error": str(exc)[:240],
+                }
+            )
+            return failed(
+                "team_execution",
+                "controlled_team_execution_failed",
+            )
+
+        execution_envelope = {
+            "schema": "hirda-controlled-team-execution-v1",
+            "request_id": request.request_id,
+            "status": "success",
+            "backend": "hermes_group_chat",
+            "room_id": group_result.room_id,
+            "workers": [coder, tester, reviewer],
+            "member_output_roles": sorted(group_result.member_outputs),
+            "event_count": len(group_result.events),
+            "latest_seq": group_result.latest_seq,
+            "recovery_rounds": group_result.recovery_rounds,
+            "driver_status": group_result.driver_status,
+            "native_bot_mode": True,
+            "durable_room_driver": True,
+        }
+        review_prompt = (
+            "You are the HIRDA strategic supervisor performing final review. Compare the "
+            "Hermes Group Chat final role reports against the original request and mission "
+            "contract. The HIRDA EXECUTION ENVELOPE below is authoritative runtime metadata "
+            "from this same request, produced by the orchestrator after the Hermes Group "
+            "returned. Treat it as execution evidence; do not require the Bots to independently "
+            "corroborate fields that only HIRDA can observe. Return the final user-facing result. "
+            "Do not claim work or tests that neither the role reports nor the execution envelope "
+            "evidence. Surface unresolved issues clearly.\n\n"
+            f"ORIGINAL REQUEST:\n{request.prompt}\n\n"
+            f"MISSION CONTRACT:\n{mission}\n\n"
+            "HIRDA EXECUTION ENVELOPE:\n"
+            f"{json.dumps(execution_envelope, ensure_ascii=False, sort_keys=True)}\n\n"
+            f"HERMES GROUP FINAL ROLE REPORTS:\n{group_result.output}"
+        )
+        try:
+            output = await self._invoke_specific_runtime(
+                "claude",
+                replace(
+                    request,
+                    request_id=f"{request.request_id}-REVIEW",
+                    prompt=review_prompt,
+                    timeout_seconds=review_timeout,
+                    allow_fallback=False,
+                    preferred_runtime="claude",
+                ),
+                runtime_rows,
+            )
+            attempts.append(
+                {
+                    "stage": "supervisor_review",
+                    "runtime": "claude",
+                    "status": "success",
+                }
+            )
+        except Exception as exc:
+            attempts.append(
+                {
+                    "stage": "supervisor_review",
+                    "runtime": "claude",
+                    "status": "failed",
+                    "error": str(exc)[:240],
+                }
+            )
+            return failed(
+                "supervisor_review",
+                "controlled_team_review_failed",
+            )
+
+        team["execution"] = {
+            "status": "success",
+            "backend": "hermes_group_chat",
+            "room_id": group_result.room_id,
+            "workers": workers,
+            "event_count": len(group_result.events),
+            "latest_seq": group_result.latest_seq,
+            "member_output_roles": sorted(group_result.member_outputs),
+            "recovery_rounds": group_result.recovery_rounds,
+            "driver_status": group_result.driver_status,
+            "native_bot_mode": True,
+            "durable_room_driver": True,
+        }
+        return CognitiveResult(
+            schema=COGNITIVE_RESULT_SCHEMA,
+            request_id=request.request_id,
+            status="success",
+            output=output,
+            lane=str(plan["lane"]),
+            runtime="claude",
+            provider=str(claude_row.get("provider") or "") or None,
+            model=str(
+                claude_row.get("model")
+                or claude_row.get("last_used_model")
+                or ""
+            ) or None,
+            degraded=False,
+            fallback_used=False,
+            attempts=tuple(attempts),
+            jev=dict(plan["jev"]),
+            task_semantic_profile=dict(plan["task_semantic_profile"]),
+            semantic_routing=dict(plan["semantic_routing"]),
+            supervisor_policy=supervisor,
+            infrastructure_routing=dict(
+                plan.get("infrastructure_routing") or {}
+            ),
+            team_delegation=team,
+            semantic_authority_changed=bool(
+                plan.get("semantic_authority_changed")
+            ),
+        )
+
     async def execute(self, payload: CognitiveRequest | dict[str, Any]) -> CognitiveResult:
         plan = await self.plan(payload)
         request = normalize_cognitive_request(plan["request"])
@@ -1994,7 +2573,9 @@ class CognitiveRouter:
                 jev=dict(plan["jev"]),
                 task_semantic_profile=dict(plan["task_semantic_profile"]),
                 semantic_routing=dict(plan["semantic_routing"]),
+                supervisor_policy=dict(plan.get("supervisor_policy") or {}),
                 infrastructure_routing=infrastructure_routing,
+                team_delegation=dict(plan.get("team_delegation") or {}),
                 semantic_authority_changed=bool(
                     plan.get("semantic_authority_changed")
                 ),
@@ -2007,6 +2588,13 @@ class CognitiveRouter:
             for row in runtime_snapshot.get("runtimes", [])
             if isinstance(row, dict)
         }
+        if bool((plan.get("team_delegation") or {}).get("applied")):
+            return await self._execute_controlled_team(
+                request,
+                plan,
+                runtime_rows,
+            )
+
         deadline = time.monotonic() + max(1.0, float(request.timeout_seconds))
 
         for index, candidate in enumerate(candidates):
@@ -2158,7 +2746,9 @@ class CognitiveRouter:
                 jev=dict(plan["jev"]),
                 task_semantic_profile=dict(plan["task_semantic_profile"]),
                 semantic_routing=dict(plan["semantic_routing"]),
+                supervisor_policy=dict(plan.get("supervisor_policy") or {}),
                 infrastructure_routing=infrastructure_routing,
+                team_delegation=dict(plan.get("team_delegation") or {}),
                 semantic_authority_changed=bool(
                     plan.get("semantic_authority_changed")
                 ),
@@ -2179,7 +2769,9 @@ class CognitiveRouter:
             jev=dict(plan["jev"]),
             task_semantic_profile=dict(plan["task_semantic_profile"]),
             semantic_routing=dict(plan["semantic_routing"]),
+            supervisor_policy=dict(plan.get("supervisor_policy") or {}),
             infrastructure_routing=infrastructure_routing,
+            team_delegation=dict(plan.get("team_delegation") or {}),
             semantic_authority_changed=bool(
                 plan.get("semantic_authority_changed")
             ),
