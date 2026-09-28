@@ -1,0 +1,27 @@
+schema: hirda-plugin-v1
+id: nova-inbox
+name: Nova Desktop Inbox
+version: 0.1.0
+adapter:
+  runtime: python
+  entry: adapter.py
+  class: NovaInboxIntegration
+capabilities:
+  - nova_inbox
+  - asynchronous_human_notification
+  - approval_request
+tools:
+  - nova_inbox_send
+permissions:
+  nova_inbox_send: write
+health:
+  type: adapter_probe
+routing:
+  mode: communication-backend
+  preferred_lanes: [claude, codex, hermes]
+metadata:
+  backend_capability: true
+  runtime_authority: hirda
+  sender_identity: fern
+  governance_authority: false
+  external_action_authority: false
