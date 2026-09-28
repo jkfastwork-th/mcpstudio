@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +30,10 @@ def test_group_status_reports_configuration_without_exposing_token(monkeypatch):
     assert status["configured"] is True
     assert status["token_available"] is True
     assert status["token_env"] == "HIRDA_HERMES_GROUP_TOKEN"
+    assert status["lifecycle"]["scope_mode"] == "workspace"
+    assert status["lifecycle"]["rotation_enabled"] is True
+    assert status["lifecycle"]["max_events"] == 96
+    assert status["lifecycle"]["max_age_seconds"] == 21600.0
     assert "secret" not in repr(status)
 
 
@@ -84,6 +89,13 @@ async def test_ensure_room_reuses_existing_room():
                     {
                         "room_id": "hirda-cognitive-team",
                         "name": "HIRDA Cognitive Team",
+                        "members": [
+                            {"member_id": "coder", "profile": "coder", "handle": "coder"},
+                            {"member_id": "tester", "profile": "tester", "handle": "tester"},
+                            {"member_id": "reviewer", "profile": "reviewer", "handle": "reviewer"},
+                        ],
+                        "latest_seq": 1,
+                        "created_at": 9999999999.0,
                     }
                 ]
             }
@@ -123,12 +135,208 @@ async def test_ensure_room_creates_bot_group_when_missing():
     ]
 
 
+def test_room_family_scopes_workspace_without_exposing_raw_scope():
+    client = HermesGroupClient(studio())
+    (
+        room_a,
+        _name_a,
+        _members_a,
+        family_a,
+        digest_a,
+    ) = client._room_spec("/home/alfred/project-a")
+    (
+        room_b,
+        _name_b,
+        _members_b,
+        family_b,
+        digest_b,
+    ) = client._room_spec("/home/alfred/project-b")
+
+    assert room_a == family_a
+    assert room_b == family_b
+    assert family_a != family_b
+    assert digest_a != digest_b
+    assert "/home/alfred" not in family_a
+    assert "/home/alfred" not in family_b
+    assert f"-s{digest_a}" in family_a
+
+
+@pytest.mark.asyncio
+async def test_ensure_room_rotates_when_event_budget_exceeded():
+    cfg = studio(
+        cognitive_hermes_group_rotation_enabled=True,
+        cognitive_hermes_group_max_events=4,
+        cognitive_hermes_group_max_age_seconds=0,
+    )
+    client = HermesGroupClient(cfg)
+    members = [
+        {"member_id": "coder", "profile": "coder", "handle": "coder"},
+        {"member_id": "tester", "profile": "tester", "handle": "tester"},
+        {"member_id": "reviewer", "profile": "reviewer", "handle": "reviewer"},
+    ]
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_rpc(method, params=None, **kwargs):
+        params = dict(params or {})
+        calls.append((method, params))
+        if method == "groups.capabilities":
+            return {"driver": True}
+        if method == "groups.list":
+            return {
+                "rooms": [
+                    {
+                        "room_id": "hirda-cognitive-team",
+                        "name": "HIRDA Cognitive Team",
+                        "members": members,
+                        "latest_seq": 4,
+                        "created_at": 9999999999.0,
+                    }
+                ]
+            }
+        if method == "groups.state":
+            return {
+                "driver_status": {
+                    "working": False,
+                    "blocked": False,
+                    "counts": {"queued": 0, "running": 0},
+                }
+            }
+        if method == "groups.create":
+            return {
+                "room": {
+                    "room_id": params["room_id"],
+                    "name": params["name"],
+                    "members": params["members"],
+                    "latest_seq": 1,
+                    "created_at": 9999999999.0,
+                }
+            }
+        if method == "groups.disband":
+            return {
+                "tombstone": {
+                    "room_id": params["room_id"],
+                    "disbanded_at": 1.0,
+                    "idempotent": False,
+                }
+            }
+        raise AssertionError(method)
+
+    client.rpc = fake_rpc
+    room = await client.ensure_room()
+    lifecycle = room["_hirda_lifecycle"]
+
+    assert room["room_id"] == "hirda-cognitive-team-r0001"
+    assert lifecycle["generation"] == 1
+    assert lifecycle["rotated"] is True
+    assert lifecycle["rotated_from"] == "hirda-cognitive-team"
+    assert lifecycle["rotation_reasons"] == ["event_budget_exceeded"]
+    assert lifecycle["fresh_session_boundary"] is True
+    assert lifecycle["stale_rooms_cleaned"] == ["hirda-cognitive-team"]
+    assert any(
+        method == "groups.disband"
+        and params["room_id"] == "hirda-cognitive-team"
+        for method, params in calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_same_scope_missions_are_serialized():
+    client = HermesGroupClient(studio())
+    active = 0
+    max_active = 0
+    order: list[str] = []
+
+    async def fake_locked(
+        mission,
+        *,
+        request_id,
+        timeout_seconds,
+        scope_key,
+    ):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        order.append(f"start:{request_id}")
+        await asyncio.sleep(0.01)
+        order.append(f"end:{request_id}")
+        active -= 1
+        return request_id
+
+    client._run_mission_locked = fake_locked
+    first, second = await asyncio.gather(
+        client.run_mission(
+            "A",
+            request_id="REQ-A",
+            timeout_seconds=1,
+            scope_key="workspace-a",
+        ),
+        client.run_mission(
+            "B",
+            request_id="REQ-B",
+            timeout_seconds=1,
+            scope_key="workspace-a",
+        ),
+    )
+
+    assert {first, second} == {"REQ-A", "REQ-B"}
+    assert max_active == 1
+    assert order in (
+        ["start:REQ-A", "end:REQ-A", "start:REQ-B", "end:REQ-B"],
+        ["start:REQ-B", "end:REQ-B", "start:REQ-A", "end:REQ-A"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_different_scope_missions_can_run_in_parallel():
+    client = HermesGroupClient(studio())
+    active = 0
+    max_active = 0
+
+    async def fake_locked(
+        mission,
+        *,
+        request_id,
+        timeout_seconds,
+        scope_key,
+    ):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        return request_id
+
+    client._run_mission_locked = fake_locked
+    await asyncio.gather(
+        client.run_mission(
+            "A",
+            request_id="REQ-A",
+            timeout_seconds=1,
+            scope_key="workspace-a",
+        ),
+        client.run_mission(
+            "B",
+            request_id="REQ-B",
+            timeout_seconds=1,
+            scope_key="workspace-b",
+        ),
+    )
+
+    assert max_active == 2
+
+
 @pytest.mark.asyncio
 async def test_run_mission_requires_final_role_reports():
     client = HermesGroupClient(studio())
 
-    async def ensure_room():
-        return {"room_id": "hirda-cognitive-team"}
+    async def ensure_room(scope_key=None):
+        return {
+            "room_id": "hirda-cognitive-team",
+            "_hirda_lifecycle": {
+                "scope_digest": "testscope",
+                "generation": 0,
+            },
+        }
 
     client.ensure_room = ensure_room
     sends: list[dict] = []
@@ -235,8 +443,14 @@ async def test_run_mission_requires_final_role_reports():
 async def test_run_mission_retries_roles_that_pass_without_message():
     client = HermesGroupClient(studio())
 
-    async def ensure_room():
-        return {"room_id": "hirda-cognitive-team"}
+    async def ensure_room(scope_key=None):
+        return {
+            "room_id": "hirda-cognitive-team",
+            "_hirda_lifecycle": {
+                "scope_digest": "testscope",
+                "generation": 0,
+            },
+        }
 
     client.ensure_room = ensure_room
     sends: list[dict] = []
@@ -353,8 +567,14 @@ async def test_run_mission_retries_roles_that_pass_without_message():
 async def test_run_mission_timeout_stops_active_room():
     client = HermesGroupClient(studio())
 
-    async def ensure_room():
-        return {"room_id": "hirda-cognitive-team"}
+    async def ensure_room(scope_key=None):
+        return {
+            "room_id": "hirda-cognitive-team",
+            "_hirda_lifecycle": {
+                "scope_digest": "testscope",
+                "generation": 0,
+            },
+        }
 
     client.ensure_room = ensure_room
     calls = []
@@ -409,8 +629,14 @@ async def test_run_mission_timeout_stops_active_room():
 async def test_run_mission_stops_followup_chatter_after_required_roles_complete():
     client = HermesGroupClient(studio())
 
-    async def ensure_room():
-        return {"room_id": "hirda-cognitive-team"}
+    async def ensure_room(scope_key=None):
+        return {
+            "room_id": "hirda-cognitive-team",
+            "_hirda_lifecycle": {
+                "scope_digest": "testscope",
+                "generation": 0,
+            },
+        }
 
     client.ensure_room = ensure_room
     sends: list[dict] = []

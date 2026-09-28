@@ -2284,6 +2284,69 @@ class CognitiveRouter:
                 raise CognitiveRouterError("empty_cognitive_result")
             return output
 
+
+    def _hermes_group_scope_key(
+        self,
+        request: CognitiveRequest,
+    ) -> str:
+        mode = str(
+            getattr(
+                self.studio,
+                "cognitive_hermes_group_scope_mode",
+                "workspace",
+            )
+            or "workspace"
+        ).strip().casefold()
+        if mode == "shared":
+            return "shared"
+
+        context = dict(request.context or {})
+        tenant = next(
+            (
+                str(context.get(key) or "").strip()
+                for key in (
+                    "tenant_id",
+                    "account_id",
+                    "account_scope",
+                    "owner_id",
+                )
+                if str(context.get(key) or "").strip()
+            ),
+            "",
+        )
+        workspace = next(
+            (
+                str(context.get(key) or "").strip()
+                for key in (
+                    "workspace_id",
+                    "workspace_path",
+                    "project_id",
+                )
+                if str(context.get(key) or "").strip()
+            ),
+            "",
+        )
+        conversation = str(request.conversation_id or "").strip()
+
+        if mode == "conversation":
+            payload = {
+                "mode": "conversation",
+                "tenant": tenant,
+                "conversation": conversation or workspace or "default",
+            }
+        else:
+            payload = {
+                "mode": "workspace",
+                "tenant": tenant,
+                "workspace": workspace or conversation or "default",
+            }
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
     async def _execute_controlled_team(
         self,
         request: CognitiveRequest,
@@ -2414,6 +2477,7 @@ class CognitiveRouter:
                 group_prompt,
                 request_id=request.request_id,
                 timeout_seconds=team_timeout,
+                scope_key=self._hermes_group_scope_key(request),
             )
             attempts.append(
                 {
@@ -2425,6 +2489,7 @@ class CognitiveRouter:
                     "event_count": len(group_result.events),
                     "member_output_roles": sorted(group_result.member_outputs),
                     "recovery_rounds": group_result.recovery_rounds,
+                    "lifecycle": dict(group_result.lifecycle),
                     "status": "success",
                 }
             )
@@ -2454,6 +2519,7 @@ class CognitiveRouter:
             "event_count": len(group_result.events),
             "latest_seq": group_result.latest_seq,
             "recovery_rounds": group_result.recovery_rounds,
+            "lifecycle": dict(group_result.lifecycle),
             "driver_status": group_result.driver_status,
             "native_bot_mode": True,
             "durable_room_driver": True,
@@ -2516,6 +2582,7 @@ class CognitiveRouter:
             "latest_seq": group_result.latest_seq,
             "member_output_roles": sorted(group_result.member_outputs),
             "recovery_rounds": group_result.recovery_rounds,
+            "lifecycle": dict(group_result.lifecycle),
             "driver_status": group_result.driver_status,
             "native_bot_mode": True,
             "durable_room_driver": True,

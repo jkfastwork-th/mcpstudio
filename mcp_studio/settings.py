@@ -266,6 +266,10 @@ class StudioConfig:
     cognitive_hermes_group_token_file: str = ""
     cognitive_hermes_group_room_id: str = "hirda-cognitive-team"
     cognitive_hermes_group_room_name: str = "HIRDA Cognitive Team"
+    cognitive_hermes_group_scope_mode: str = "workspace"
+    cognitive_hermes_group_rotation_enabled: bool = True
+    cognitive_hermes_group_max_events: int = 96
+    cognitive_hermes_group_max_age_seconds: float = 21600.0
     cognitive_runtime_capability_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     cognitive_node_routing_mode: str = "off"
     # Pane ownership is independent from semantic/runtime ranking. In shadow
@@ -489,6 +493,27 @@ class StudioConfig:
                     "studio.cognitive_hermes_team_profiles values must be lowercase alphanumeric names"
                 )
             self.cognitive_hermes_team_profiles[role] = profile
+
+        group_scope_mode = str(
+            self.cognitive_hermes_group_scope_mode or "workspace"
+        ).strip().lower()
+        if group_scope_mode not in {"shared", "workspace", "conversation"}:
+            raise ValueError(
+                "studio.cognitive_hermes_group_scope_mode must be shared, workspace, or conversation"
+            )
+        self.cognitive_hermes_group_scope_mode = group_scope_mode
+        group_max_events = int(self.cognitive_hermes_group_max_events)
+        if group_max_events < 0:
+            raise ValueError(
+                "studio.cognitive_hermes_group_max_events must be non-negative"
+            )
+        self.cognitive_hermes_group_max_events = group_max_events
+        group_max_age = float(self.cognitive_hermes_group_max_age_seconds)
+        if group_max_age < 0:
+            raise ValueError(
+                "studio.cognitive_hermes_group_max_age_seconds must be non-negative"
+            )
+        self.cognitive_hermes_group_max_age_seconds = group_max_age
 
         if not isinstance(self.cognitive_runtime_capability_overrides, dict):
             raise ValueError(

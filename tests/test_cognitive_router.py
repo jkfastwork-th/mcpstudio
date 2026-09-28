@@ -5,6 +5,7 @@ import pytest
 
 from mcp_studio.agent_runtimes import AgentRuntimeInventory
 from mcp_studio.cognitive_router import (
+    CognitiveRequest,
     CognitiveRouter,
     CognitiveRouterError,
     JevCognitiveJudgment,
@@ -1636,8 +1637,10 @@ async def test_controlled_team_execute_runs_supervisor_team_and_review():
             *,
             request_id,
             timeout_seconds,
+            scope_key=None,
         ):
             assert request_id == "COG-TEAM-EXEC"
+            assert "/tmp/project" in str(scope_key)
             assert timeout_seconds == 600.0
             assert "@coder" in mission
             assert "@tester" in mission
@@ -1655,6 +1658,14 @@ async def test_controlled_team_execute_runs_supervisor_team_and_review():
                     "reviewer": "REVIEWER_FINAL",
                 },
                 recovery_rounds=1,
+                lifecycle={
+                    "scope_digest": "abc123",
+                    "family_id": "hirda-cognitive-team-sabc123",
+                    "room_id": "hirda-cognitive-team-sabc123",
+                    "generation": 0,
+                    "rotated": False,
+                    "fresh_session_boundary": True,
+                },
             )
 
     router._invoke_specific_runtime = fake_invoke_specific
@@ -1697,6 +1708,78 @@ async def test_controlled_team_execute_runs_supervisor_team_and_review():
         "tester",
     ]
     assert result.team_delegation["execution"]["recovery_rounds"] == 1
+    assert result.team_delegation["execution"]["lifecycle"]["scope_digest"] == "abc123"
+    assert result.team_delegation["execution"]["lifecycle"]["generation"] == 0
+    assert result.attempts[1]["lifecycle"]["fresh_session_boundary"] is True
+
+
+def test_hermes_group_scope_key_is_workspace_stable_and_tenant_aware():
+    cfg = studio()
+    cfg.cognitive_hermes_group_scope_mode = "workspace"
+    router = CognitiveRouter(cfg, ProfiledHerdr(), ProfiledRuntimes())
+
+    request_a = CognitiveRequest(
+        schema="hirda-cognitive-request-v1",
+        request_id="REQ-A",
+        prompt="x",
+        context={
+            "workspace_path": "/tmp/project",
+            "account_id": "acct-a",
+        },
+        conversation_id="conv-a",
+    )
+    request_b = CognitiveRequest(
+        schema="hirda-cognitive-request-v1",
+        request_id="REQ-B",
+        prompt="x",
+        context={
+            "workspace_path": "/tmp/project",
+            "account_id": "acct-a",
+        },
+        conversation_id="conv-b",
+    )
+    request_other_account = CognitiveRequest(
+        schema="hirda-cognitive-request-v1",
+        request_id="REQ-C",
+        prompt="x",
+        context={
+            "workspace_path": "/tmp/project",
+            "account_id": "acct-b",
+        },
+        conversation_id="conv-a",
+    )
+
+    assert router._hermes_group_scope_key(request_a) == router._hermes_group_scope_key(
+        request_b
+    )
+    assert router._hermes_group_scope_key(
+        request_a
+    ) != router._hermes_group_scope_key(request_other_account)
+
+
+def test_hermes_group_scope_key_can_follow_conversation():
+    cfg = studio()
+    cfg.cognitive_hermes_group_scope_mode = "conversation"
+    router = CognitiveRouter(cfg, ProfiledHerdr(), ProfiledRuntimes())
+
+    first = CognitiveRequest(
+        schema="hirda-cognitive-request-v1",
+        request_id="REQ-A",
+        prompt="x",
+        context={"workspace_path": "/tmp/project"},
+        conversation_id="conv-a",
+    )
+    second = CognitiveRequest(
+        schema="hirda-cognitive-request-v1",
+        request_id="REQ-B",
+        prompt="x",
+        context={"workspace_path": "/tmp/project"},
+        conversation_id="conv-b",
+    )
+
+    assert router._hermes_group_scope_key(first) != router._hermes_group_scope_key(
+        second
+    )
 
 
 @pytest.mark.asyncio

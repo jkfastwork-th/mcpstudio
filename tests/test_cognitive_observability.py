@@ -443,6 +443,10 @@ def test_supervisor_and_team_delegation_settings_validate():
     assert cfg.cognitive_hermes_team_delegation_mode == "shadow"
     assert cfg.cognitive_hermes_team_require_opt_in is True
     assert cfg.cognitive_hermes_team_timeout_seconds == 600.0
+    assert cfg.cognitive_hermes_group_scope_mode == "workspace"
+    assert cfg.cognitive_hermes_group_rotation_enabled is True
+    assert cfg.cognitive_hermes_group_max_events == 96
+    assert cfg.cognitive_hermes_group_max_age_seconds == 21600.0
     assert cfg.cognitive_hermes_team_profiles == {
         "coder": "coder",
         "tester": "tester",
@@ -453,10 +457,16 @@ def test_supervisor_and_team_delegation_settings_validate():
         cognitive_supervisor_policy_mode="enforce",
         cognitive_hermes_team_delegation_mode="canary",
         cognitive_hermes_team_timeout_seconds=420,
+        cognitive_hermes_group_scope_mode="conversation",
+        cognitive_hermes_group_max_events=128,
+        cognitive_hermes_group_max_age_seconds=3600,
     )
     assert enabled.cognitive_supervisor_policy_mode == "enforce"
     assert enabled.cognitive_hermes_team_delegation_mode == "canary"
     assert enabled.cognitive_hermes_team_timeout_seconds == 420.0
+    assert enabled.cognitive_hermes_group_scope_mode == "conversation"
+    assert enabled.cognitive_hermes_group_max_events == 128
+    assert enabled.cognitive_hermes_group_max_age_seconds == 3600.0
 
     with pytest.raises(ValueError, match="cognitive_supervisor_policy_mode"):
         StudioConfig(cognitive_supervisor_policy_mode="magic")
@@ -468,6 +478,12 @@ def test_supervisor_and_team_delegation_settings_validate():
         StudioConfig(cognitive_hermes_team_timeout_seconds=0)
     with pytest.raises(ValueError, match="cognitive_hermes_team_profiles"):
         StudioConfig(cognitive_hermes_team_profiles={"coder": "coder"})
+    with pytest.raises(ValueError, match="cognitive_hermes_group_scope_mode"):
+        StudioConfig(cognitive_hermes_group_scope_mode="global-ish")
+    with pytest.raises(ValueError, match="cognitive_hermes_group_max_events"):
+        StudioConfig(cognitive_hermes_group_max_events=-1)
+    with pytest.raises(ValueError, match="cognitive_hermes_group_max_age_seconds"):
+        StudioConfig(cognitive_hermes_group_max_age_seconds=-1)
 
 def test_soak_settings_validate_bounds():
     with pytest.raises(ValueError, match="cognitive_soak_window_minutes"):

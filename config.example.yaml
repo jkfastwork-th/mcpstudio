@@ -233,6 +233,10 @@ studio:
   #cognitive_hermes_group_token_file: /home/user/.config/hirda/hermes-group.env
   #cognitive_hermes_group_room_id: hirda-cognitive-team
   #cognitive_hermes_group_room_name: HIRDA Cognitive Team
+  #cognitive_hermes_group_scope_mode: workspace  # shared | workspace | conversation
+  #cognitive_hermes_group_rotation_enabled: true
+  #cognitive_hermes_group_max_events: 96
+  #cognitive_hermes_group_max_age_seconds: 21600
   #cognitive_router_default_timeout_seconds: 30.0
   # N8 infrastructure routing integration. Start with shadow, then enforce after
   # capability advertisements and runtime bindings are certified.
