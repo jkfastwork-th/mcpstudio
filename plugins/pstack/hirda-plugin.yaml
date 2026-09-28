@@ -1,0 +1,33 @@
+schema: hirda-plugin-v1
+id: pstack
+name: Pstack Engineering Workflow
+version: 0.1.0
+adapter:
+  runtime: python
+  entry: adapter.py
+  class: PstackIntegration
+capabilities:
+  - engineering_workflow
+  - workflow_routing
+  - role_request_translation
+tools:
+  - route_task
+  - load_workflow
+  - build_role_request
+permissions:
+  route_task: read
+  load_workflow: read
+  build_role_request: read
+health:
+  type: adapter_probe
+routing:
+  mode: methodology-layer
+  preferred_lanes: [claude, codex, hermes]
+metadata:
+  backend_capability: true
+  runtime_authority: hirda
+  model_selection: deferred_to_hirda
+  upstream_repository: michael-denyer/pstack-claude
+  upstream_revision: c02fd4922b25ee005f42042463d741d236c2c35e
+  upstream_version: 0.9.45
+  upstream_path: third_party/pstack-claude
