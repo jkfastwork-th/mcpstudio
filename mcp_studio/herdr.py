@@ -244,6 +244,194 @@ def _read_agent_session_result(
     return None
 
 
+
+def _read_agent_session_error(
+    pane: dict[str, Any] | None,
+    request_id: str,
+    *,
+    home: Path | None = None,
+    max_lines: int = 2000,
+) -> str | None:
+    """Read an unframed provider error correlated to one HIRDA request.
+
+    Terminal alternate-screen UIs may hide provider errors from scrollback.
+    This reader uses the durable agent transcript, requires a matching request
+    id in a user turn, and returns only the first subsequent assistant text.
+    The cognitive router still classifies the returned text fail-closed.
+    """
+    if not pane or not request_id:
+        return None
+
+    root_home = home or Path.home()
+    agent = str(pane.get("agent") or "").strip().casefold()
+    session = pane.get("agent_session")
+    source = ""
+    session_id = ""
+    if isinstance(session, dict):
+        source = str(session.get("source") or "").strip().casefold()
+        session_id = str(session.get("value") or "").strip()
+
+    def recent_rows(path: Path) -> list[dict[str, Any]]:
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                raw_lines = deque(handle, maxlen=max(1, int(max_lines)))
+        except OSError:
+            return []
+        rows: list[dict[str, Any]] = []
+        for raw_line in raw_lines:
+            try:
+                row = json.loads(raw_line)
+            except Exception:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+        return rows
+
+    def correlated_assistant(
+        turns: list[tuple[str, str]],
+    ) -> str | None:
+        marker = f"request_id: {request_id}"
+        start = -1
+        for index, (role, text) in enumerate(turns):
+            if role == "user" and marker in text:
+                start = index
+        if start < 0:
+            return None
+        for role, text in turns[start + 1 :]:
+            if role != "assistant":
+                continue
+            text = str(text or "").strip()
+            if text:
+                return (
+                    "HIRDA COGNITIVE REQUEST\n"
+                    f"request_id: {request_id}\n"
+                    f"{text}"
+                )
+        return None
+
+    if source == "herdr:claude" and _SESSION_ID_RE.fullmatch(session_id):
+        root = root_home / ".claude" / "projects"
+        if not root.is_dir():
+            return None
+        cwd = str(
+            pane.get("cwd") or pane.get("foreground_cwd") or ""
+        ).strip()
+        candidates: list[Path] = []
+        if cwd:
+            candidates.append(
+                root / cwd.replace("/", "-") / f"{session_id}.jsonl"
+            )
+        if not any(path.is_file() for path in candidates):
+            candidates.extend(root.glob(f"*/{session_id}.jsonl"))
+        transcript = next(
+            (path for path in candidates if path.is_file()),
+            None,
+        )
+        if transcript is None:
+            return None
+        turns: list[tuple[str, str]] = []
+        for row in recent_rows(transcript):
+            row_type = str(row.get("type") or "").casefold()
+            message = row.get("message")
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or row_type).strip().casefold()
+            if role not in {"user", "assistant"}:
+                continue
+            turns.append((role, _message_text(message)))
+        return correlated_assistant(turns)
+
+    if source == "herdr:codex" or agent == "codex":
+        root = root_home / ".codex" / "sessions"
+        if not root.is_dir():
+            return None
+        candidates: list[Path] = []
+        if session_id and _SESSION_ID_RE.fullmatch(session_id):
+            candidates.extend(root.rglob(f"*{session_id}.jsonl"))
+        if not candidates:
+            ranked: list[tuple[float, Path]] = []
+            for path in root.rglob("*.jsonl"):
+                if not path.is_file():
+                    continue
+                try:
+                    ranked.append((path.stat().st_mtime, path))
+                except OSError:
+                    continue
+            ranked.sort(key=lambda item: item[0], reverse=True)
+            candidates = [path for _mtime, path in ranked[:12]]
+
+        for transcript in candidates[:12]:
+            turns: list[tuple[str, str]] = []
+            for row in recent_rows(transcript):
+                payload = row.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                row_type = str(row.get("type") or "").casefold()
+                if row_type == "response_item":
+                    if str(payload.get("type") or "").casefold() != "message":
+                        continue
+                    role = str(payload.get("role") or "").casefold()
+                    content = payload.get("content")
+                    if role not in {"user", "assistant"} or not isinstance(
+                        content,
+                        list,
+                    ):
+                        continue
+                    text = "\n".join(
+                        str(item.get("text") or "")
+                        for item in content
+                        if isinstance(item, dict)
+                        and str(item.get("type") or "").casefold()
+                        in {"input_text", "output_text", "text"}
+                    )
+                    turns.append((role, text))
+                elif row_type == "event_msg":
+                    payload_type = str(payload.get("type") or "").casefold()
+                    if payload_type == "task_complete":
+                        error = payload.get("error")
+                        if isinstance(error, dict):
+                            message = str(error.get("message") or "").strip()
+                            error_info = str(
+                                error.get("codex_error_info") or ""
+                            ).strip()
+                            if message or error_info:
+                                turns.append(
+                                    (
+                                        "assistant",
+                                        "\n".join(
+                                            part
+                                            for part in (message, error_info)
+                                            if part
+                                        ),
+                                    )
+                                )
+                        continue
+
+                    item = payload.get("item")
+                    if (
+                        isinstance(item, dict)
+                        and str(item.get("type") or "").casefold()
+                        == "agentmessage"
+                    ):
+                        content = item.get("content")
+                        if not isinstance(content, list):
+                            continue
+                        text = "\n".join(
+                            str(part.get("text") or "")
+                            for part in content
+                            if isinstance(part, dict)
+                            and str(part.get("type") or "").casefold()
+                            in {"text", "output_text"}
+                        )
+                        turns.append(("assistant", text))
+            found = correlated_assistant(turns)
+            if found:
+                return found
+        return None
+
+    return None
+
+
 class HerdrManager:
     def __init__(self, settings: Settings, db: Database, health: HealthManager):
         self.settings = settings
@@ -352,6 +540,13 @@ class HerdrManager:
         request_id: str,
     ) -> str | None:
         return _read_agent_session_result(pane, request_id)
+
+    def read_session_error(
+        self,
+        pane: dict[str, Any] | None,
+        request_id: str,
+    ) -> str | None:
+        return _read_agent_session_error(pane, request_id)
 
     def tool(self, name: str) -> dict[str, Any] | None:
         return self.tool_definitions.get(name)

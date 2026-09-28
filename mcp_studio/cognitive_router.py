@@ -21,6 +21,9 @@ TASK_SEMANTIC_PROFILE_SCHEMA = "hirda-task-semantic-profile-v1"
 SEMANTIC_RUNTIME_RANKING_SCHEMA = "hirda-semantic-runtime-ranking-v1"
 SUPERVISOR_POLICY_SCHEMA = "hirda-supervisor-policy-v1"
 HERMES_TEAM_DELEGATION_SCHEMA = "hirda-hermes-team-delegation-v1"
+RUNTIME_BACKOFF_SCHEMA = "hirda-runtime-backoff-v1"
+_RUNTIME_BACKOFF_ACTOR = "hirda/runtime-backoff"
+_RUNTIME_BACKOFF_REASON_PREFIX = "runtime_backoff"
 
 _CAPABILITY_TASK_TYPES = {
     "social_dialogue": "conversation",
@@ -447,6 +450,9 @@ def _runtime_terminal_error(value: Any, request_id: str) -> str | None:
         "upgrade or add credits",
         "insufficient credits",
         "quota exceeded",
+        "usage limit has been reached",
+        "usage limit reached",
+        "hit your usage limit",
     )
     if any(marker in lowered for marker in quota_errors):
         return "runtime_quota_exhausted"
@@ -900,6 +906,295 @@ class CognitiveRouter:
             if limit_status == "exhausted":
                 return "limit_exhausted"
         return "healthy"
+
+
+    @staticmethod
+    def _parse_runtime_backoff_reason(reason: Any) -> dict[str, Any]:
+        text = str(reason or "").strip()
+        if not text.startswith(_RUNTIME_BACKOFF_REASON_PREFIX + ";"):
+            return {}
+        parsed: dict[str, Any] = {}
+        for item in text.split(";")[1:]:
+            key, sep, value = item.partition("=")
+            if not sep or not key:
+                continue
+            parsed[key.strip()] = value.strip()
+        for key in ("until", "seconds"):
+            raw = parsed.get(key)
+            if raw is None:
+                continue
+            try:
+                parsed[key] = float(raw)
+            except (TypeError, ValueError):
+                parsed.pop(key, None)
+        raw_failures = parsed.get("failures")
+        if raw_failures is not None:
+            try:
+                parsed["failures"] = max(0, int(raw_failures))
+            except (TypeError, ValueError):
+                parsed.pop("failures", None)
+        return parsed
+
+    def _runtime_backoff_base_seconds(self, error_code: str) -> float | None:
+        if not bool(
+            getattr(
+                self.studio,
+                "cognitive_runtime_backoff_enabled",
+                True,
+            )
+        ):
+            return None
+        if error_code == "runtime_rate_limited":
+            return max(
+                1.0,
+                float(
+                    getattr(
+                        self.studio,
+                        "cognitive_runtime_rate_limit_backoff_seconds",
+                        600.0,
+                    )
+                    or 600.0
+                ),
+            )
+        if error_code == "runtime_quota_exhausted":
+            return max(
+                1.0,
+                float(
+                    getattr(
+                        self.studio,
+                        "cognitive_runtime_quota_backoff_seconds",
+                        3600.0,
+                    )
+                    or 3600.0
+                ),
+            )
+        return None
+
+    async def _record_runtime_backoff(
+        self,
+        runtime_id: str,
+        error_code: str,
+    ) -> dict[str, Any] | None:
+        base_seconds = self._runtime_backoff_base_seconds(error_code)
+        if base_seconds is None or self.capsules is None:
+            return None
+        runtime_id = str(runtime_id or "").strip().casefold()
+        if not runtime_id:
+            return None
+
+        lanes = await self.capsules.lane_states()
+        current = dict(lanes.get(runtime_id) or {})
+        previous = (
+            self._parse_runtime_backoff_reason(current.get("reason"))
+            if str(current.get("actor") or "") == _RUNTIME_BACKOFF_ACTOR
+            else {}
+        )
+        failures = int(previous.get("failures") or 0) + 1
+        max_seconds = max(
+            base_seconds,
+            float(
+                getattr(
+                    self.studio,
+                    "cognitive_runtime_backoff_max_seconds",
+                    21600.0,
+                )
+                or 21600.0
+            ),
+        )
+        multiplier = float(2 ** min(max(0, failures - 1), 6))
+        seconds = min(max_seconds, base_seconds * multiplier)
+        until_epoch = time.time() + seconds
+        reason = (
+            f"{_RUNTIME_BACKOFF_REASON_PREFIX};"
+            f"error={error_code};"
+            f"until={until_epoch:.3f};"
+            f"failures={failures};"
+            f"seconds={seconds:.3f}"
+        )
+        result = await self.capsules.set_lane_state(
+            runtime_id,
+            "emergency",
+            reason=reason,
+            actor=_RUNTIME_BACKOFF_ACTOR,
+            auto_handoff=True,
+        )
+        return {
+            "schema": RUNTIME_BACKOFF_SCHEMA,
+            "runtime": runtime_id,
+            "active": True,
+            "error": error_code,
+            "failures": failures,
+            "seconds": round(seconds, 3),
+            "until_epoch": round(until_epoch, 3),
+            "remaining_seconds": round(seconds, 3),
+            "lane": dict(result.get("lane") or {}),
+        }
+
+    async def _clear_runtime_backoff(self, runtime_id: str) -> None:
+        if self.capsules is None:
+            return
+        runtime_id = str(runtime_id or "").strip().casefold()
+        if not runtime_id:
+            return
+        lanes = await self.capsules.lane_states()
+        current = dict(lanes.get(runtime_id) or {})
+        if str(current.get("actor") or "") != _RUNTIME_BACKOFF_ACTOR:
+            return
+        await self.capsules.set_lane_state(
+            runtime_id,
+            "normal",
+            reason="runtime_backoff_cleared_after_success",
+            actor=_RUNTIME_BACKOFF_ACTOR,
+            auto_handoff=False,
+        )
+
+    async def _reconcile_runtime_backoffs(
+        self,
+        lane_states: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        if self.capsules is None:
+            return lane_states
+        now = time.time()
+        current_states = dict(lane_states)
+        for runtime_id, lane_value in list(current_states.items()):
+            lane = dict(lane_value or {})
+            if str(lane.get("actor") or "") != _RUNTIME_BACKOFF_ACTOR:
+                continue
+            parsed = self._parse_runtime_backoff_reason(lane.get("reason"))
+            until_epoch = parsed.get("until")
+            if (
+                str(lane.get("state") or "").strip().casefold() == "normal"
+                or not isinstance(until_epoch, (int, float))
+                or until_epoch > now
+            ):
+                continue
+            reason = (
+                f"{_RUNTIME_BACKOFF_REASON_PREFIX};"
+                f"error={parsed.get('error') or 'runtime_limit'};"
+                f"until={float(until_epoch):.3f};"
+                f"failures={int(parsed.get('failures') or 1)};"
+                f"seconds={float(parsed.get('seconds') or 0.0):.3f};"
+                "probe=1"
+            )
+            result = await self.capsules.set_lane_state(
+                runtime_id,
+                "normal",
+                reason=reason,
+                actor=_RUNTIME_BACKOFF_ACTOR,
+                auto_handoff=False,
+            )
+            current_states[runtime_id] = dict(result.get("lane") or lane)
+        return current_states
+
+    async def runtime_backoff_status(self) -> dict[str, Any]:
+        if self.capsules is None:
+            return {
+                "schema": RUNTIME_BACKOFF_SCHEMA,
+                "enabled": False,
+                "active_count": 0,
+                "runtimes": {},
+            }
+        lanes = await self.capsules.lane_states()
+        now = time.time()
+        runtimes: dict[str, Any] = {}
+        active_count = 0
+        for runtime_id, lane_value in lanes.items():
+            lane = dict(lane_value or {})
+            if str(lane.get("actor") or "") != _RUNTIME_BACKOFF_ACTOR:
+                continue
+            parsed = self._parse_runtime_backoff_reason(lane.get("reason"))
+            until_epoch = parsed.get("until")
+            active = bool(
+                str(lane.get("state") or "").strip().casefold() != "normal"
+                and isinstance(until_epoch, (int, float))
+                and float(until_epoch) > now
+            )
+            if active:
+                active_count += 1
+            runtimes[str(runtime_id)] = {
+                "runtime": str(runtime_id),
+                "active": active,
+                "probe_due": bool(
+                    str(lane.get("state") or "").strip().casefold() == "normal"
+                    and str(lane.get("reason") or "").find("probe=1") >= 0
+                ),
+                "error": parsed.get("error"),
+                "failures": int(parsed.get("failures") or 0),
+                "seconds": parsed.get("seconds"),
+                "until_epoch": until_epoch,
+                "remaining_seconds": (
+                    round(max(0.0, float(until_epoch) - now), 3)
+                    if isinstance(until_epoch, (int, float))
+                    else None
+                ),
+                "lane_state": lane.get("state"),
+                "reason": lane.get("reason"),
+                "updated_at": lane.get("updated_at"),
+            }
+        return {
+            "schema": RUNTIME_BACKOFF_SCHEMA,
+            "enabled": bool(
+                getattr(
+                    self.studio,
+                    "cognitive_runtime_backoff_enabled",
+                    True,
+                )
+            ),
+            "active_count": active_count,
+            "runtimes": runtimes,
+        }
+
+    @staticmethod
+    def decorate_runtime_snapshot_with_backoff(
+        snapshot: dict[str, Any],
+        backoff_status: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Overlay execution-observed backoff onto runtime health for UI/status."""
+        decorated = dict(snapshot or {})
+        backoffs = (
+            dict(backoff_status.get("runtimes") or {})
+            if isinstance(backoff_status, dict)
+            else {}
+        )
+        rows: list[dict[str, Any]] = []
+        constrained = 0
+        for raw in snapshot.get("runtimes", []) if isinstance(snapshot, dict) else []:
+            if not isinstance(raw, dict):
+                continue
+            row = dict(raw)
+            runtime_id = str(row.get("id") or "").strip().casefold()
+            backoff = dict(backoffs.get(runtime_id) or {})
+            if backoff:
+                row["runtime_backoff"] = backoff
+            if backoff.get("active"):
+                limit = dict(row.get("limit_health") or {})
+                error_code = str(backoff.get("error") or "")
+                limit["status"] = (
+                    "exhausted"
+                    if error_code == "runtime_quota_exhausted"
+                    else "limited"
+                )
+                limit["source"] = "runtime_backoff"
+                limit["detail"] = (
+                    "HIRDA observed a provider limit during live execution; "
+                    "this runtime is temporarily excluded from new cognitive work."
+                )
+                limit["reset_at"] = backoff.get("until_epoch")
+                row["limit_health"] = limit
+            limit = row.get("limit_health")
+            limit_status = (
+                str(limit.get("status") or "").strip().casefold()
+                if isinstance(limit, dict)
+                else ""
+            )
+            if limit_status in {"limited", "exhausted"}:
+                constrained += 1
+            rows.append(row)
+        decorated["runtimes"] = rows
+        summary = dict(decorated.get("summary") or {})
+        summary["limit_constrained"] = constrained
+        decorated["summary"] = summary
+        return decorated
 
     async def _reconcile_runtime_lane_health(
         self,
@@ -1872,10 +2167,14 @@ class CognitiveRouter:
             if self.capsules is not None
             else {}
         )
+        lane_states = await self._reconcile_runtime_backoffs(
+            lane_states,
+        )
         lane_states = await self._reconcile_runtime_lane_health(
             runtime_snapshot,
             lane_states,
         )
+        runtime_backoff = await self.runtime_backoff_status()
         jev = await evaluate_cognitive_request(self.studio, request)
         deterministic = self._deterministic_lane(request)
         min_confidence = max(
@@ -1957,6 +2256,7 @@ class CognitiveRouter:
             "lane": lane,
             "deterministic_lane": deterministic,
             "lane_states": lane_states,
+            "runtime_backoff": runtime_backoff,
             "jev": jev.as_dict(),
             "task_semantic_profile": task_semantic_profile,
             "semantic_routing": semantic_routing,
@@ -2208,8 +2508,20 @@ class CognitiveRouter:
                             except CognitiveRouterError:
                                 pass
 
+                    session_error = None
+                    session_error_reader = getattr(
+                        self.herdr,
+                        "read_session_error",
+                        None,
+                    )
+                    if callable(session_error_reader):
+                        session_error = session_error_reader(
+                            pane,
+                            request.request_id,
+                        )
+
                     runtime_error = _runtime_terminal_error(
-                        [output, raw_read],
+                        [output, raw_read, session_error],
                         request.request_id,
                     )
                     if runtime_error:
@@ -2436,6 +2748,7 @@ class CognitiveRouter:
                 ),
                 runtime_rows,
             )
+            await self._clear_runtime_backoff("claude")
             attempts.append(
                 {
                     "stage": "supervisor_plan",
@@ -2444,14 +2757,25 @@ class CognitiveRouter:
                 }
             )
         except Exception as exc:
-            attempts.append(
-                {
-                    "stage": "supervisor_plan",
-                    "runtime": "claude",
-                    "status": "failed",
-                    "error": str(exc)[:240],
-                }
+            error_code = (
+                str(exc)
+                if isinstance(exc, CognitiveRouterError)
+                else type(exc).__name__
             )
+            backoff = await self._record_runtime_backoff(
+                "claude",
+                error_code,
+            )
+            attempt = {
+                "stage": "supervisor_plan",
+                "runtime": "claude",
+                "status": "failed",
+                "error": error_code,
+                "detail": str(exc)[:240],
+            }
+            if backoff is not None:
+                attempt["runtime_backoff"] = backoff
+            attempts.append(attempt)
             return failed(
                 "supervisor_plan",
                 "controlled_team_supervisor_failed",
@@ -2552,6 +2876,7 @@ class CognitiveRouter:
                 ),
                 runtime_rows,
             )
+            await self._clear_runtime_backoff("claude")
             attempts.append(
                 {
                     "stage": "supervisor_review",
@@ -2560,14 +2885,25 @@ class CognitiveRouter:
                 }
             )
         except Exception as exc:
-            attempts.append(
-                {
-                    "stage": "supervisor_review",
-                    "runtime": "claude",
-                    "status": "failed",
-                    "error": str(exc)[:240],
-                }
+            error_code = (
+                str(exc)
+                if isinstance(exc, CognitiveRouterError)
+                else type(exc).__name__
             )
+            backoff = await self._record_runtime_backoff(
+                "claude",
+                error_code,
+            )
+            attempt = {
+                "stage": "supervisor_review",
+                "runtime": "claude",
+                "status": "failed",
+                "error": error_code,
+                "detail": str(exc)[:240],
+            }
+            if backoff is not None:
+                attempt["runtime_backoff"] = backoff
+            attempts.append(attempt)
             return failed(
                 "supervisor_review",
                 "controlled_team_review_failed",
@@ -2780,23 +3116,29 @@ class CognitiveRouter:
                     if isinstance(exc, CognitiveRouterError)
                     else type(exc).__name__
                 )
-                attempts.append(
-                    {
-                        "runtime": runtime_id,
-                        "status": "failed",
-                        "error": error_code,
-                        "detail": (
-                            f"cognitive runtime pane is {pane_status}"
-                            if error_code == "runtime_busy"
-                            else str(exc)[:240]
-                        ),
-                    }
+                backoff = await self._record_runtime_backoff(
+                    runtime_id,
+                    error_code,
                 )
+                attempt = {
+                    "runtime": runtime_id,
+                    "status": "failed",
+                    "error": error_code,
+                    "detail": (
+                        f"cognitive runtime pane is {pane_status}"
+                        if error_code == "runtime_busy"
+                        else str(exc)[:240]
+                    ),
+                }
+                if backoff is not None:
+                    attempt["runtime_backoff"] = backoff
+                attempts.append(attempt)
                 continue
             finally:
                 if pane_lock is not None and lock_acquired:
                     pane_lock.release()
 
+            await self._clear_runtime_backoff(runtime_id)
             attempts.append({"runtime": runtime_id, "status": "success"})
             return CognitiveResult(
                 schema=COGNITIVE_RESULT_SCHEMA,

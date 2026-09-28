@@ -447,6 +447,10 @@ def test_supervisor_and_team_delegation_settings_validate():
     assert cfg.cognitive_hermes_group_rotation_enabled is True
     assert cfg.cognitive_hermes_group_max_events == 96
     assert cfg.cognitive_hermes_group_max_age_seconds == 21600.0
+    assert cfg.cognitive_runtime_backoff_enabled is True
+    assert cfg.cognitive_runtime_rate_limit_backoff_seconds == 600.0
+    assert cfg.cognitive_runtime_quota_backoff_seconds == 3600.0
+    assert cfg.cognitive_runtime_backoff_max_seconds == 21600.0
     assert cfg.cognitive_hermes_team_profiles == {
         "coder": "coder",
         "tester": "tester",
@@ -484,6 +488,16 @@ def test_supervisor_and_team_delegation_settings_validate():
         StudioConfig(cognitive_hermes_group_max_events=-1)
     with pytest.raises(ValueError, match="cognitive_hermes_group_max_age_seconds"):
         StudioConfig(cognitive_hermes_group_max_age_seconds=-1)
+    with pytest.raises(ValueError, match="cognitive_runtime_rate_limit_backoff_seconds"):
+        StudioConfig(cognitive_runtime_rate_limit_backoff_seconds=0)
+    with pytest.raises(ValueError, match="cognitive_runtime_quota_backoff_seconds"):
+        StudioConfig(cognitive_runtime_quota_backoff_seconds=0)
+    with pytest.raises(ValueError, match="cognitive_runtime_backoff_max_seconds"):
+        StudioConfig(
+            cognitive_runtime_rate_limit_backoff_seconds=600,
+            cognitive_runtime_quota_backoff_seconds=3600,
+            cognitive_runtime_backoff_max_seconds=1000,
+        )
 
 def test_soak_settings_validate_bounds():
     with pytest.raises(ValueError, match="cognitive_soak_window_minutes"):
@@ -501,3 +515,5 @@ def test_main_exposes_observability_without_touching_router_semantics():
     assert '@app.get("/api/cognition/observability")' in source
     assert "cognitive_observability.record_plan(" in source
     assert "cognitive_observability.record_execute(" in source
+    assert '"runtime_backoff": runtime_backoff' in source
+    assert "decorate_runtime_snapshot_with_backoff" in source

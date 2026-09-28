@@ -241,6 +241,10 @@ class StudioConfig:
     cognitive_runtime_auto_recovery_enabled: bool = True
     cognitive_runtime_recovery_successes: int = 3
     cognitive_runtime_recovery_interval_seconds: float = 15.0
+    cognitive_runtime_backoff_enabled: bool = True
+    cognitive_runtime_rate_limit_backoff_seconds: float = 600.0
+    cognitive_runtime_quota_backoff_seconds: float = 3600.0
+    cognitive_runtime_backoff_max_seconds: float = 21600.0
     cognitive_semantic_routing_mode: str = "shadow"
     cognitive_semantic_canary_min_margin: float = 0.03
     # Supervisor authority is intentionally separate from semantic specialist
@@ -514,6 +518,29 @@ class StudioConfig:
                 "studio.cognitive_hermes_group_max_age_seconds must be non-negative"
             )
         self.cognitive_hermes_group_max_age_seconds = group_max_age
+
+        rate_backoff = float(
+            self.cognitive_runtime_rate_limit_backoff_seconds
+        )
+        if rate_backoff <= 0:
+            raise ValueError(
+                "studio.cognitive_runtime_rate_limit_backoff_seconds must be positive"
+            )
+        self.cognitive_runtime_rate_limit_backoff_seconds = rate_backoff
+        quota_backoff = float(
+            self.cognitive_runtime_quota_backoff_seconds
+        )
+        if quota_backoff <= 0:
+            raise ValueError(
+                "studio.cognitive_runtime_quota_backoff_seconds must be positive"
+            )
+        self.cognitive_runtime_quota_backoff_seconds = quota_backoff
+        max_backoff = float(self.cognitive_runtime_backoff_max_seconds)
+        if max_backoff < max(rate_backoff, quota_backoff):
+            raise ValueError(
+                "studio.cognitive_runtime_backoff_max_seconds must be >= configured backoff bases"
+            )
+        self.cognitive_runtime_backoff_max_seconds = max_backoff
 
         if not isinstance(self.cognitive_runtime_capability_overrides, dict):
             raise ValueError(

@@ -222,6 +222,10 @@ studio:
   # HCR cognitive fabric. Plan/shadow mode and execution are separate gates.
   #cognitive_router_enabled: false
   #cognitive_router_execute_enabled: false
+  #cognitive_runtime_backoff_enabled: true
+  #cognitive_runtime_rate_limit_backoff_seconds: 600
+  #cognitive_runtime_quota_backoff_seconds: 3600
+  #cognitive_runtime_backoff_max_seconds: 21600
   #cognitive_supervisor_policy_mode: shadow  # off | shadow | enforce
   #cognitive_supervisor_runtime: claude
   #cognitive_hermes_team_delegation_mode: shadow  # off | shadow | canary

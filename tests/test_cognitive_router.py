@@ -582,6 +582,71 @@ async def test_terminal_marker_miss_uses_session_transcript_fallback():
 
 
 @pytest.mark.asyncio
+async def test_terminal_marker_miss_reads_correlated_session_provider_error():
+    class TranscriptErrorClient(FakeClient):
+        async def call_tool(self, name, arguments, client_name="test"):
+            pane = arguments.get("pane_id")
+            if name == "herdr_read_agent" and pane == "wC:p1":
+                self.herdr.calls.append((name, dict(arguments), client_name))
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Worked for 22s · done",
+                        }
+                    ]
+                }
+            return await super().call_tool(
+                name,
+                arguments,
+                client_name=client_name,
+            )
+
+    class TranscriptErrorHerdr(FakeHerdr):
+        def client(self, **kwargs):
+            return TranscriptErrorClient(self)
+
+        def read_session_result(self, pane, request_id):
+            return None
+
+        def read_session_error(self, pane, request_id):
+            if str((pane or {}).get("agent") or "") != "claude":
+                return None
+            return (
+                "HIRDA COGNITIVE REQUEST\n"
+                f"request_id: {request_id}\n"
+                "API Error: 503 [codex/gpt-6-astra] [429]: "
+                "The usage limit has been reached"
+            )
+
+    lanes = FakeLaneStates()
+    router = CognitiveRouter(
+        studio(),
+        TranscriptErrorHerdr(),
+        FakeRuntimes(),
+        capsules=lanes,
+    )
+    result = await router.execute(
+        {
+            "request_id": "COG-TRANSCRIPT-429",
+            "prompt": "Deep request.",
+            "capability": "reasoning_high",
+            "allow_fallback": True,
+            "timeout_seconds": 30,
+        }
+    )
+
+    assert result.status == "success"
+    assert result.runtime == "hermes"
+    assert result.attempts[0]["runtime"] == "claude"
+    assert result.attempts[0]["error"] == "runtime_quota_exhausted"
+    assert result.attempts[0]["runtime_backoff"]["active"] is True
+    lane = (await lanes.lane_states())["claude"]
+    assert lane["state"] == "emergency"
+    assert "runtime_quota_exhausted" in str(lane["reason"])
+
+
+@pytest.mark.asyncio
 async def test_delayed_marker_visibility_retries_read_before_repair_prompt():
     class DelayedReadClient(FakeClient):
         async def call_tool(self, name, arguments, client_name="test"):
@@ -1092,6 +1157,7 @@ async def test_context_exhausted_runtime_fails_over_with_specific_error():
         ("⏳ rate limited — resets in ~7m, retrying in 419s", "runtime_rate_limited"),
         ("Provider said: HTTP 401: Your API key is invalid", "runtime_auth_failed"),
         ("Your plan does not include paid service access; upgrade or add credits", "runtime_quota_exhausted"),
+        ("API Error: 503 [429]: The usage limit has been reached", "runtime_quota_exhausted"),
     ],
 )
 def test_runtime_terminal_error_classifies_provider_failures(terminal_text, expected):
@@ -1151,6 +1217,200 @@ async def test_prompt_timeout_reads_correlated_provider_failure_and_falls_back()
     assert result.fallback_used is True
     assert result.attempts[0]["runtime"] == "hermes"
     assert result.attempts[0]["error"] == "runtime_rate_limited"
+
+
+@pytest.mark.asyncio
+async def test_runtime_rate_limit_backoff_skips_lane_on_next_request():
+    class ClaudeRateLimitedClient(FakeClient):
+        async def call_tool(self, name, arguments, client_name="test"):
+            pane = arguments.get("pane_id")
+            if name == "herdr_prompt_agent" and pane == "wC:p1":
+                prompt = str(arguments.get("prompt") or "")
+                request_id = next(
+                    (
+                        line.split(":", 1)[1].strip()
+                        for line in prompt.splitlines()
+                        if line.startswith("request_id:")
+                    ),
+                    "unknown",
+                )
+                self.herdr.request_ids[pane] = request_id
+                raise RuntimeError("provider request failed")
+            if name == "herdr_read_agent" and pane == "wC:p1":
+                request_id = self.herdr.request_ids.get(pane, "unknown")
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "HIRDA COGNITIVE REQUEST\n"
+                                f"request_id: {request_id}\n"
+                                "HTTP 429: rate limited, retrying later"
+                            ),
+                        }
+                    ]
+                }
+            return await super().call_tool(
+                name,
+                arguments,
+                client_name=client_name,
+            )
+
+    class ClaudeRateLimitedHerdr(FakeHerdr):
+        def client(self, **kwargs):
+            return ClaudeRateLimitedClient(self)
+
+    lanes = FakeLaneStates()
+    router = CognitiveRouter(
+        studio(),
+        ClaudeRateLimitedHerdr(),
+        FakeRuntimes(),
+        capsules=lanes,
+    )
+    first = await router.execute(
+        {
+            "request_id": "COG-BACKOFF-FIRST",
+            "prompt": "Deep request that should fail over.",
+            "capability": "reasoning_high",
+            "allow_fallback": True,
+            "timeout_seconds": 30,
+        }
+    )
+
+    assert first.status == "success"
+    assert first.runtime == "hermes"
+    assert first.attempts[0]["runtime"] == "claude"
+    assert first.attempts[0]["error"] == "runtime_rate_limited"
+    assert first.attempts[0]["runtime_backoff"]["active"] is True
+    lane = (await lanes.lane_states())["claude"]
+    assert lane["state"] == "emergency"
+    assert lane["actor"] == "hirda/runtime-backoff"
+    assert "runtime_rate_limited" in str(lane["reason"])
+
+    second = await router.execute(
+        {
+            "request_id": "COG-BACKOFF-SECOND",
+            "prompt": "Another deep request.",
+            "capability": "reasoning_high",
+            "allow_fallback": True,
+            "timeout_seconds": 30,
+        }
+    )
+
+    assert second.status == "success"
+    assert second.runtime == "hermes"
+    assert second.fallback_used is False
+    assert [item["runtime"] for item in second.attempts] == ["hermes"]
+
+
+@pytest.mark.asyncio
+async def test_expired_runtime_backoff_reopens_lane_for_probe():
+    lanes = FakeLaneStates(claude="emergency")
+    lanes.actors["claude"] = "hirda/runtime-backoff"
+    lanes.reasons["claude"] = (
+        "runtime_backoff;"
+        "error=runtime_rate_limited;"
+        "until=1.000;"
+        "failures=2;"
+        "seconds=600.000"
+    )
+    router = CognitiveRouter(
+        studio(),
+        FakeHerdr(),
+        FakeRuntimes(),
+        capsules=lanes,
+    )
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-BACKOFF-PROBE",
+            "prompt": "Deep request after backoff expiry.",
+            "capability": "reasoning_high",
+        }
+    )
+
+    assert plan["lane_states"]["claude"]["state"] == "normal"
+    assert plan["runtime_backoff"]["runtimes"]["claude"]["active"] is False
+    assert plan["runtime_backoff"]["runtimes"]["claude"]["probe_due"] is True
+    assert plan["candidates"][0]["runtime"] == "claude"
+
+
+@pytest.mark.asyncio
+async def test_dual_supervisor_specialist_backoff_degrades_team_plan_to_hermes():
+    cfg = studio()
+    cfg.cognitive_semantic_routing_mode = "canary"
+    cfg.cognitive_semantic_canary_min_margin = 0.0
+    cfg.cognitive_supervisor_policy_mode = "enforce"
+    cfg.cognitive_supervisor_runtime = "claude"
+    cfg.cognitive_hermes_team_delegation_mode = "canary"
+    cfg.cognitive_hermes_team_require_opt_in = True
+
+    lanes = FakeLaneStates(claude="emergency", codex="emergency")
+    for runtime_id, error in (
+        ("claude", "runtime_quota_exhausted"),
+        ("codex", "runtime_rate_limited"),
+    ):
+        lanes.actors[runtime_id] = "hirda/runtime-backoff"
+        lanes.reasons[runtime_id] = (
+            "runtime_backoff;"
+            f"error={error};"
+            "until=9999999999.000;"
+            "failures=1;"
+            "seconds=3600.000"
+        )
+
+    router = CognitiveRouter(
+        cfg,
+        ProfiledHerdr(),
+        ProfiledRuntimes(),
+        capsules=lanes,
+    )
+    plan = await router.plan(
+        {
+            "request_id": "COG-DUAL-BACKOFF",
+            "prompt": "Implement and test a coding change.",
+            "capability": "coding",
+            "preferred_depth": "deep",
+            "context": {"team_delegation": True},
+        }
+    )
+
+    assert [item["runtime"] for item in plan["candidates"]] == ["hermes"]
+    assert plan["supervisor_policy"]["applied"] is False
+    assert "supervisor_runtime_unavailable" in plan["supervisor_policy"]["guard_reasons"]
+    assert plan["team_delegation"]["applied"] is False
+    assert plan["runtime_backoff"]["active_count"] == 2
+
+
+def test_runtime_snapshot_overlay_marks_execution_backoff_as_limit_constrained():
+    snapshot = FakeRuntimes().snapshot()
+    snapshot["summary"] = {"limit_constrained": 0}
+    backoff = {
+        "schema": "hirda-runtime-backoff-v1",
+        "active_count": 1,
+        "runtimes": {
+            "claude": {
+                "runtime": "claude",
+                "active": True,
+                "error": "runtime_quota_exhausted",
+                "until_epoch": 9999999999.0,
+                "remaining_seconds": 3600.0,
+            }
+        },
+    }
+
+    decorated = CognitiveRouter.decorate_runtime_snapshot_with_backoff(
+        snapshot,
+        backoff,
+    )
+    claude = next(
+        row for row in decorated["runtimes"] if row["id"] == "claude"
+    )
+
+    assert claude["limit_health"]["status"] == "exhausted"
+    assert claude["limit_health"]["source"] == "runtime_backoff"
+    assert claude["runtime_backoff"]["active"] is True
+    assert decorated["summary"]["limit_constrained"] == 1
 
 
 @pytest.mark.asyncio

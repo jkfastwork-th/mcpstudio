@@ -706,7 +706,11 @@ async def action_adapter_evaluate(provider_id: str):
 
 @app.get("/api/cognition/status")
 async def cognitive_router_status():
-    snapshot = agent_runtimes.snapshot(force=False)
+    runtime_backoff = await cognitive_router.runtime_backoff_status()
+    snapshot = cognitive_router.decorate_runtime_snapshot_with_backoff(
+        agent_runtimes.snapshot(force=False),
+        runtime_backoff,
+    )
     return {
         "schema": "hirda-cognitive-status-v1",
         "enabled": bool(settings.studio.cognitive_router_enabled),
@@ -747,6 +751,7 @@ async def cognitive_router_status():
             ),
         },
         "pane_routing": cognitive_router.pane_routing_status(),
+        "runtime_backoff": runtime_backoff,
         "runtimes": snapshot,
         "identity_authority": "external",
         "semantic_authority": "external",

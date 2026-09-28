@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from mcp_studio.herdr import _read_agent_session_result
+from mcp_studio.herdr import _read_agent_session_error, _read_agent_session_result
 
 
 def test_read_agent_session_result_extracts_matching_assistant_marker(tmp_path):
@@ -186,3 +186,201 @@ def test_read_agent_session_result_extracts_codex_response_item(tmp_path):
 
     assert result is not None
     assert "CODEX_RESPONSE_OK" in result
+
+
+def test_read_agent_session_error_extracts_correlated_claude_provider_error(
+    tmp_path,
+):
+    session_id = "0e36047b-3080-4100-9cde-0c0869f66bf6"
+    request_id = "COG-CLAUDE-429"
+    transcript_dir = (
+        tmp_path
+        / ".claude"
+        / "projects"
+        / "-home-alfred-mcp-studio"
+    )
+    transcript_dir.mkdir(parents=True)
+    transcript = transcript_dir / f"{session_id}.jsonl"
+    rows = [
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "HIRDA COGNITIVE REQUEST\n"
+                            f"request_id: {request_id}\n"
+                            "do work"
+                        ),
+                    }
+                ],
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "API Error: 503 [codex/gpt-6-astra] [429]: "
+                            "The usage limit has been reached"
+                        ),
+                    }
+                ],
+            },
+        },
+    ]
+    transcript.write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    pane = {
+        "cwd": "/home/alfred/mcp-studio",
+        "agent": "claude",
+        "agent_session": {
+            "source": "herdr:claude",
+            "value": session_id,
+        },
+    }
+
+    result = _read_agent_session_error(
+        pane,
+        request_id,
+        home=tmp_path,
+    )
+
+    assert result is not None
+    assert f"request_id: {request_id}" in result
+    assert "usage limit has been reached" in result
+
+
+def test_read_agent_session_error_extracts_correlated_codex_rate_limit(
+    tmp_path,
+):
+    request_id = "COG-CODEX-429"
+    transcript_dir = (
+        tmp_path
+        / ".codex"
+        / "sessions"
+        / "2026"
+        / "09"
+        / "28"
+    )
+    transcript_dir.mkdir(parents=True)
+    transcript = transcript_dir / "rollout-rate-limit.jsonl"
+    rows = [
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "HIRDA COGNITIVE REQUEST\n"
+                            f"request_id: {request_id}\n"
+                            "do work"
+                        ),
+                    }
+                ],
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "AgentMessage",
+                    "content": [
+                        {
+                            "type": "Text",
+                            "text": "HTTP 429: rate limited, retrying later",
+                        }
+                    ],
+                },
+            },
+        },
+    ]
+    transcript.write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    result = _read_agent_session_error(
+        {"agent": "codex", "cwd": "/home/alfred/mcp-studio"},
+        request_id,
+        home=tmp_path,
+    )
+
+    assert result is not None
+    assert f"request_id: {request_id}" in result
+    assert "HTTP 429" in result
+
+
+def test_read_agent_session_error_extracts_codex_task_complete_usage_limit(
+    tmp_path,
+):
+    request_id = "COG-CODEX-USAGE-LIMIT"
+    transcript_dir = (
+        tmp_path
+        / ".codex"
+        / "sessions"
+        / "2026"
+        / "09"
+        / "28"
+    )
+    transcript_dir.mkdir(parents=True)
+    transcript = transcript_dir / "rollout-usage-limit.jsonl"
+    rows = [
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "HIRDA COGNITIVE REQUEST\n"
+                            f"request_id: {request_id}\n"
+                            "do work"
+                        ),
+                    }
+                ],
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "last_agent_message": None,
+                "error": {
+                    "message": (
+                        "Error running remote compact task: "
+                        "You’ve hit your usage limit. Try again later."
+                    ),
+                    "codex_error_info": "usage_limit_exceeded",
+                },
+            },
+        },
+    ]
+    transcript.write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    result = _read_agent_session_error(
+        {"agent": "codex", "cwd": "/home/alfred/mcp-studio"},
+        request_id,
+        home=tmp_path,
+    )
+
+    assert result is not None
+    assert f"request_id: {request_id}" in result
+    assert "hit your usage limit" in result
+    assert "usage_limit_exceeded" in result
