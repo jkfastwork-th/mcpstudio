@@ -517,3 +517,100 @@ def test_main_exposes_observability_without_touching_router_semantics():
     assert "cognitive_observability.record_execute(" in source
     assert '"runtime_backoff": runtime_backoff' in source
     assert "decorate_runtime_snapshot_with_backoff" in source
+
+
+@pytest.mark.asyncio
+async def test_plan_only_semantic_change_is_observed_but_not_execution_integrity_failure():
+    db = FakeDB()
+    observer = CognitiveObservability(db, FakeRuntimes(), studio())
+
+    changed_plan = plan()
+    changed_plan["semantic_authority_changed"] = True
+    changed_plan["semantic_routing"] = {
+        "mode": "canary",
+        "applied": True,
+        "current_selected": "claude",
+        "semantic_preference": "codex",
+        "would_select": "codex",
+        "effective_selected": "codex",
+        "changed": True,
+        "ranked_order": ["codex", "claude"],
+        "rankings": [
+            {"runtime": "codex", "score": 0.94, "profile_source": "builtin_runtime_profile"},
+            {"runtime": "claude", "score": 0.84, "profile_source": "builtin_runtime_profile"},
+        ],
+    }
+
+    controlled_result = result()
+    controlled_result["runtime"] = "claude"
+    controlled_result["semantic_authority_changed"] = False
+    controlled_result["semantic_routing"] = {
+        **changed_plan["semantic_routing"],
+        "execution_applied": False,
+        "execution_authority": "controlled_team",
+        "execution_runtime": "claude",
+        "specialist_runtime": "codex",
+    }
+
+    await observer.record_plan(
+        {"request_id": "REQ-TEAM", "capability": "coding"},
+        changed_plan,
+        elapsed_ms=10,
+    )
+    await observer.record_execute(
+        {"request_id": "REQ-TEAM", "capability": "coding"},
+        controlled_result,
+        elapsed_ms=100,
+    )
+
+    execute_event = next(
+        row for row in db.events if row["kind"] == "cognition.execute.observed"
+    )
+    semantic = execute_event["data"]["semantic_routing"]
+    assert semantic["execution_applied"] is False
+    assert semantic["execution_authority"] == "controlled_team"
+    assert semantic["execution_runtime"] == "claude"
+    assert semantic["specialist_runtime"] == "codex"
+
+    report = await observer.report(window_minutes=60)
+    assert report["state"] == "healthy"
+    assert report["metrics"]["semantic_authority_change_count"] == 0
+    assert report["metrics"]["semantic_plan_change_count"] == 1
+    assert report["integrity"]["semantic_authority_unchanged"] is True
+
+
+@pytest.mark.asyncio
+async def test_executed_semantic_change_remains_integrity_failure():
+    db = FakeDB()
+    observer = CognitiveObservability(db, FakeRuntimes(), studio())
+
+    changed_result = result()
+    changed_result["semantic_authority_changed"] = True
+    changed_result["semantic_routing"] = {
+        "mode": "canary",
+        "applied": True,
+        "current_selected": "hermes",
+        "semantic_preference": "codex",
+        "would_select": "codex",
+        "effective_selected": "codex",
+        "changed": True,
+        "execution_applied": True,
+        "execution_authority": "semantic_canary",
+        "execution_runtime": "codex",
+        "specialist_runtime": "codex",
+        "ranked_order": ["codex", "hermes"],
+        "rankings": [],
+    }
+
+    await observer.record_execute(
+        {"request_id": "REQ-DIRECT-CANARY", "capability": "coding"},
+        changed_result,
+        elapsed_ms=100,
+    )
+
+    report = await observer.report(window_minutes=60)
+    assert report["state"] == "down"
+    assert "semantic_or_identity_integrity_failure" in report["state_reasons"]
+    assert report["metrics"]["semantic_authority_change_count"] == 1
+    assert report["metrics"]["semantic_plan_change_count"] == 0
+    assert report["integrity"]["semantic_authority_unchanged"] is False

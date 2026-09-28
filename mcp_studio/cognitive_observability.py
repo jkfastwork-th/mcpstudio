@@ -229,6 +229,20 @@ class CognitiveObservability:
             "explicit_constraint": str(
                 semantic.get("explicit_constraint") or ""
             ).strip() or None,
+            "execution_applied": (
+                bool(semantic.get("execution_applied"))
+                if "execution_applied" in semantic
+                else None
+            ),
+            "execution_authority": str(
+                semantic.get("execution_authority") or ""
+            ).strip() or None,
+            "execution_runtime": str(
+                semantic.get("execution_runtime") or ""
+            ).strip().casefold() or None,
+            "specialist_runtime": str(
+                semantic.get("specialist_runtime") or ""
+            ).strip().casefold() or None,
             "ranked_order": [
                 str(item or "").strip().casefold()
                 for item in semantic.get("ranked_order", [])
@@ -431,6 +445,7 @@ class CognitiveObservability:
         fallback_count = 0
         degraded_count = 0
         semantic_change_count = 0
+        semantic_plan_change_count = 0
         identity_failure_count = 0
         filtered_candidate_count = 0
         suspected_false_rejection_count = 0
@@ -519,7 +534,7 @@ class CognitiveObservability:
                 ):
                     semantic_shadow_disagreement_count += 1
             if bool(data.get("semantic_authority_changed")):
-                semantic_change_count += 1
+                semantic_plan_change_count += 1
             if not bool(data.get("identity_continuity", True)):
                 identity_failure_count += 1
             routing = data.get("routing") or {}
@@ -634,6 +649,7 @@ class CognitiveObservability:
                 "filtered_candidate_count": filtered_candidate_count,
                 "suspected_false_rejection_count": suspected_false_rejection_count,
                 "semantic_authority_change_count": semantic_change_count,
+                "semantic_plan_change_count": semantic_plan_change_count,
                 "identity_continuity_failure_count": identity_failure_count,
                 "semantic_shadow_plan_count": semantic_shadow_plan_count,
                 "semantic_shadow_disagreement_count": semantic_shadow_disagreement_count,

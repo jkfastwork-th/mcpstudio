@@ -2668,6 +2668,19 @@ class CognitiveRouter:
         attempts: list[dict[str, Any]] = []
         team = dict(plan.get("team_delegation") or {})
         supervisor = dict(plan.get("supervisor_policy") or {})
+        semantic_routing = dict(plan.get("semantic_routing") or {})
+        # Controlled-team execution supersedes the semantic candidate order.
+        # Preserve the specialist choice as a hint, but do not report that
+        # semantic routing changed execution authority when that runtime was
+        # never invoked.
+        semantic_routing.update(
+            {
+                "execution_applied": False,
+                "execution_authority": "controlled_team",
+                "execution_runtime": "claude",
+                "specialist_runtime": supervisor.get("specialist_runtime"),
+            }
+        )
         claude_row = dict(runtime_rows.get("claude") or {})
         workers = dict(team.get("profiles") or {})
         workspace_path = str(
@@ -2714,15 +2727,13 @@ class CognitiveRouter:
                 attempts=tuple(attempts),
                 jev=dict(plan["jev"]),
                 task_semantic_profile=dict(plan["task_semantic_profile"]),
-                semantic_routing=dict(plan["semantic_routing"]),
+                semantic_routing=dict(semantic_routing),
                 supervisor_policy=supervisor,
                 infrastructure_routing=dict(
                     plan.get("infrastructure_routing") or {}
                 ),
                 team_delegation=team,
-                semantic_authority_changed=bool(
-                    plan.get("semantic_authority_changed")
-                ),
+                semantic_authority_changed=False,
                 error=error,
             )
 
@@ -2941,15 +2952,13 @@ class CognitiveRouter:
             attempts=tuple(attempts),
             jev=dict(plan["jev"]),
             task_semantic_profile=dict(plan["task_semantic_profile"]),
-            semantic_routing=dict(plan["semantic_routing"]),
+            semantic_routing=dict(semantic_routing),
             supervisor_policy=supervisor,
             infrastructure_routing=dict(
                 plan.get("infrastructure_routing") or {}
             ),
             team_delegation=team,
-            semantic_authority_changed=bool(
-                plan.get("semantic_authority_changed")
-            ),
+            semantic_authority_changed=False,
         )
 
     async def execute(self, payload: CognitiveRequest | dict[str, Any]) -> CognitiveResult:

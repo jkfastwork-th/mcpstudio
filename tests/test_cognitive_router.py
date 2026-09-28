@@ -1959,6 +1959,13 @@ async def test_controlled_team_execute_runs_supervisor_team_and_review():
         "COG-TEAM-EXEC-REVIEW",
     ]
     assert result.supervisor_policy["effective_supervisor"] == "claude"
+    assert result.semantic_routing["semantic_preference"] == "codex"
+    assert result.semantic_routing["effective_selected"] == "codex"
+    assert result.semantic_routing["execution_applied"] is False
+    assert result.semantic_routing["execution_authority"] == "controlled_team"
+    assert result.semantic_routing["execution_runtime"] == "claude"
+    assert result.semantic_routing["specialist_runtime"] == "codex"
+    assert result.semantic_authority_changed is False
     assert result.team_delegation["applied"] is True
     assert result.team_delegation["execution"]["status"] == "success"
     assert result.team_delegation["execution"]["native_bot_mode"] is True
