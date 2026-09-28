@@ -84,26 +84,40 @@ This is useful evidence that the team path can complete under real runtime conte
 
 ## Finding: semantic telemetry mismatch
 
-A material observability inconsistency was exposed.
+The live run exposed a HIRDA observability inconsistency.
 
-The plan reports:
+The plan correctly records:
 
 - `semantic_preference = codex`
 - `semantic_execution_runtime = codex`
 - `semantic_routing.applied = true`
 
-But when team delegation is applied, the actual execution path is:
+When controlled team delegation takes over, however, the actual execution path is:
 
 `Claude supervisor → Hermes/Bots → Claude supervisor review`
 
-Codex is not invoked in the recorded attempts.
+Codex is a semantic specialist hint in this topology and is not invoked in the recorded attempts.
 
-At the same time, cognitive observability records `semantic_authority_changed=true` from the canary ranking and therefore reports health state `down` with `semantic_or_identity_integrity_failure`, even though all three controlled-team executions completed successfully and the supervisor policy itself reports `semantic_authority_changed=false`.
+The mismatch was fixed on this feature branch by `fdfcd26 fix(cognition): align team execution telemetry`.
 
-This is not a Pstack adapter failure. It is a HIRDA cognitive-observability / execution-semantics mismatch exposed by the Pstack certification.
+Controlled-team results now preserve the semantic preference while recording:
+
+- `execution_applied = false`
+- `execution_authority = controlled_team`
+- `execution_runtime = claude`
+- `specialist_runtime = codex`
+- `semantic_authority_changed = false`
+
+Observability also separates plan-only semantic changes from realized execution authority changes. `semantic_plan_change_count` records canary planning activity, while `semantic_authority_change_count` remains an execution-integrity signal. A direct canary that actually changes the executed runtime still reports an integrity change and can drive health to `down`.
+
+Post-fix verification:
+
+- cognitive router + observability: `95 passed`
+- Pstack + plugin lifecycle + cognitive suites: `124 passed`
+- broad suite excluding the two pre-existing OAuth collection failures: `683 passed, 5 skipped`
 
 ## Certification result
 
 Pstack methodology → HIRDA request translation → Supervisor Policy → Hermes Bots team execution → supervisor review is live-certified for bug-fix, feature, and review workflows.
 
-Promotion into the production plugin set should remain separate from fixing or explicitly accepting the semantic telemetry mismatch above.
+The semantic telemetry mismatch found during certification is fixed on this branch. The branch is ready as a merge candidate once the dirty production `master` working tree is reconciled.
