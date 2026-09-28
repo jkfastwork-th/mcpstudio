@@ -2867,3 +2867,99 @@ async def test_n8_infrastructure_gate_does_not_change_semantic_lane():
         "semantic_authority_changed"
     ] is False
     assert plan["candidates"][0]["runtime"] == "claude"
+
+
+@pytest.mark.asyncio
+async def test_controlled_team_supervisor_context_exhaustion_clears_once_and_retries():
+    router = CognitiveRouter(studio(), FakeHerdr(), FakeRuntimes())
+    request = normalize_cognitive_request(
+        {
+            "request_id": "COG-CTX-RECOVER",
+            "prompt": "Review the completed team work.",
+            "capability": "coding",
+            "preferred_depth": "deep",
+            "timeout_seconds": 30,
+        }
+    )
+    calls = []
+    resets = []
+
+    async def fake_invoke(runtime_id, current_request, runtime_rows):
+        calls.append((runtime_id, current_request.request_id))
+        if len(calls) == 1:
+            raise CognitiveRouterError("runtime_context_exhausted")
+        return "RECOVERED_RESULT"
+
+    async def fake_reset(runtime_id, runtime_rows, *, timeout_seconds):
+        resets.append((runtime_id, timeout_seconds))
+        return {
+            "ok": True,
+            "runtime": runtime_id,
+            "pane_id": "wC:p1",
+            "status": "done",
+            "session_rotated": True,
+        }
+
+    router._invoke_specific_runtime = fake_invoke
+    router._reset_runtime_context = fake_reset
+    attempts = []
+
+    output = await router._invoke_controlled_team_supervisor(
+        request,
+        {},
+        attempts,
+        stage="supervisor_review",
+    )
+
+    assert output == "RECOVERED_RESULT"
+    assert len(calls) == 2
+    assert len(resets) == 1
+    assert attempts == [
+        {
+            "stage": "supervisor_context_recovery",
+            "for_stage": "supervisor_review",
+            "runtime": "claude",
+            "status": "success",
+            "session_rotated": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reset_runtime_context_uses_clear_and_requires_session_rotation():
+    class ClearClient(FakeClient):
+        async def call_tool(self, name, arguments, client_name="test"):
+            if name == "herdr_prompt_agent" and arguments.get("prompt") == "/clear":
+                pane_id = arguments.get("pane_id")
+                self.herdr.calls.append((name, dict(arguments), client_name))
+                pane = self.herdr.find_pane(pane_id=pane_id)
+                pane["agent_session"] = {"value": "session-after"}
+                pane["agent_status"] = "done"
+                return {"content": [{"type": "text", "text": '{"accepted":true}'}]}
+            return await super().call_tool(name, arguments, client_name=client_name)
+
+    class ClearHerdr(FakeHerdr):
+        def __init__(self):
+            super().__init__()
+            pane = self.find_pane(pane_id="wC:p1")
+            pane["agent_session"] = {"value": "session-before"}
+
+        def client(self, **kwargs):
+            return ClearClient(self)
+
+    herdr = ClearHerdr()
+    router = CognitiveRouter(studio(), herdr, FakeRuntimes())
+
+    recovery = await router._reset_runtime_context(
+        "claude",
+        {},
+        timeout_seconds=10,
+    )
+
+    assert recovery["ok"] is True
+    assert recovery["session_rotated"] is True
+    clear_calls = [
+        call for call in herdr.calls
+        if call[0] == "herdr_prompt_agent" and call[1].get("prompt") == "/clear"
+    ]
+    assert len(clear_calls) == 1

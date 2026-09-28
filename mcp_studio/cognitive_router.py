@@ -2548,6 +2548,187 @@ class CognitiveRouter:
                 raise
             return await submit_and_extract(repair_prompt)
 
+    async def _reset_runtime_context(
+        self,
+        runtime_id: str,
+        runtime_rows: dict[str, dict[str, Any]],
+        *,
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        runtime_id = str(runtime_id or "").strip().casefold()
+        if runtime_id != "claude":
+            return {
+                "ok": False,
+                "runtime": runtime_id,
+                "pane_id": None,
+                "status": None,
+                "session_rotated": None,
+                "error": "context_reset_unsupported_runtime",
+            }
+
+        pane = self._find_runtime_pane(runtime_id)
+        if pane is None:
+            return {
+                "ok": False,
+                "runtime": runtime_id,
+                "pane_id": None,
+                "status": None,
+                "session_rotated": None,
+                "error": "cognitive_claude_pane_unavailable",
+            }
+        pane_id = str(pane.get("pane_id") or "").strip()
+        if not pane_id:
+            return {
+                "ok": False,
+                "runtime": runtime_id,
+                "pane_id": None,
+                "status": None,
+                "session_rotated": None,
+                "error": "cognitive_claude_pane_missing_id",
+            }
+
+        prompt_tool = self.herdr.tool("herdr_prompt_agent")
+        if not prompt_tool:
+            return {
+                "ok": False,
+                "runtime": runtime_id,
+                "pane_id": pane_id,
+                "status": None,
+                "session_rotated": None,
+                "error": "herdr_prompt_agent_missing",
+            }
+
+        def session_value(value: dict[str, Any] | None) -> str | None:
+            if not isinstance(value, dict):
+                return None
+            session = value.get("agent_session")
+            if isinstance(session, dict) and session.get("value"):
+                return str(session.get("value"))
+            return None
+
+        before_session = session_value(pane)
+        reset_timeout = max(1.0, min(float(timeout_seconds), 20.0))
+        client = self.herdr.client(timeout=max(2.0, reset_timeout + 5.0))
+        try:
+            args = build_tool_arguments(
+                prompt_tool,
+                pane=pane,
+                pane_id=pane_id,
+                agent=runtime_id,
+                prompt="/clear",
+                timeout_seconds=max(1, int(reset_timeout)),
+            )
+            schema = (
+                prompt_tool.get("inputSchema")
+                or prompt_tool.get("input_schema")
+                or {}
+            )
+            props = (
+                schema.get("properties")
+                if isinstance(schema, dict)
+                else {}
+            )
+            if isinstance(props, dict) and "wait" in props:
+                args["wait"] = True
+            await client.call_tool(
+                "herdr_prompt_agent",
+                args,
+                client_name="hirda-cognition-context-reset-claude",
+            )
+            await self.herdr.refresh()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "runtime": runtime_id,
+                "pane_id": pane_id,
+                "status": None,
+                "session_rotated": None,
+                "error": f"{type(exc).__name__}: {str(exc)[:160]}",
+            }
+
+        current = self.herdr.find_pane(pane_id=pane_id) or pane
+        status = str(
+            current.get("agent_status") or "unknown"
+        ).strip().casefold()
+        after_session = session_value(current)
+        session_rotated = (
+            bool(after_session and after_session != before_session)
+            if before_session
+            else None
+        )
+        ok = status in {"idle", "done"} and session_rotated is not False
+        return {
+            "ok": ok,
+            "runtime": runtime_id,
+            "pane_id": pane_id,
+            "status": status,
+            "session_rotated": session_rotated,
+            "error": None if ok else "context_reset_not_confirmed",
+        }
+
+    async def _invoke_controlled_team_supervisor(
+        self,
+        request: CognitiveRequest,
+        runtime_rows: dict[str, dict[str, Any]],
+        attempts: list[dict[str, Any]],
+        *,
+        stage: str,
+    ) -> str:
+        started = time.monotonic()
+        try:
+            return await self._invoke_specific_runtime(
+                "claude",
+                request,
+                runtime_rows,
+            )
+        except CognitiveRouterError as exc:
+            if str(exc) != "runtime_context_exhausted":
+                raise
+
+        remaining = float(request.timeout_seconds) - (
+            time.monotonic() - started
+        )
+        if remaining <= 2.0:
+            raise CognitiveRouterError(
+                "cognitive_runtime_deadline_exhausted"
+            )
+
+        recovery = await self._reset_runtime_context(
+            "claude",
+            runtime_rows,
+            timeout_seconds=min(remaining, 20.0),
+        )
+        recovery_attempt = {
+            "stage": "supervisor_context_recovery",
+            "for_stage": stage,
+            "runtime": "claude",
+            "status": "success" if recovery.get("ok") else "failed",
+            "session_rotated": recovery.get("session_rotated"),
+        }
+        if recovery.get("error"):
+            recovery_attempt["error"] = recovery.get("error")
+        attempts.append(recovery_attempt)
+        if not recovery.get("ok"):
+            raise CognitiveRouterError(
+                "runtime_context_recovery_failed"
+            )
+
+        remaining = float(request.timeout_seconds) - (
+            time.monotonic() - started
+        )
+        if remaining <= 1.0:
+            raise CognitiveRouterError(
+                "cognitive_runtime_deadline_exhausted"
+            )
+        return await self._invoke_specific_runtime(
+            "claude",
+            replace(
+                request,
+                timeout_seconds=max(1.0, remaining),
+            ),
+            runtime_rows,
+        )
+
     async def _invoke_specific_runtime(
         self,
         runtime_id: str,
@@ -2747,8 +2928,7 @@ class CognitiveRouter:
             f"WORKSPACE: {workspace_path or 'not specified'}"
         )
         try:
-            mission = await self._invoke_specific_runtime(
-                "claude",
+            mission = await self._invoke_controlled_team_supervisor(
                 replace(
                     request,
                     request_id=f"{request.request_id}-SUPERVISOR",
@@ -2758,6 +2938,8 @@ class CognitiveRouter:
                     preferred_runtime="claude",
                 ),
                 runtime_rows,
+                attempts,
+                stage="supervisor_plan",
             )
             await self._clear_runtime_backoff("claude")
             attempts.append(
@@ -2875,8 +3057,7 @@ class CognitiveRouter:
             f"HERMES GROUP FINAL ROLE REPORTS:\n{group_result.output}"
         )
         try:
-            output = await self._invoke_specific_runtime(
-                "claude",
+            output = await self._invoke_controlled_team_supervisor(
                 replace(
                     request,
                     request_id=f"{request.request_id}-REVIEW",
@@ -2886,6 +3067,8 @@ class CognitiveRouter:
                     preferred_runtime="claude",
                 ),
                 runtime_rows,
+                attempts,
+                stage="supervisor_review",
             )
             await self._clear_runtime_backoff("claude")
             attempts.append(
