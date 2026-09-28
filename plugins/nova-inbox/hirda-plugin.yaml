@@ -1,7 +1,7 @@
 schema: hirda-plugin-v1
 id: nova-inbox
 name: Nova Desktop Inbox
-version: 0.1.0
+version: 0.2.0
 adapter:
   runtime: python
   entry: adapter.py
@@ -12,8 +12,10 @@ capabilities:
   - approval_request
 tools:
   - nova_inbox_send
+  - nova_inbox_receipts
 permissions:
   nova_inbox_send: write
+  nova_inbox_receipts: read
 health:
   type: adapter_probe
 routing:
