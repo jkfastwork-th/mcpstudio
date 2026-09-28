@@ -116,6 +116,42 @@ Post-fix verification:
 - Pstack + plugin lifecycle + cognitive suites: `124 passed`
 - broad suite excluding the two pre-existing OAuth collection failures: `683 passed, 5 skipped`
 
+## Finding: persistent Claude supervisor context exhaustion
+
+A post-deployment recertification exposed a second issue in the controlled-team path.
+
+Request `PSTACK-D5C97B47ED58` completed the Hermes team stage successfully with all three worker roles, but final Claude supervisor review failed with:
+
+`runtime_context_exhausted`
+
+The Pstack review methodology payload was only about 6.5k characters, so the failure was not caused by an abnormally large single Pstack request. The dedicated Claude cognitive pane was reusing a long-lived agent session whose accumulated history had reached the model context limit.
+
+A direct recovery probe confirmed that sending `/clear` through Herdr on the dedicated Claude cognitive pane rotates the Claude agent session and returns the pane to a usable `done` state.
+
+The bounded recovery added in `995f799 fix(cognition): recover Claude supervisor context` is intentionally narrow:
+
+- applies only to controlled-team Claude supervisor stages
+- triggers only on `runtime_context_exhausted`
+- sends `/clear` to the dedicated cognitive Claude pane
+- requires the pane to return idle/done and, when a prior session id is available, confirms session rotation
+- retries the failed supervisor stage exactly once within its remaining timeout
+- records a `supervisor_context_recovery` attempt when recovery is used
+- never loops and does not silently fall back to a different supervisor
+
+Verification after this fix:
+
+- context recovery unit tests: passed
+- cognitive router + observability: `97 passed`
+- broad suite excluding the two pre-existing OAuth collection failures: `685 passed, 5 skipped`
+- production preflight after restart: passed
+- production recertification request `PSTACK-B59853ED715C`: `success` in 174.83 s
+- final event ledger severity: `info`
+- `degraded = false`
+- `fallback_used = false`
+- `semantic_authority_changed = false`
+
+The successful recertification ran after the exhausted pane had been manually cleared during diagnosis, so automatic recovery did not need to fire in that specific successful run. The recovery trigger, one-shot retry, and session-rotation requirement are covered by dedicated tests, while the preceding production failure provides the matching live trigger evidence.
+
 ## Certification result
 
 Pstack methodology → HIRDA request translation → Supervisor Policy → Hermes Bots team execution → supervisor review is live-certified for bug-fix, feature, and review workflows.
