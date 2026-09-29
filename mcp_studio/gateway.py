@@ -21,7 +21,15 @@ from .db import Database
 from .settings import Settings
 from .oauth import OAuthManager
 from .managed_sessions import ManagedSessionManager, ManagedSessionError, ManagedSessionConflict, WorkspaceNotAllowed
-from .tool_permissions import decide_tool_call
+from .tool_permissions import decide_tool_call, classify_tool
+from .pstack_lifecycle import (
+    PstackLifecycleError,
+    checkpoint as pstack_checkpoint,
+    ensure_lifecycle as ensure_pstack_lifecycle,
+    lifecycle_for_workflow,
+    record_tool_evidence as record_pstack_tool_evidence,
+    workflow_gate as pstack_workflow_gate,
+)
 from .jev_decision import evaluate_tool_call as evaluate_jev_tool_call
 from .reflex import (
     append_dataset_record,
@@ -41,6 +49,8 @@ CONTROL_TOOL_NAMES = (
     "mcpstudio_use_workspace",
     "mcpstudio_create_session",
     "mcpstudio_use_session",
+    "mcpstudio_pstack_status",
+    "mcpstudio_pstack_checkpoint",
     "mcpstudio_lane_status",
     "mcpstudio_set_lane_state",
     "mcpstudio_list_capsules",
@@ -443,11 +453,12 @@ class GatewaySessionManager:
             },
             {
                 "name": "mcpstudio_create_session",
-                "description": "Create a dedicated Serena process pinned to one registered workspace and attach this MCP transport by default.",
+                "description": "Create a dedicated Serena process pinned to one registered workspace and attach this MCP transport by default. Attached engineering sessions are admitted through Pstack; follow the returned workflow directive.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "name": {"type": "string"}, "workspace": {"type": "string"},
+                        "request": {"type": "string"},
                         "attach": {"type": "boolean", "default": True},
                         "machine": {"type": "string"},
                     },
@@ -456,12 +467,13 @@ class GatewaySessionManager:
             },
             {
                 "name": "mcpstudio_use_workspace",
-                "description": "Production-safe shortcut: use a registered workspace key or an approved absolute project path, create/resume its isolated session, and attach this transport.",
+                "description": "Production-safe shortcut: use a registered workspace key or an approved absolute project path, create/resume its isolated session, attach this transport, and admit engineering work through Pstack. Pass request for the concrete task and follow the returned workflow directive.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "workspace": {"type": "string"},
                         "name": {"type": "string"},
+                        "request": {"type": "string"},
                     },
                     "required": ["workspace"],
                     "additionalProperties": False,
@@ -469,7 +481,7 @@ class GatewaySessionManager:
             },
             {
                 "name": "mcpstudio_use_session",
-                "description": "Attach this MCP transport to an existing managed session. Accepts an id/name or plain-language request such as 'continue HIRDA', 'go back to Nova', or Thai equivalents. Conversation-local binding and explicit names take precedence; ambiguous cross-session requests fail closed and return candidates.",
+                "description": "Attach this MCP transport to an existing managed session and rebind engineering work to Pstack. Accepts an id/name or plain-language continuation request. Conversation-local binding and explicit names take precedence; ambiguous cross-session requests fail closed and return candidates. Follow the returned Pstack workflow directive.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -477,6 +489,31 @@ class GatewaySessionManager:
                         "request": {"type": "string"},
                         "record_handoff": {"type": "boolean", "default": True},
                     },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "mcpstudio_pstack_status",
+                "description": "Show the active Pstack workflow lifecycle for this managed engineering session, including the current enforced phase and checkpoint evidence.",
+                "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            {
+                "name": "mcpstudio_pstack_checkpoint",
+                "description": "Advance or block the active Pstack workflow checkpoint. Phases are enforced in order; implementation writes remain blocked until Analyze and Plan pass, and Done cannot pass before required Review/Verify gates.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "phase": {
+                            "type": "string",
+                            "enum": ["analyze", "plan", "implement", "review", "verify", "done"],
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": ["passed", "failed"],
+                        },
+                        "evidence": {"type": "string", "minLength": 3, "maxLength": 12000},
+                    },
+                    "required": ["phase", "status", "evidence"],
                     "additionalProperties": False,
                 },
             },
@@ -1821,6 +1858,10 @@ class GatewaySessionManager:
             audit_recorded = False
 
         claimed = transferred["handoff"]
+        task_goal = str(claimed.get("summary") or "").strip()
+        if not task_goal:
+            task_goal = f"Continue engineering work in {managed.get('workspace_key') or managed.get('name') or 'workspace'}"
+        pstack_task = await self._open_pstack_gateway_task(gateway_session_id, managed_session=managed, goal=task_goal)
         return {
             "handoff": self._public_session_handoff(claimed),
             "gateway_session": target_after,
@@ -1834,6 +1875,8 @@ class GatewaySessionManager:
             "claim_consumed": True,
             "upstream_session_adopted": True,
             "audit_recorded": audit_recorded,
+            "pstack_ready": bool(pstack_task),
+            "pstack_task": pstack_task,
         }
 
     async def world_authoring_audit(
@@ -2024,6 +2067,503 @@ class GatewaySessionManager:
         finally:
             await response.aclose()
             await client.aclose()
+
+    async def _persist_pstack_adapter_trace(
+        self,
+        *,
+        trace_id: str,
+        task_id: str,
+        workspace_key: str,
+        managed_session_id: str,
+        gateway_session_id: str,
+        goal: str,
+    ) -> None:
+        if self.integrations is None:
+            return
+        try:
+            registration = self.integrations.get("pstack")
+            adapter = registration.adapter
+            snapshotter = getattr(adapter, "activity_snapshot", None)
+            if not callable(snapshotter):
+                return
+            snapshot = snapshotter(since=0, limit=250)
+        except Exception:
+            return
+        for event in snapshot.get("events") or []:
+            if str(event.get("trace_id") or "") != trace_id:
+                continue
+            data = {
+                "task_id": task_id,
+                "trace_id": trace_id,
+                "workspace_key": workspace_key,
+                "managed_session_id": managed_session_id,
+                "gateway_session_id": gateway_session_id,
+                "goal": goal,
+                "workflow": event.get("workflow"),
+                "role": event.get("role"),
+                "tool": event.get("tool"),
+                "actor": event.get("actor") or "pstack",
+                "phase": event.get("phase"),
+                "title": event.get("title"),
+                "detail": event.get("detail"),
+                "status": event.get("status"),
+                "trace_status": (
+                    "ready_for_hirda"
+                    if event.get("phase") == "handoff_ready"
+                    else None
+                ),
+                "metadata": dict(event.get("metadata") or {}),
+            }
+            await self.db.add_event(
+                "pstack.trace.event",
+                str(event.get("title") or event.get("phase") or "Pstack event"),
+                data=data,
+                stream_id=f"pstack:{trace_id}",
+                correlation_id=trace_id,
+            )
+
+    async def _active_pstack_gateway_task(
+        self,
+        gateway_session_id: str,
+        *,
+        managed_session: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        gateway = await self.db.get_gateway_session(gateway_session_id)
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        gateway_task = dict(
+            (gateway.get("metadata") or {}).get("active_pstack_task") or {}
+        )
+        if gateway_task:
+            candidates.append(("gateway", gateway_task))
+
+        studio_session_id = str(gateway.get("studio_session_id") or "").strip()
+        logical_task: dict[str, Any] = {}
+        if studio_session_id:
+            try:
+                logical = await self.db.get_session(studio_session_id)
+                logical_task = dict(
+                    (logical.get("metadata") or {}).get("active_pstack_task") or {}
+                )
+                if logical_task:
+                    candidates.append(("logical", logical_task))
+            except KeyError:
+                pass
+
+        expected_id = str(
+            (managed_session or {}).get("id")
+            or gateway.get("managed_session_id")
+            or ""
+        )
+        expected_workspace = str(
+            (managed_session or {}).get("workspace_key") or ""
+        )
+        eligible: list[tuple[str, dict[str, Any]]] = []
+        for source, task in candidates:
+            if not str(task.get("trace_id") or "").strip():
+                continue
+            task_managed_id = str(task.get("managed_session_id") or "")
+            task_workspace = str(task.get("workspace_key") or "")
+            if expected_id and task_managed_id and task_managed_id != expected_id:
+                continue
+            if (
+                expected_workspace
+                and task_workspace
+                and task_workspace != expected_workspace
+            ):
+                continue
+            eligible.append((source, task))
+
+        if not eligible:
+            return None
+
+        def freshness(item: tuple[str, dict[str, Any]]) -> tuple[int, float, float]:
+            _source, task = item
+            lifecycle = task.get("lifecycle")
+            lifecycle_dict = lifecycle if isinstance(lifecycle, dict) else {}
+            try:
+                revision = int(lifecycle_dict.get("revision") or 0)
+            except (TypeError, ValueError):
+                revision = 0
+            try:
+                updated_at = float(lifecycle_dict.get("updated_at") or 0.0)
+            except (TypeError, ValueError):
+                updated_at = 0.0
+            try:
+                opened_at = float(task.get("opened_at") or 0.0)
+            except (TypeError, ValueError):
+                opened_at = 0.0
+            return revision, updated_at, opened_at
+
+        _source, selected = max(eligible, key=freshness)
+        if selected != gateway_task or (
+            logical_task and selected != logical_task
+        ):
+            await self._persist_active_pstack_task(
+                gateway_session_id,
+                selected,
+            )
+        return selected
+
+    async def _persist_active_pstack_task(
+        self,
+        gateway_session_id: str,
+        task: dict[str, Any],
+    ) -> None:
+        await self.db.update_gateway_session_metadata(
+            gateway_session_id,
+            {"active_pstack_task": task},
+        )
+        gateway = await self.db.get_gateway_session(gateway_session_id)
+        studio_session_id = str(gateway.get("studio_session_id") or "").strip()
+        if studio_session_id:
+            await self.db.heartbeat_session(
+                studio_session_id,
+                {"metadata": {"active_pstack_task": task}},
+            )
+
+    async def _checkpoint_active_pstack_task(
+        self,
+        gateway_session_id: str,
+        *,
+        phase: str,
+        status: str,
+        evidence: str,
+    ) -> dict[str, Any]:
+        gateway = await self.db.get_gateway_session(gateway_session_id)
+        managed_id = str(gateway.get("managed_session_id") or "").strip()
+        managed = (
+            await self.db.get_managed_session(managed_id)
+            if managed_id else None
+        )
+        task = await self._active_pstack_gateway_task(
+            gateway_session_id,
+            managed_session=managed,
+        )
+        if not task:
+            raise PstackLifecycleError(
+                "PSTACK_WORKFLOW_REQUIRED",
+                "No active Pstack workflow is bound to this session.",
+            )
+        lifecycle = ensure_pstack_lifecycle(
+            task.get("lifecycle"),
+            workflow=str(task.get("workflow") or "feature"),
+        )
+        lifecycle = pstack_checkpoint(
+            lifecycle,
+            phase=phase,
+            status=status,
+            evidence=evidence,
+        )
+        updated = {
+            **task,
+            "lifecycle": lifecycle,
+            "status": (
+                "completed"
+                if lifecycle.get("status") == "completed"
+                else "blocked"
+                if lifecycle.get("status") == "blocked"
+                else "active"
+            ),
+        }
+        await self._persist_active_pstack_task(gateway_session_id, updated)
+        trace_id = str(updated.get("trace_id") or "")
+        phase_key = str(phase or "").strip().casefold()
+        status_key = str(status or "").strip().casefold()
+        await self.db.add_event(
+            "pstack.lifecycle.checkpoint",
+            f"Pstack {phase_key} checkpoint {status_key}.",
+            data={
+                "task_id": updated.get("task_id"),
+                "trace_id": trace_id,
+                "workspace_key": updated.get("workspace_key"),
+                "managed_session_id": updated.get("managed_session_id"),
+                "goal": updated.get("goal"),
+                "workflow": updated.get("workflow"),
+                "actor": "hirda",
+                "phase": f"lifecycle_{phase_key}_{status_key}",
+                "title": f"{phase_key.title()} {status_key}",
+                "detail": str(evidence or "")[:1000],
+                "status": status_key,
+                "trace_status": (
+                    "completed"
+                    if lifecycle.get("status") == "completed"
+                    else "blocked"
+                    if lifecycle.get("status") == "blocked"
+                    else "active"
+                ),
+                "lifecycle": lifecycle,
+                "metadata": {
+                    "current_phase": lifecycle.get("current_phase"),
+                    "revision": lifecycle.get("revision"),
+                },
+            },
+            stream_id=f"pstack:{trace_id}",
+            correlation_id=trace_id,
+        )
+        return updated
+
+    async def _record_pstack_lifecycle_tool_evidence(
+        self,
+        gateway_session_id: str,
+        *,
+        managed_session: dict[str, Any],
+        tool_name: str,
+        tool_class: str,
+        status: str,
+        detail: str,
+    ) -> dict[str, Any] | None:
+        task = await self._active_pstack_gateway_task(
+            gateway_session_id,
+            managed_session=managed_session,
+        )
+        if not task:
+            return None
+        lifecycle = ensure_pstack_lifecycle(
+            task.get("lifecycle"),
+            workflow=str(task.get("workflow") or "feature"),
+        )
+        lifecycle = record_pstack_tool_evidence(
+            lifecycle,
+            tool=tool_name,
+            tool_class=tool_class,
+            status=status,
+            detail=detail,
+        )
+        updated = {**task, "lifecycle": lifecycle}
+        await self._persist_active_pstack_task(gateway_session_id, updated)
+        return updated
+
+    async def _finalize_pstack_tool(
+        self,
+        gateway_session_id: str,
+        *,
+        session: dict[str, Any],
+        pstack_task: dict[str, Any] | None,
+        pstack_managed: dict[str, Any] | None,
+        tool_name: str,
+        tool_class: str | None,
+        status_code: int,
+        runtime_error: str | None = None,
+        runtime_recovered: bool = False,
+    ) -> None:
+        if not tool_name or not session.get("managed_session_id"):
+            return
+        failed = int(status_code or 0) >= 400 or bool(runtime_error)
+        tool_status = "failed" if failed else "passed"
+        tool_detail = (
+            f"{tool_name} failed: {str(runtime_error)[:300]}"
+            if runtime_error
+            else f"{tool_name} finished with HTTP {status_code}."
+        )
+        await self._record_active_pstack_tool(
+            session,
+            tool_name=tool_name,
+            status=tool_status,
+            detail=tool_detail,
+            metadata={
+                "http_status": int(status_code or 0),
+                "runtime_recovered": bool(runtime_recovered),
+            },
+        )
+        if pstack_task and pstack_managed is not None:
+            await self._record_pstack_lifecycle_tool_evidence(
+                gateway_session_id,
+                managed_session=pstack_managed,
+                tool_name=tool_name,
+                tool_class=str(tool_class or "unknown"),
+                status=tool_status,
+                detail=tool_detail,
+            )
+
+    def _require_pstack_admission(
+        self,
+        task: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if self.integrations is not None and not task:
+            raise PstackLifecycleError(
+                "PSTACK_WORKFLOW_REQUIRED",
+                "HIRDA could not establish the required Pstack engineering workflow admission.",
+            )
+        return task
+
+    async def _open_pstack_gateway_task(
+        self,
+        gateway_session_id: str,
+        *,
+        managed_session: dict[str, Any],
+        goal: str,
+    ) -> dict[str, Any] | None:
+        if self.integrations is None:
+            return None
+        goal_text = str(goal or "").strip()
+        if not goal_text:
+            return None
+        try:
+            registration = self.integrations.get("pstack")
+            if registration.stage != "ready":
+                await self.integrations.reconcile("pstack")
+            current_gateway = await self.db.get_gateway_session(gateway_session_id)
+            active = await self._active_pstack_gateway_task(
+                gateway_session_id,
+                managed_session=managed_session,
+            )
+            if (
+                active
+                and str(active.get("goal") or "").strip().casefold()
+                == goal_text.casefold()
+            ):
+                lifecycle = ensure_pstack_lifecycle(
+                    active.get("lifecycle"),
+                    workflow=str(active.get("workflow") or "feature"),
+                )
+                if active.get("lifecycle") != lifecycle:
+                    active = {**active, "lifecycle": lifecycle}
+                    await self._persist_active_pstack_task(
+                        gateway_session_id,
+                        active,
+                    )
+                if (
+                    str(active.get("status") or "").casefold() != "completed"
+                    and str(lifecycle.get("status") or "").casefold() != "completed"
+                ):
+                    return active
+
+            task_id = f"TASK-{uuid4().hex[:12].upper()}"
+            routed = await self.integrations.call_backend_tool(
+                "hirda__pstack__route_task",
+                {"goal": goal_text},
+                context={
+                    "task_id": task_id,
+                    "managed_session_id": managed_session.get("id"),
+                },
+            )
+            trace_id = str(routed.get("trace_id") or "").strip()
+            if not trace_id:
+                return None
+            coordinator = dict(routed.get("coordinator") or {})
+            hirda_request = dict(coordinator.get("hirda_request") or {})
+            directive = {
+                "schema": "hirda-pstack-workflow-directive-v1",
+                "request_id": hirda_request.get("request_id"),
+                "capability": hirda_request.get("capability"),
+                "preferred_depth": hirda_request.get("preferred_depth"),
+                "prompt": hirda_request.get("prompt"),
+                "context": dict(hirda_request.get("context") or {}),
+            }
+            task = {
+                "task_id": task_id,
+                "trace_id": trace_id,
+                "goal": goal_text,
+                "workflow": routed.get("workflow"),
+                "workspace_key": managed_session.get("workspace_key"),
+                "managed_session_id": managed_session.get("id"),
+                "status": "ready_for_hirda",
+                "workflow_directive": directive,
+                "lifecycle": lifecycle_for_workflow(routed.get("workflow")),
+                "opened_at": time.time(),
+            }
+            await self.db.update_gateway_session_metadata(
+                gateway_session_id,
+                {"active_pstack_task": task},
+            )
+            studio_session_id = str(
+                current_gateway.get("studio_session_id") or ""
+            ).strip()
+            if studio_session_id:
+                await self.db.heartbeat_session(
+                    studio_session_id,
+                    {"metadata": {"active_pstack_task": task}},
+                )
+            await self._persist_pstack_adapter_trace(
+                trace_id=trace_id,
+                task_id=task_id,
+                workspace_key=str(managed_session.get("workspace_key") or ""),
+                managed_session_id=str(managed_session.get("id") or ""),
+                gateway_session_id=gateway_session_id,
+                goal=goal_text,
+            )
+            await self.db.add_event(
+                "pstack.task.opened",
+                f"Pstack task opened for {goal_text[:160]}",
+                data={
+                    **{key: value for key, value in task.items() if key != "workflow_directive"},
+                    "actor": "hirda",
+                    "phase": "task_opened",
+                    "title": "HIRDA task envelope opened",
+                    "detail": (
+                        "HIRDA bound this ChatGPT coding task to a persistent "
+                        "Pstack trace."
+                    ),
+                    "status": "ready",
+                    "trace_status": "ready_for_hirda",
+                },
+                stream_id=f"pstack:{trace_id}",
+                correlation_id=trace_id,
+            )
+            return task
+        except Exception as exc:
+            await self.db.add_event(
+                "pstack.task.open_failed",
+                f"Pstack task envelope could not be opened: {type(exc).__name__}",
+                severity="warning",
+                data={
+                    "gateway_session_id": gateway_session_id,
+                    "managed_session_id": managed_session.get("id"),
+                    "workspace_key": managed_session.get("workspace_key"),
+                    "goal": goal_text[:1000],
+                    "error": f"{type(exc).__name__}: {exc}"[:1000],
+                },
+            )
+            return None
+
+    async def _record_active_pstack_tool(
+        self,
+        session: dict[str, Any],
+        *,
+        tool_name: str,
+        status: str,
+        detail: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        task = dict((session.get("metadata") or {}).get("active_pstack_task") or {})
+        if not task:
+            studio_session_id = str(session.get("studio_session_id") or "").strip()
+            if studio_session_id:
+                try:
+                    logical = await self.db.get_session(studio_session_id)
+                    task = dict(
+                        (logical.get("metadata") or {}).get("active_pstack_task")
+                        or {}
+                    )
+                except KeyError:
+                    task = {}
+        trace_id = str(task.get("trace_id") or "").strip()
+        if not trace_id:
+            return
+        phase = "tool_started" if status == "running" else "tool_completed"
+        title = (
+            f"{tool_name} started"
+            if status == "running"
+            else f"{tool_name} completed"
+        )
+        await self.db.add_event(
+            f"pstack.{phase}",
+            title,
+            severity="warning" if status == "failed" else "info",
+            data={
+                **task,
+                "actor": "tool",
+                "phase": phase,
+                "title": title,
+                "detail": detail,
+                "status": status,
+                "tool": tool_name,
+                "trace_status": "executing" if status == "running" else "active",
+                "metadata": dict(metadata or {}),
+            },
+            stream_id=f"pstack:{trace_id}",
+            correlation_id=trace_id,
+        )
 
     async def _handle_management_tool(self, gateway_session_id: str, name: str, args: dict[str, Any]) -> Any:
         if not self.managed_sessions:
@@ -2224,14 +2764,15 @@ class GatewaySessionManager:
                 name=str(args.get("name") or ""), workspace_key=str(args.get("workspace") or ""), actor="chatgpt/mcp",
             )
             if args.get("machine") and self.machine_router is not None:
-                await self.machine_router.bind_session(
-                    self.db, created["id"], str(args.get("machine")), actor="chatgpt/mcp"
-                )
+                await self.machine_router.bind_session(self.db, created["id"], str(args.get("machine")), actor="chatgpt/mcp")
                 created = await self.managed_sessions.get_session(created["id"])
-            attached = None
+            attached = None; pstack_task = None
             if args.get("attach", True):
                 attached = await self.bind_managed_session(gateway_session_id, created["id"], actor="chatgpt/mcp")
-            return {"session": created, "attached": bool(attached)}
+                task_goal = str(args.get("request") or "").strip() or f"Engineering work in {created.get('workspace_key') or created.get('name') or 'workspace'}"
+                pstack_task = await self._open_pstack_gateway_task(gateway_session_id, managed_session=attached["managed_session"], goal=task_goal)
+                pstack_task = self._require_pstack_admission(pstack_task)
+            return {"session": created, "attached": bool(attached), "pstack_task": pstack_task}
         if name == "mcpstudio_use_workspace":
             target = await self.managed_sessions.ensure_workspace_selector_session(
                 workspace=str(args.get("workspace") or ""),
@@ -2239,10 +2780,12 @@ class GatewaySessionManager:
                 actor="chatgpt/mcp",
             )
             if args.get("machine") and self.machine_router is not None:
-                await self.machine_router.bind_session(
-                    self.db, target["id"], str(args.get("machine")), actor="chatgpt/mcp"
-                )
-            return await self.bind_managed_session(gateway_session_id, target["id"], actor="chatgpt/mcp")
+                await self.machine_router.bind_session(self.db, target["id"], str(args.get("machine")), actor="chatgpt/mcp")
+            attached = await self.bind_managed_session(gateway_session_id, target["id"], actor="chatgpt/mcp")
+            task_goal = str(args.get("request") or "").strip() or f"Engineering work in {target.get('workspace_key') or target.get('name') or 'workspace'}"
+            pstack_task = await self._open_pstack_gateway_task(gateway_session_id, managed_session=attached["managed_session"], goal=task_goal)
+            pstack_task = self._require_pstack_admission(pstack_task)
+            return {**attached, "pstack_task": pstack_task}
         if name == "mcpstudio_use_session":
             selector = str(args.get("session") or "").strip()
             natural_request = str(args.get("request") or "").strip()
@@ -2274,14 +2817,27 @@ class GatewaySessionManager:
                     reason="natural-language-session-continuation" if natural_request or selector != str(target.get("id")) else "session-continuation",
                     actor="chatgpt/mcp",
                 )
+            task_goal = natural_request or f"Continue engineering work in {target.get('workspace_key') or target.get('name') or 'workspace'}"
+            pstack_task = await self._open_pstack_gateway_task(gateway_session_id, managed_session=attached["managed_session"], goal=task_goal)
+            pstack_task = self._require_pstack_admission(pstack_task)
             return {
                 **attached,
-                "resolution": {
-                    "confidence": resolution.get("confidence"),
-                    "reason": resolution.get("reason"),
-                },
+                "resolution": {"confidence": resolution.get("confidence"), "reason": resolution.get("reason")},
                 "handoff": self._public_session_handoff(observed) if observed else None,
+                "pstack_task": pstack_task,
             }
+        if name == "mcpstudio_pstack_status":
+            gateway = await self.db.get_gateway_session(gateway_session_id)
+            managed_id = str(gateway.get("managed_session_id") or "").strip()
+            managed = await self.db.get_managed_session(managed_id) if managed_id else None
+            task = await self._active_pstack_gateway_task(gateway_session_id, managed_session=managed)
+            if not task: return {"active": False, "status": "not_bound", "message": "No active Pstack engineering workflow is bound to this session."}
+            lifecycle = ensure_pstack_lifecycle(task.get("lifecycle"), workflow=str(task.get("workflow") or "feature"))
+            if task.get("lifecycle") != lifecycle:
+                task = {**task, "lifecycle": lifecycle}; await self._persist_active_pstack_task(gateway_session_id, task)
+            return {"active": True, "task_id": task.get("task_id"), "trace_id": task.get("trace_id"), "goal": task.get("goal"), "workflow": task.get("workflow"), "status": task.get("status"), "lifecycle": lifecycle}
+        if name == "mcpstudio_pstack_checkpoint":
+            return await self._checkpoint_active_pstack_task(gateway_session_id, phase=str(args.get("phase") or ""), status=str(args.get("status") or ""), evidence=str(args.get("evidence") or ""))
         if name == "mcpstudio_context_status":
             return await self.context_status(gateway_session_id)
         if name == "mcpstudio_report_context_usage":
@@ -2931,7 +3487,7 @@ class GatewaySessionManager:
                 result = await self._handle_management_tool(gateway_session_id, tool_name, tool_args)
                 session = await self.db.get_gateway_session(gateway_session_id)
                 return local_tool_response(result)
-            except (ManagedSessionError, ManagedSessionConflict, WorkspaceNotAllowed, GraftError, WorldAuthoringError, KeyError) as exc:
+            except (ManagedSessionError, ManagedSessionConflict, WorkspaceNotAllowed, GraftError, WorldAuthoringError, PstackLifecycleError, KeyError) as exc:
                 return local_tool_response({"error": str(exc)}, is_error=True)
 
         if request.method == "POST" and rpc_method == "tools/call" and self.managed_sessions and self.managed_sessions.enabled:
@@ -3247,6 +3803,102 @@ class GatewaySessionManager:
                     is_error=True,
                 )
 
+        pstack_task = None
+        pstack_managed = None
+        pstack_tool_class = None
+        if (
+            request.method == "POST"
+            and rpc_method == "tools/call"
+            and tool_name
+            and not tool_name.startswith("mcpstudio_")
+            and session.get("managed_session_id")
+        ):
+            if self.integrations is not None:
+                try:
+                    pstack_managed = await self.db.get_managed_session(
+                        str(session["managed_session_id"])
+                    )
+                except KeyError:
+                    return local_tool_response(
+                        {
+                            "error": "PSTACK_WORKFLOW_SESSION_MISSING",
+                            "message": "Managed engineering session is missing; Pstack admission cannot be verified.",
+                        },
+                        is_error=True,
+                    )
+                pstack_task = await self._active_pstack_gateway_task(
+                    gateway_session_id,
+                    managed_session=pstack_managed,
+                )
+                if not pstack_task:
+                    pstack_task = await self._open_pstack_gateway_task(
+                        gateway_session_id,
+                        managed_session=pstack_managed,
+                        goal=f"Engineering work in {pstack_managed.get('workspace_key') or pstack_managed.get('name') or 'workspace'}",
+                    )
+                if not pstack_task:
+                    return local_tool_response(
+                        {
+                            "error": "PSTACK_WORKFLOW_REQUIRED",
+                            "message": (
+                                "Engineering tool dispatch is fail-closed because HIRDA could not "
+                                "establish the required Pstack workflow admission."
+                            ),
+                            "tool": tool_name,
+                            "managed_session_id": session.get("managed_session_id"),
+                        },
+                        is_error=True,
+                    )
+                lifecycle = ensure_pstack_lifecycle(
+                    pstack_task.get("lifecycle"),
+                    workflow=str(pstack_task.get("workflow") or "feature"),
+                )
+                if pstack_task.get("lifecycle") != lifecycle:
+                    pstack_task = {**pstack_task, "lifecycle": lifecycle}
+                    await self._persist_active_pstack_task(
+                        gateway_session_id,
+                        pstack_task,
+                    )
+                pstack_tool_class = classify_tool(tool_name, tool_args)
+                gate = pstack_workflow_gate(
+                    lifecycle,
+                    tool_class=pstack_tool_class,
+                )
+                if not gate.get("allowed"):
+                    return local_tool_response(
+                        {
+                            "error": gate.get("code") or "PSTACK_WORKFLOW_BLOCKED",
+                            "message": gate.get("message") or "Pstack workflow gate blocked this tool.",
+                            "tool": tool_name,
+                            "tool_class": pstack_tool_class,
+                            "workflow": pstack_task.get("workflow"),
+                            "current_phase": lifecycle.get("current_phase"),
+                            "lifecycle_status": lifecycle.get("status"),
+                            "trace_id": pstack_task.get("trace_id"),
+                        },
+                        is_error=True,
+                    )
+                session = await self.db.get_gateway_session(gateway_session_id)
+            await self._record_active_pstack_tool(
+                session,
+                tool_name=tool_name,
+                status="running",
+                detail=(
+                    f"HIRDA dispatched {tool_name} inside the Pstack-bound workspace."
+                    if pstack_task
+                    else f"HIRDA dispatched {tool_name} in an isolated harness without integrations."
+                ),
+                metadata={
+                    "argument_keys": sorted(str(key) for key in (tool_args or {})),
+                    "pstack_required": self.integrations is not None,
+                    "pstack_workflow": (pstack_task or {}).get("workflow"),
+                    "pstack_phase": (
+                        ((pstack_task or {}).get("lifecycle") or {}).get("current_phase")
+                    ),
+                    "tool_class": pstack_tool_class,
+                },
+            )
+
         target_url = session.get("upstream_url") or server.url
         if (
             self.settings.studio.managed_session_cutover_enabled
@@ -3432,6 +4084,8 @@ class GatewaySessionManager:
                 status_code,
                 "buffered-lsp-recovery" if runtime_error else "buffered-managed-tool",
             )
+            final_lsp_error = self._language_runtime_error(content, ctype)
+            await self._finalize_pstack_tool(gateway_session_id, session=session, pstack_task=pstack_task, pstack_managed=pstack_managed, tool_name=tool_name, tool_class=pstack_tool_class, status_code=status_code, runtime_error=final_lsp_error, runtime_recovered=bool(runtime_error and not final_lsp_error))
             media = (
                 "text/event-stream"
                 if "text/event-stream" in ctype
@@ -3513,6 +4167,8 @@ class GatewaySessionManager:
             if rpc_method == "tools/call" and context_notice:
                 content = self._augment_tool_result_context_notice(content, ctype, context_notice)
             await record_reflex_outcome(status_code, "buffered")
+            if rpc_method == "tools/call":
+                await self._finalize_pstack_tool(gateway_session_id, session=session, pstack_task=pstack_task, pstack_managed=pstack_managed, tool_name=tool_name, tool_class=pstack_tool_class, status_code=status_code, runtime_error=self._language_runtime_error(content, ctype))
             return Response(content=content, status_code=status_code, headers=response_headers)
 
         # A rollover transition must be visible to the model in the same tool
@@ -3525,6 +4181,7 @@ class GatewaySessionManager:
             await client.aclose()
             content = self._augment_tool_result_context_notice(content, ctype, context_notice)
             await record_reflex_outcome(status_code, "buffered-context-notice")
+            await self._finalize_pstack_tool(gateway_session_id, session=session, pstack_task=pstack_task, pstack_managed=pstack_managed, tool_name=tool_name, tool_class=pstack_tool_class, status_code=status_code, runtime_error=self._language_runtime_error(content, ctype))
             return Response(
                 content=content,
                 status_code=status_code,
@@ -3534,13 +4191,24 @@ class GatewaySessionManager:
 
         await record_reflex_outcome(response.status_code, "streaming")
 
+        stream_status_code = int(response.status_code or 0)
         async def body_iter() -> AsyncIterator[bytes]:
+            collected = bytearray(); completed = False
             try:
                 async for chunk in response.aiter_raw():
+                    if len(collected) < 2_000_000:
+                        remaining = 2_000_000 - len(collected); collected.extend(chunk[:remaining])
                     yield chunk
+                completed = True
             finally:
-                await response.aclose()
-                await client.aclose()
+                try:
+                    if rpc_method == "tools/call":
+                        stream_error = self._language_runtime_error(bytes(collected), ctype) if completed else "stream_aborted"
+                        await self._finalize_pstack_tool(gateway_session_id, session=session, pstack_task=pstack_task, pstack_managed=pstack_managed, tool_name=tool_name, tool_class=pstack_tool_class, status_code=stream_status_code, runtime_error=stream_error)
+                except Exception as exc:
+                    await self.db.add_event("pstack.lifecycle.evidence_error", f"Pstack streaming evidence finalization failed: {type(exc).__name__}", severity="warning", data={"gateway_session_id": gateway_session_id, "managed_session_id": session.get("managed_session_id"), "tool": tool_name, "error": str(exc)[:1000]})
+                finally:
+                    await response.aclose(); await client.aclose()
 
         return StreamingResponse(
             body_iter(),

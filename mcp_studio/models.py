@@ -146,6 +146,13 @@ class SessionReclaim(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class OAuthClientCreate(BaseModel):
+    client_name: str = Field(default="ChatGPT HIRDA", min_length=1, max_length=240)
+    redirect_uri: str = Field(min_length=1, max_length=2000)
+    scopes: list[str] | None = None
+    token_endpoint_auth_method: Literal["none", "client_secret_basic", "client_secret_post"] = "none"
+
+
 class TunnelRegister(BaseModel):
     id: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._:-]+$")
     provider: Literal["local", "direct", "cloudflare", "openai", "external"]

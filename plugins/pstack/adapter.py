@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 import subprocess
+from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -106,6 +108,10 @@ class PstackIntegration:
         root = repository_root or Path(__file__).resolve().parents[2]
         self.repository_root = Path(root).resolve(strict=False)
         self.pstack_root = self.repository_root / "third_party" / "pstack-claude"
+        self._activity_events: deque[dict[str, Any]] = deque(maxlen=250)
+        self._activity_traces: dict[str, dict[str, Any]] = {}
+        self._activity_sequence = 0
+        self._active_trace_id: str | None = None
         self.manifest = IntegrationManifest.from_mapping(
             {
                 "id": "pstack",
@@ -131,6 +137,163 @@ class PstackIntegration:
                 },
             }
         )
+
+    @staticmethod
+    def _activity_timestamp() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    def _new_trace(
+        self,
+        *,
+        tool: str,
+        goal: str,
+        context: dict[str, Any],
+        workflow: str | None = None,
+        role: str | None = None,
+    ) -> str:
+        trace_id = str(context.get("pstack_trace_id") or "").strip()
+        if not trace_id:
+            trace_id = f"PSTACK-TRACE-{uuid4().hex[:12].upper()}"
+        identity = {
+            key: str(context.get(key) or "").strip()
+            for key in ("task_id", "capsule_id", "managed_session_id", "turn_id")
+            if context.get(key)
+        }
+        trace = self._activity_traces.get(trace_id)
+        if trace is None:
+            trace = {
+                "trace_id": trace_id,
+                "tool": tool,
+                "goal": str(goal or "").strip()[:1200],
+                "workflow": workflow,
+                "role": role,
+                "status": "running",
+                "current_step": None,
+                "started_at": self._activity_timestamp(),
+                "updated_at": None,
+                "identity": identity,
+            }
+            self._activity_traces[trace_id] = trace
+            while len(self._activity_traces) > 32:
+                oldest = next(iter(self._activity_traces))
+                if oldest == trace_id and len(self._activity_traces) == 1:
+                    break
+                self._activity_traces.pop(oldest, None)
+        else:
+            if workflow:
+                trace["workflow"] = workflow
+            if role:
+                trace["role"] = role
+            if identity:
+                trace["identity"] = {**trace.get("identity", {}), **identity}
+        self._active_trace_id = trace_id
+        return trace_id
+
+    def _emit_activity(
+        self,
+        trace_id: str,
+        *,
+        phase: str,
+        title: str,
+        detail: str,
+        status: str,
+        workflow: str | None = None,
+        role: str | None = None,
+        tool: str | None = None,
+        trace_status: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        actor: str = "pstack",
+    ) -> dict[str, Any]:
+        self._activity_sequence += 1
+        timestamp = self._activity_timestamp()
+        trace = self._activity_traces.get(trace_id)
+        if trace is not None:
+            if workflow:
+                trace["workflow"] = workflow
+            if role:
+                trace["role"] = role
+            if tool:
+                trace["tool"] = tool
+            trace["current_step"] = {
+                "phase": phase,
+                "title": title,
+                "status": status,
+                "actor": actor,
+            }
+            trace["updated_at"] = timestamp
+            if trace_status:
+                trace["status"] = trace_status
+        event = {
+            "schema": "hirda-pstack-activity-event-v1",
+            "sequence": self._activity_sequence,
+            "trace_id": trace_id,
+            "timestamp": timestamp,
+            "actor": str(actor or "pstack").strip().casefold() or "pstack",
+            "phase": phase,
+            "title": title,
+            "detail": detail,
+            "status": status,
+            "workflow": workflow or (trace or {}).get("workflow"),
+            "role": role or (trace or {}).get("role"),
+            "tool": tool or (trace or {}).get("tool"),
+            "runtime_authority": "hirda",
+            "metadata": dict(metadata or {}),
+        }
+        self._activity_events.append(event)
+        return event
+
+    def record_external_event(
+        self,
+        trace_id: str,
+        *,
+        actor: str,
+        phase: str,
+        title: str,
+        detail: str,
+        status: str,
+        trace_status: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        trace_key = str(trace_id or "").strip()
+        if not trace_key or trace_key not in self._activity_traces:
+            raise PstackAdapterError("pstack_trace_unknown")
+        return self._emit_activity(
+            trace_key,
+            actor=actor,
+            phase=phase,
+            title=title,
+            detail=detail,
+            status=status,
+            trace_status=trace_status,
+            metadata=metadata,
+        )
+
+    def activity_snapshot(
+        self,
+        *,
+        since: int = 0,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        cursor = max(0, int(since or 0))
+        bounded_limit = max(1, min(int(limit or 100), 250))
+        events = [
+            dict(event)
+            for event in self._activity_events
+            if int(event.get("sequence") or 0) > cursor
+        ][-bounded_limit:]
+        active = self._activity_traces.get(self._active_trace_id or "")
+        traces = list(self._activity_traces.values())[-20:]
+        return {
+            "schema": "hirda-pstack-activity-v1",
+            "available": True,
+            "runtime_authority": "hirda",
+            "model_selection": "deferred_to_hirda",
+            "latest_sequence": self._activity_sequence,
+            "event_count": len(self._activity_events),
+            "active_trace": dict(active) if active else None,
+            "traces": [dict(item) for item in reversed(traces)],
+            "events": events,
+        }
 
     def _revision(self) -> str | None:
         if not self.pstack_root.is_dir():
@@ -295,11 +458,18 @@ class PstackIntegration:
 
     async def status(self) -> dict[str, Any]:
         validation = await self.validate()
+        activity = self.activity_snapshot(limit=1)
         return {
             **validation,
             "schema": "hirda-pstack-status-v1",
             "supported_workflows": sorted(_WORKFLOW_SOURCES),
             "supported_roles": sorted(_ROLE_PROFILES),
+            "observability": {
+                "schema": activity["schema"],
+                "event_count": activity["event_count"],
+                "latest_sequence": activity["latest_sequence"],
+                "active_trace": activity["active_trace"],
+            },
         }
 
     async def call_tool(
@@ -309,44 +479,182 @@ class PstackIntegration:
         *,
         context: dict[str, Any],
     ) -> dict[str, Any]:
-        del context
-        if name == "load_workflow":
-            workflow = str(arguments.get("workflow") or "").strip().casefold()
-            return self._load_workflow(workflow)
-        if name == "build_role_request":
-            workflow = arguments.get("workflow")
-            workflow_key = (
-                str(workflow).strip().casefold()
-                if workflow is not None
-                else None
-            )
-            return self._build_role_request(
-                role=str(arguments.get("role") or ""),
-                task=str(arguments.get("task") or ""),
-                workflow=workflow_key,
-            )
-        if name == "route_task":
-            goal = str(arguments.get("goal") or "").strip()
-            if not goal:
-                raise PstackAdapterError("pstack_goal_required")
-            workflow = self._select_workflow(
-                goal,
-                arguments.get("workflow"),
-            )
-            loaded = self._load_workflow(workflow)
-            coordinator = self._build_role_request(
-                role="coordinator",
-                task=goal,
-                workflow=workflow,
-                methodology=loaded["methodology"],
-            )
-            return {
-                "schema": "hirda-pstack-route-v1",
-                "workflow": workflow,
-                "source": loaded["source"],
-                "methodology": loaded["methodology"],
-                "runtime_authority": "hirda",
-                "model_selection": "deferred",
-                "coordinator": coordinator,
-            }
-        raise PstackAdapterError("pstack_tool_unknown")
+        trace_id: str | None = None
+        try:
+            if name == "load_workflow":
+                workflow = str(arguments.get("workflow") or "").strip().casefold()
+                trace_id = self._new_trace(
+                    tool=name,
+                    goal=f"Load Pstack workflow {workflow or 'unknown'}",
+                    context=context,
+                    workflow=workflow or None,
+                )
+                self._emit_activity(
+                    trace_id,
+                    phase="received",
+                    title="Workflow requested",
+                    detail=f"Loading pinned Pstack methodology for {workflow or 'unknown'}.",
+                    status="running",
+                    workflow=workflow or None,
+                    tool=name,
+                )
+                loaded = self._load_workflow(workflow)
+                self._emit_activity(
+                    trace_id,
+                    phase="methodology_loaded",
+                    title="Methodology loaded",
+                    detail="Pinned upstream workflow text is ready for use.",
+                    status="passed",
+                    workflow=workflow,
+                    tool=name,
+                    trace_status="completed",
+                    metadata={"source": loaded["source"]},
+                )
+                return {**loaded, "trace_id": trace_id}
+
+            if name == "build_role_request":
+                workflow = arguments.get("workflow")
+                workflow_key = (
+                    str(workflow).strip().casefold()
+                    if workflow is not None
+                    else None
+                )
+                role = str(arguments.get("role") or "").strip().casefold()
+                task = str(arguments.get("task") or "").strip()
+                trace_id = self._new_trace(
+                    tool=name,
+                    goal=task,
+                    context=context,
+                    workflow=workflow_key,
+                    role=role or None,
+                )
+                self._emit_activity(
+                    trace_id,
+                    phase="received",
+                    title="Role task received",
+                    detail=f"Translating Pstack role {role or 'unknown'} into a HIRDA request.",
+                    status="running",
+                    workflow=workflow_key,
+                    role=role or None,
+                    tool=name,
+                )
+                result = self._build_role_request(
+                    role=role,
+                    task=task,
+                    workflow=workflow_key,
+                )
+                result["trace_id"] = trace_id
+                result["hirda_request"]["context"]["pstack_trace_id"] = trace_id
+                self._emit_activity(
+                    trace_id,
+                    phase="hirda_request_ready",
+                    title="HIRDA request ready",
+                    detail=(
+                        f"Role {result['role']} mapped to capability "
+                        f"{result['hirda_request']['capability']}; runtime selection remains with HIRDA."
+                    ),
+                    status="passed",
+                    workflow=result.get("workflow"),
+                    role=result["role"],
+                    tool=name,
+                    trace_status="ready_for_hirda",
+                    metadata={
+                        "request_id": result["hirda_request"]["request_id"],
+                        "capability": result["hirda_request"]["capability"],
+                        "preferred_depth": result["hirda_request"]["preferred_depth"],
+                    },
+                )
+                return result
+
+            if name == "route_task":
+                goal = str(arguments.get("goal") or "").strip()
+                trace_id = self._new_trace(
+                    tool=name,
+                    goal=goal,
+                    context=context,
+                )
+                self._emit_activity(
+                    trace_id,
+                    phase="received",
+                    title="Task received",
+                    detail="Pstack received an engineering task for methodology selection.",
+                    status="running",
+                    tool=name,
+                )
+                if not goal:
+                    raise PstackAdapterError("pstack_goal_required")
+                workflow = self._select_workflow(
+                    goal,
+                    arguments.get("workflow"),
+                )
+                self._emit_activity(
+                    trace_id,
+                    phase="workflow_selected",
+                    title="Workflow selected",
+                    detail=f"Selected Pstack workflow: {workflow}.",
+                    status="passed",
+                    workflow=workflow,
+                    tool=name,
+                )
+                loaded = self._load_workflow(workflow)
+                self._emit_activity(
+                    trace_id,
+                    phase="methodology_loaded",
+                    title="Methodology loaded",
+                    detail="Loaded the pinned upstream methodology without selecting a runtime.",
+                    status="passed",
+                    workflow=workflow,
+                    tool=name,
+                    metadata={"source": loaded["source"]},
+                )
+                coordinator = self._build_role_request(
+                    role="coordinator",
+                    task=goal,
+                    workflow=workflow,
+                    methodology=loaded["methodology"],
+                )
+                coordinator["trace_id"] = trace_id
+                coordinator["hirda_request"]["context"]["pstack_trace_id"] = trace_id
+                result = {
+                    "schema": "hirda-pstack-route-v1",
+                    "trace_id": trace_id,
+                    "workflow": workflow,
+                    "source": loaded["source"],
+                    "methodology": loaded["methodology"],
+                    "runtime_authority": "hirda",
+                    "model_selection": "deferred",
+                    "coordinator": coordinator,
+                }
+                self._emit_activity(
+                    trace_id,
+                    phase="handoff_ready",
+                    title="Ready for HIRDA",
+                    detail=(
+                        "Coordinator request is ready. Pstack stops at the methodology boundary; "
+                        "HIRDA owns runtime, model, machine, permission, and execution decisions."
+                    ),
+                    status="ready",
+                    workflow=workflow,
+                    role="coordinator",
+                    tool=name,
+                    trace_status="ready_for_hirda",
+                    metadata={
+                        "request_id": coordinator["hirda_request"]["request_id"],
+                        "capability": coordinator["hirda_request"]["capability"],
+                    },
+                )
+                return result
+
+            raise PstackAdapterError("pstack_tool_unknown")
+        except Exception as exc:
+            if trace_id is not None:
+                self._emit_activity(
+                    trace_id,
+                    phase="failed",
+                    title="Pstack step failed",
+                    detail=f"{type(exc).__name__}: {exc}",
+                    status="failed",
+                    tool=name,
+                    trace_status="failed",
+                )
+            raise

@@ -598,10 +598,14 @@ function detailBlock(rows){
 async function getJson(url, options){ const r = await fetch(url, options); if(!r.ok){let d='';try{const j=await r.json();d=j.detail||JSON.stringify(j)}catch{}throw new Error(`${r.status} ${d||url}`)} return r.json(); }
 async function sendJson(url, body){ return getJson(url,{method:'POST',headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)}); }
 
+let pstackActivitySource=null;
+let pstackActivityData=null;
+
 const viewMeta = {
   home:['Dashboard','Dashboard','Live capsule routing, active agent lanes, handoffs, and system health.'],
   sessions:['Capsule Lanes','Capsule Lanes','Inspect capsule state, routing, handoffs, and session history.'],
   agents:['Agents','Agents','Monitor runtime availability, authentication health, rate limits, and active capsule load.'],
+  pstack:['Pstack','Pstack Activity','Watch methodology selection and live workflow trace events before HIRDA execution.'],
   reflex:['Reflex','Reflex','Observe HIRDA Reflex decisions, JEV teacher agreement, latency, risk, and dataset growth.'],
   actions:['Actions','JEV Action Adapter','Test one shared action schema across Browser, World, and Finance without executing candidates.'],
   workspaces:['Workspaces','Workspaces','Manage approved projects, managed sessions, and workspace safety.'],
@@ -624,6 +628,12 @@ function setView(view, updateHash=true){
   if(updateHash && location.hash !== `#${view}`) history.replaceState(null,'',`#${view}`);
   if(view==='computer') setTimeout(refreshComputerView,0);
   if(view==='reflex') setTimeout(()=>uiAction(refreshReflexMetrics),0);
+  if(view==='pstack'){
+    setTimeout(()=>uiAction(refreshPstackActivity),0);
+    startPstackActivityStream();
+  }else{
+    stopPstackActivityStream();
+  }
   if(view==='actions') setTimeout(()=>uiAction(refreshActionPlayground),0);
   window.scrollTo({top:0,behavior:'smooth'});
 }

@@ -6,7 +6,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 HTML = (ROOT / "templates" / "index.html").read_text()
-JS = (ROOT / "static" / "app.js").read_text()
+JS = "\n".join(
+    (ROOT / "static" / name).read_text()
+    for name in ("app.pstack.js", "app.js")
+)
 MAIN = (ROOT / "mcp_studio" / "main.py").read_text()
 
 
@@ -26,6 +29,7 @@ STATIC_DIRECT_HANDLERS = {
     "reflexRefreshBtn": "reflexRefreshBtn')?.addEventListener('click'",
     "actionLoadBtn": "actionLoadBtn')?.addEventListener('click'",
     "actionEvaluateBtn": "actionEvaluateBtn')?.addEventListener('click'",
+    "pstackRefreshBtn": "pstackRefreshBtn')?.addEventListener('click'",
     "managedHistoryToggle": "managedHistoryToggle').addEventListener('click'",
     "newManagedSessionBtn": "newManagedSessionBtn').addEventListener('click'",
     "cancelManagedSessionBtn": "cancelManagedSessionBtn').addEventListener('click'",
@@ -53,6 +57,7 @@ DYNAMIC_ACTION_HANDLERS = {
     "data-agent-check": "closest('[data-agent-check]')",
     "data-agent-details": "closest('[data-agent-details]')",
     "data-go-view": "closest('[data-go-view]')",
+    "data-pstack-trace": "closest('[data-pstack-trace]')",
     "data-managed-resume": "closest('[data-managed-resume]')",
     "data-managed-restart": "closest('[data-managed-restart]')",
     "data-managed-stop": "closest('[data-managed-stop]')",

@@ -23,6 +23,7 @@ _READ_TOOLS = {
     "mcpstudio_current_session", "mcpstudio_get_session", "mcpstudio_list_sessions",
     "mcpstudio_list_workspaces", "mcpstudio_list_machines", "mcpstudio_list_machine_enrollments", "mcpstudio_session_history", "mcpstudio_context_status",
     "mcpstudio_lane_status", "mcpstudio_list_capsules", "mcpstudio_get_capsule",
+    "mcpstudio_pstack_status",
 }
 _WRITE_TOOLS = {
     "replace_content", "replace_symbol_body", "insert_after_symbol",
@@ -36,6 +37,7 @@ _EXECUTE_TOOLS = {
     "activate_project", "herdr_prompt_agent",
     "mcpstudio_use_workspace", "mcpstudio_create_session", "mcpstudio_use_session", "mcpstudio_bind_machine", "mcpstudio_discover_machines", "mcpstudio_approve_machine",
     "mcpstudio_handoff_session", "mcpstudio_accept_handoff", "mcpstudio_report_context_usage",
+    "mcpstudio_pstack_checkpoint",
     "mcpstudio_world_authoring_preview", "mcpstudio_world_authoring_audit",
     "mcpstudio_close_session", "mcpstudio_detach_session",
     "mcpstudio_certify_language_runtime_recovery",
