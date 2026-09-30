@@ -15,6 +15,11 @@ from .desktop_commander import (
     DesktopCommanderBackend,
 )
 from .graft import ALLOWED_GRAFT_TOOLS, GraftManager
+from .hirda_native_computer import (
+    NATIVE_COMPUTER_PERMISSIONS,
+    NATIVE_COMPUTER_TOOLS,
+    NativeComputerBackend,
+)
 from .pixel_art_studio import PixelArtStudioProvider
 from .plugin_folder import (
     DEFAULT_PLUGIN_DIRECTORY,
@@ -1026,6 +1031,46 @@ class DesktopCommanderIntegrationAdapter:
         await self.backend.close()
 
 
+class HirdaNativeComputerIntegrationAdapter:
+    """Built-in workspace-scoped native filesystem and process provider."""
+
+    def __init__(self) -> None:
+        self.backend = NativeComputerBackend()
+        self.manifest = IntegrationManifest.from_mapping(
+            {
+                "id": "hirda-native-computer",
+                "name": "HIRDA Native Computer",
+                "capabilities": ["machine_filesystem", "machine_process", "workspace_scoped_execution"],
+                "runtime": {"type": "builtin-native", "authority": "hirda-gated-backend"},
+                "tools": list(NATIVE_COMPUTER_PERMISSIONS),
+                "permissions": dict(NATIVE_COMPUTER_PERMISSIONS),
+                "health": {"type": "native-provider"},
+                "routing": {"mode": "machine-control-backend", "preferred_lanes": ["hermes", "codex", "claude"]},
+                "metadata": {"backend_capability": True, "workspace_scope_enforced": True, "process_ownership_enforced": True, "permission_router": "hirda"},
+            }
+        )
+
+    async def validate(self) -> dict[str, Any]:
+        return {"ok": True, "provider": "hirda-native"}
+
+    async def certify(self) -> dict[str, Any]:
+        names = {str(tool.get("name") or "") for tool in NATIVE_COMPUTER_TOOLS}
+        ok = names == set(self.manifest.tools) and set(self.manifest.permissions) == names
+        return {"ok": ok, "reason": None if ok else "native_tool_contract_mismatch", "discovered_tools": sorted(names), "workspace_scope_enforced": True, "process_ownership_enforced": True}
+
+    async def status(self) -> dict[str, Any]:
+        return {"ok": True, "provider": "hirda-native", "owned_process_count": len(self.backend._processes)}
+
+    async def list_tools(self) -> list[dict[str, Any]]:
+        return [dict(tool) for tool in NATIVE_COMPUTER_TOOLS]
+
+    async def call_tool(self, name: str, arguments: dict[str, Any], *, context: dict[str, Any]) -> dict[str, Any]:
+        return await self.backend.call_tool(name, arguments, context=context)
+
+    async def close(self) -> None:
+        await self.backend.close()
+
+
 class GraftIntegrationAdapter:
     """Expose the existing Graft context plane through the common lifecycle."""
 
@@ -1207,6 +1252,7 @@ def build_integration_manager(
 ) -> IntegrationManager:
     manager = IntegrationManager()
     manager.register(GraftIntegrationAdapter(graft), source="builtin:graft")
+    manager.register(HirdaNativeComputerIntegrationAdapter(), source="builtin:hirda-native-computer")
     if pixel_art_studio is not None:
         manager.register(
             PixelArtStudioIntegrationAdapter(pixel_art_studio),
