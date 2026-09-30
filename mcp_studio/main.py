@@ -56,7 +56,7 @@ from .node_health import NodeHealthMonitor, mark_node_unavailable
 from .node_observations import ingest_node_observations
 from .machine_enrollment import MachineEnrollmentManager, MachineEnrollmentError
 from .device_pairing import DevicePairingManager, DevicePairingError
-from .device_pairing_web import render_pairing_page
+from .device_pairing_web import pairing_policy_from_form, render_pairing_page
 from .device_broker import DeviceBroker, DeviceBrokerError
 from .machine_router import MachineCapabilityRouter
 from .reflex_metrics import ReflexMetrics
@@ -1900,8 +1900,9 @@ async def device_pairing_page_approve(request: Request, session_id: str):
             status_code=403,
             headers={"Cache-Control": "no-store"},
         )
+    policy = pairing_policy_from_form(parsed)
     try:
-        device_pairing.approve(session_id, actor="owner/web", policy={})
+        device_pairing.approve(session_id, actor="owner/web", policy=policy)
         machine_registry.sync_trusted_devices()
     except KeyError:
         return HTMLResponse("<h1>Pairing session not found</h1>", status_code=404)
