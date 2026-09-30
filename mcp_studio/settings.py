@@ -213,6 +213,7 @@ class StudioConfig:
     device_pairing_secret_path: str = "data/device-pairing.key"
     device_pairing_base_url: str = "https://localhost/pair"
     device_pairing_ttl_seconds: int = 300
+    device_pairing_owner_approval_ttl_seconds: int = 3600
     device_pairing_max_attempts: int = 5
 
     # P2 outbound Device Broker. Trusted devices initiate the connection; HIRDA

@@ -205,6 +205,7 @@ studio:
   #device_pairing_secret_path: data/device-pairing.key
   #device_pairing_base_url: https://hirda.example/pair
   #device_pairing_ttl_seconds: 300
+  #device_pairing_owner_approval_ttl_seconds: 3600
   #device_pairing_max_attempts: 5
   #device_broker_enabled: false
   #device_broker_challenge_ttl_seconds: 30
