@@ -16,6 +16,7 @@ from mcp_studio.device_runtime import (
     DeviceRuntimeError,
     WorkspaceResolver,
 )
+from mcp_studio.hirda_native_computer import NativeComputerError
 
 
 class FakeBackend:
@@ -242,6 +243,35 @@ async def test_runtime_does_not_replay_native_operation_errors(tmp_path):
     })
     assert result["ok"] is False
     assert calls == ["native"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_falls_back_once_for_explicitly_unsupported_native_tool(tmp_path):
+    config = _config(tmp_path)
+    runtime = DeviceRuntime(config, identity=DeviceIdentityStore(config.identity_path).load_or_create())
+    calls = []
+
+    class UnsupportedNative:
+        async def call(self, **kwargs):
+            calls.append("native")
+            raise NativeComputerError("native_tool_not_supported:legacy_search")
+
+    class Fallback:
+        async def call(self, **kwargs):
+            calls.append("fallback")
+            return {"content": [{"type": "text", "text": "LEGACY"}]}
+
+    runtime.backend = UnsupportedNative()
+    runtime._fallback_backend = Fallback()
+    result = await runtime.dispatch_rpc({
+        "request_id": "rpc-explicit-unsupported",
+        "method": "hirda_native.call",
+        "payload": {"name": "legacy_search", "arguments": {}, "workspace_key": "mcp-studio", "session_id": "ms-1"},
+    })
+
+    assert result["ok"] is True
+    assert result["result"]["content"][0]["text"] == "LEGACY"
+    assert calls == ["native", "fallback"]
 
 
 @pytest.mark.asyncio

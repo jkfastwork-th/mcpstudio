@@ -454,7 +454,8 @@ class DeviceRuntime:
             except NativeComputerError as exc:
                 # Only a positively identified unsupported primitive is safe to
                 # delegate; ambiguous filesystem/process failures are never replayed.
-                if self._provided_backend or not str(exc).startswith("native_tool_not_supported:") or self._fallback_backend is None:
+                unsupported_error = f"native_tool_not_supported:{tool_name}"
+                if self._provided_backend or str(exc) != unsupported_error or self._fallback_backend is None:
                     raise
                 result = await self._fallback_backend.call(**call)
             return {

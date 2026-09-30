@@ -13,8 +13,8 @@ Provider modes currently supported:
 
 - `hirda_native.mode: local` — use HIRDA Native Computer on the local machine.
 - broker-paired devices with filesystem/process support use `hirda_native` automatically.
-- `desktop_commander.mode: local` — retain Desktop Commander as an optional fallback.
-- `desktop_commander.mode: agent` — use the bounded HIRDA machine agent over a private network.
+- `desktop_commander.mode: local` — make Desktop Commander available as an optional fallback for native tools it explicitly does not support.
+- `desktop_commander.mode: agent` — retain the bounded legacy Desktop Commander agent adapter as an optional compatibility path.
 - `computer_use.mode: local` — use HIRDA's existing session-isolated VNC/Chrome runtime.
 - `computer_use.mode: agent` — ask the bound HIRDA Machine Agent for a session-specific remote WebSocket target; HIRDA keeps that target private and proxies it through the existing `/api/computer/vnc/ws/{session_id}` route.
 
@@ -39,9 +39,12 @@ lane / MCP client
        -> JKFASTDEV: HIRDA machine agent -> Native Computer
 ```
 
-The remote machine agent exposes only the same bounded 13 Desktop Commander file/process tools already approved by
-HIRDA. It independently enforces workspace path confinement and per-session process ownership. This gives defense in
-depth: a request must pass both HIRDA policy and the target machine agent's scope checks.
+Local and broker-materialized machines use the bounded HIRDA Native Computer primitives as their primary
+filesystem/process provider. The remote machine agent exposes these native operations and independently enforces
+workspace path confinement and per-session process ownership. Desktop Commander remains an optional fallback only
+when Native Computer explicitly reports `native_tool_not_supported:<tool>`; operation failures are returned without
+replaying them through Desktop Commander. This gives defense in depth: a request must pass both HIRDA policy and the
+target machine agent's scope checks.
 
 ## Session machine binding
 

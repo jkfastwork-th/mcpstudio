@@ -9,6 +9,7 @@ from typing import Any
 from .computer import ComputerUseManager
 from .integrations import IntegrationManager, IntegrationError
 from .machine_registry import MachineRegistry, MachineRegistryError
+from .hirda_native_computer import NativeComputerError
 from .tool_permissions import workspace_scope_violation
 
 
@@ -77,6 +78,31 @@ class MachineCapabilityRouter:
 
     def authorize_session(self, session: dict[str, Any], category: str):
         return self.registry.authorize_session(session, category)
+
+    async def _call_native_with_optional_fallback(
+        self,
+        native_name: str,
+        desktop_commander_name: str,
+        arguments: dict[str, Any],
+        *,
+        context: dict[str, Any],
+        machine: Any,
+    ) -> dict[str, Any]:
+        try:
+            return await self.integrations.call_backend_tool(native_name, arguments, context=context)
+        except NativeComputerError as exc:
+            fallback = machine.providers.get("desktop_commander") or {}
+            unsupported_error = f"native_tool_not_supported:{native_name.rsplit('__', 1)[-1]}"
+            if (
+                str(exc) != unsupported_error
+                or not machine.local
+                or str(fallback.get("mode") or "").strip() != "local"
+                or not self.integrations.is_backend_tool(desktop_commander_name)
+            ):
+                raise
+            return await self.integrations.call_backend_tool(
+                desktop_commander_name, arguments, context=context
+            )
 
 
     def _node_facet_data(
@@ -742,7 +768,13 @@ class MachineCapabilityRouter:
             if native_selected:
                 native_name = f"hirda__hirda_native_computer__{raw_name}"
                 if self.integrations.is_backend_tool(native_name):
-                    return await self.integrations.call_backend_tool(native_name, arguments, context=context)
+                    return await self._call_native_with_optional_fallback(
+                        native_name,
+                        f"hirda__desktop_commander__{raw_name}",
+                        arguments,
+                        context=context,
+                        machine=machine,
+                    )
                 raise MachineRegistryError(f"native computer tool is unavailable: {raw_name}")
             return await self.integrations.call_backend_tool(exposed_name, arguments, context=context)
         if mode in {"agent", "broker"}:
@@ -758,7 +790,13 @@ class MachineCapabilityRouter:
         if native_selected and machine.local:
             native_name = f"hirda__hirda_native_computer__{raw_name}"
             if self.integrations.is_backend_tool(native_name):
-                return await self.integrations.call_backend_tool(native_name, arguments, context=context)
+                return await self._call_native_with_optional_fallback(
+                    native_name,
+                    f"hirda__desktop_commander__{raw_name}",
+                    arguments,
+                    context=context,
+                    machine=machine,
+                )
         if integration_id == _NATIVE_PROVIDER_ID:
             raise MachineRegistryError(f"native computer provider is unavailable on machine {machine.machine_id}")
         # Explicitly unsupported native legacy tools can use the configured DC
