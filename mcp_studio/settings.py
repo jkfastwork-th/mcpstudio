@@ -173,9 +173,8 @@ class StudioConfig:
     integration_plugin_runtime_enabled: bool = False
     integration_plugin_trusted_fingerprints: list[str] = field(default_factory=list)
 
-    # Desktop Commander is a HIRDA-gated machine-control backend. Its raw MCP
-    # server is never exposed directly to lanes; tools flow through session
-    # permission, Reflex, JEV evidence, workspace scope, and backend ownership.
+    # Desktop Commander is an optional HIRDA-gated compatibility/fallback
+    # backend. Native filesystem/process support is built in and always primary.
     desktop_commander_backend_enabled: bool = False
     desktop_commander_backend_binary: str = "desktop-commander"
     desktop_commander_backend_timeout_seconds: float = 15.0

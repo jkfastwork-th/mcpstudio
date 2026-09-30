@@ -1422,7 +1422,7 @@ function machineCapabilityBadges(machine){
   ];
   return '<span class="machine-capability-badges">'+defs.filter(([key])=>(machine?.capabilities||[]).includes(key)).map(([key,label])=>{
     let ready=true;
-    if(key==='filesystem'||key==='process')ready=machineProviderReady(machine,'desktop_commander');
+    if(key==='filesystem'||key==='process')ready=machineProviderReady(machine,'hirda_native')||machineProviderReady(machine,'desktop_commander');
     if(key==='computer_use')ready=machineProviderReady(machine,'computer_use');
     return '<span class="machine-capability-badge '+(ready?'ready':'down')+'">'+label+'</span>';
   }).join('')+'</span>';
@@ -1434,12 +1434,13 @@ function machineCell(session,data){
   const state=machine.online?'online':'offline';
   const os=machine.os||'unknown';
   const address=machine.address||'local';
+  const native=machineProviderReady(machine,'hirda_native');
   const dc=machineProviderReady(machine,'desktop_commander');
   const gui=machineProviderReady(machine,'computer_use');
   return '<div class="session-machine-cell">'
     +'<span class="machine-health '+state+'"><i></i>'+esc(machine.name||machine.id)+'</span>'
     +'<small>'+esc(os)+' · '+esc(address)+'</small>'
-    +'<span class="machine-provider-badges"><span class="machine-provider-badge '+(dc?'ready':'down')+'">DC</span><span class="machine-provider-badge '+(gui?'ready':'down')+'">GUI</span></span>'
+    +'<span class="machine-provider-badges"><span class="machine-provider-badge '+(native?'ready':'down')+'">Native</span>'+(machine.providers?.desktop_commander?'<span class="machine-provider-badge '+(dc?'ready':'down')+'">DC fallback</span>':'')+'<span class="machine-provider-badge '+(gui?'ready':'down')+'">GUI</span></span>'
     +machineCapabilityBadges(machine)
     +machinePermissionBadges(policy)
     +'</div>';
@@ -1613,10 +1614,11 @@ function renderManagedHistory(payload){
   const overview=(latestData?.managedSessions?.sessions||[]).find(item=>item.id===session.id)||session;
   const machine=machineForSession(overview,latestData);
   const effective=effectiveMachinePermissions(overview,machine);
+  const native=machineProviderReady(machine,'hirda_native');
   const dc=machineProviderReady(machine,'desktop_commander');
   const gui=machineProviderReady(machine,'computer_use');
   panel.hidden=false;
-  panel.innerHTML=`<div class="history-head"><div><span class="eyebrow">SESSION HISTORY</span><h3>${esc(session.name||session.id)}</h3><p>${esc(session.workspace_key||'')} · ${esc(session.project_path||'')}</p></div><button class="text-button" data-managed-history-close type="button">Close</button></div><div class="session-machine-detail"><div><span>Machine</span><strong class="machine-health ${machine.online?'online':'offline'}"><i></i>${esc(machine.name||machine.id)}</strong><small>${esc(machine.os||'unknown')} · ${esc(machine.address||'local')}</small></div><div><span>Providers</span><strong>Desktop Commander ${dc?'ready':'unavailable'} · Computer Use ${gui?'ready':'unavailable'}</strong>${machineCapabilityBadges(machine)}</div><div><span>Effective permissions</span>${machinePermissionBadges(effective,'large')}<small>session policy ∩ machine policy · ${esc(effective.scope||'workspace')}</small></div></div><div class="history-grid"><div><h4>Lifecycle</h4>${audit.length?audit.slice(0,30).map(a=>`<div class="history-item"><strong>${esc(a.action)}</strong><small>${esc(ago(a.created_at))} · ${esc(a.actor||'system')}</small></div>`).join(''):'<div class="empty">No lifecycle audit yet.</div>'}</div><div><h4>Transport history</h4>${transports.length?transports.slice(0,30).map(t=>`<div class="history-item"><strong>${esc(t.ingress_provider||t.last_tunnel_id||'direct')}</strong><small>${esc(t.status)} · ${esc(ago(t.last_seen_at))} · ${esc(shortId(t.id,14))}</small></div>`).join(''):'<div class="empty">No transport history yet.</div>'}</div></div>`;
+  panel.innerHTML=`<div class="history-head"><div><span class="eyebrow">SESSION HISTORY</span><h3>${esc(session.name||session.id)}</h3><p>${esc(session.workspace_key||'')} · ${esc(session.project_path||'')}</p></div><button class="text-button" data-managed-history-close type="button">Close</button></div><div class="session-machine-detail"><div><span>Machine</span><strong class="machine-health ${machine.online?'online':'offline'}"><i></i>${esc(machine.name||machine.id)}</strong><small>${esc(machine.os||'unknown')} · ${esc(machine.address||'local')}</small></div><div><span>Providers</span><strong>Native ${native?'ready':'unavailable'} · Desktop Commander ${dc?'ready':'unavailable'} · Computer Use ${gui?'ready':'unavailable'}</strong>${machineCapabilityBadges(machine)}</div><div><span>Effective permissions</span>${machinePermissionBadges(effective,'large')}<small>session policy ∩ machine policy · ${esc(effective.scope||'workspace')}</small></div></div><div class="history-grid"><div><h4>Lifecycle</h4>${audit.length?audit.slice(0,30).map(a=>`<div class="history-item"><strong>${esc(a.action)}</strong><small>${esc(ago(a.created_at))} · ${esc(a.actor||'system')}</small></div>`).join(''):'<div class="empty">No lifecycle audit yet.</div>'}</div><div><h4>Transport history</h4>${transports.length?transports.slice(0,30).map(t=>`<div class="history-item"><strong>${esc(t.ingress_provider||t.last_tunnel_id||'direct')}</strong><small>${esc(t.status)} · ${esc(ago(t.last_seen_at))} · ${esc(shortId(t.id,14))}</small></div>`).join(''):'<div class="empty">No transport history yet.</div>'}</div></div>`;
   panel.scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 

@@ -16,6 +16,12 @@ _BROWSER_VISUAL_FALLBACK_TOOL = "hirda__browser__visual_fallback"
 _CAPABILITY_ROUTE_SCHEMA = "hirda-capability-route-v1"
 _CAPABILITY_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 _PERMISSION_CLASSES = {"read", "write", "execute", "destructive"}
+_NATIVE_PROVIDER_ID = "hirda-native-computer"
+_NATIVE_TOOLS = {
+    "read_file", "read_multiple_files", "write_file", "create_directory",
+    "list_directory", "move_file", "get_file_info", "start_process",
+    "read_process_output", "interact_with_process", "force_terminate",
+}
 
 
 class MachineCapabilityRouter:
@@ -704,23 +710,40 @@ class MachineCapabilityRouter:
                 if fallback is not None:
                     return fallback
             return result
-        if integration_id != "desktop-commander":
+        if integration_id not in {"desktop-commander", _NATIVE_PROVIDER_ID}:
             return await self.integrations.call_backend_tool(exposed_name, arguments, context=context)
-        provider = dict(machine.providers.get("desktop_commander") or {})
+        # Legacy Desktop Commander names remain stable, but overlapping calls
+        # are handled by HIRDA Native Computer whenever that provider exists.
+        native_selected = integration_id == _NATIVE_PROVIDER_ID or raw_name in _NATIVE_TOOLS
+        if (
+            integration_id == "desktop-commander"
+            and native_selected
+            and not machine.providers.get("hirda_native")
+            and not machine.local
+        ):
+            # Older operator-declared machines may expose only the DC adapter.
+            native_selected = False
+        provider_key = "hirda_native" if native_selected else "desktop_commander"
+        provider = dict(machine.providers.get(provider_key) or {})
         mode = str(provider.get("mode") or "").strip()
+        policy = context.get("policy") if isinstance(context.get("policy"), dict) else {}
+        if machine.local and policy.get("scope") == "workspace":
+            workspace_root = self.registry.workspace_root(
+                machine,
+                str(context.get("workspace_key") or ""),
+                str(context.get("project_path") or "") or None,
+            )
+            violation = workspace_scope_violation(arguments, Path(workspace_root))
+            if violation:
+                raise MachineRegistryError(f"workspace scope violation: {violation}")
         if mode == "local":
             if not machine.local:
-                raise MachineRegistryError("non-local machine cannot use local desktop commander")
-            policy = context.get("policy") if isinstance(context.get("policy"), dict) else {}
-            if policy.get("scope") == "workspace":
-                workspace_root = self.registry.workspace_root(
-                    machine,
-                    str(context.get("workspace_key") or ""),
-                    str(context.get("project_path") or "") or None,
-                )
-                violation = workspace_scope_violation(arguments, Path(workspace_root))
-                if violation:
-                    raise MachineRegistryError(f"workspace scope violation: {violation}")
+                raise MachineRegistryError(f"non-local machine cannot use local {provider_key}")
+            if native_selected:
+                native_name = f"hirda__hirda_native_computer__{raw_name}"
+                if self.integrations.is_backend_tool(native_name):
+                    return await self.integrations.call_backend_tool(native_name, arguments, context=context)
+                raise MachineRegistryError(f"native computer tool is unavailable: {raw_name}")
             return await self.integrations.call_backend_tool(exposed_name, arguments, context=context)
         if mode in {"agent", "broker"}:
             return await self.registry.remote_call(
@@ -730,9 +753,34 @@ class MachineCapabilityRouter:
                 workspace_key=str(context.get("workspace_key") or ""),
                 project_path=(str(context.get("project_path")) if context.get("project_path") else None),
                 session_id=str(context.get("managed_session_id") or ""),
+                provider_name=provider_key,
             )
+        if native_selected and machine.local:
+            native_name = f"hirda__hirda_native_computer__{raw_name}"
+            if self.integrations.is_backend_tool(native_name):
+                return await self.integrations.call_backend_tool(native_name, arguments, context=context)
+        if integration_id == _NATIVE_PROVIDER_ID:
+            raise MachineRegistryError(f"native computer provider is unavailable on machine {machine.machine_id}")
+        # Explicitly unsupported native legacy tools can use the configured DC
+        # adapter; actual native operation errors never reach this branch.
+        dc_provider = dict(machine.providers.get("desktop_commander") or {})
+        dc_mode = str(dc_provider.get("mode") or "").strip()
+        if raw_name not in _NATIVE_TOOLS and dc_mode in {"agent", "broker"}:
+            return await self.registry.remote_call(
+                machine,
+                tool_name=raw_name,
+                arguments=arguments,
+                workspace_key=str(context.get("workspace_key") or ""),
+                project_path=(str(context.get("project_path")) if context.get("project_path") else None),
+                session_id=str(context.get("managed_session_id") or ""),
+                provider_name="desktop_commander",
+            )
+        if raw_name not in _NATIVE_TOOLS and dc_mode == "local" and machine.local:
+            return await self.integrations.call_backend_tool(exposed_name, arguments, context=context)
+        if raw_name not in _NATIVE_TOOLS and not dc_mode and machine.local and integration_id == "desktop-commander":
+            return await self.integrations.call_backend_tool(exposed_name, arguments, context=context)
         raise MachineRegistryError(
-            f"desktop commander is unavailable on machine {machine.machine_id}"
+            f"machine computer provider is unavailable on machine {machine.machine_id}"
         )
 
     async def machine_snapshot(self) -> dict[str, Any]:
@@ -743,6 +791,18 @@ class MachineCapabilityRouter:
             if item.get("id") != local_id:
                 continue
             health = item.setdefault("provider_health", {})
+            if "hirda_native" in item.get("providers", {}):
+                try:
+                    detail = await self.integrations.detail(_NATIVE_PROVIDER_ID)
+                    health["hirda_native"] = {
+                        "configured": True,
+                        "ready": bool(detail.get("stage") == "ready" and not detail.get("blocked")),
+                        "mode": "local",
+                        "stage": detail.get("stage"),
+                        "backend_tool_count": int(detail.get("backend_tool_count") or 0),
+                    }
+                except Exception as exc:
+                    health["hirda_native"] = {"configured": True, "ready": False, "mode": "local", "error": f"{type(exc).__name__}: {exc}"}
             if "desktop_commander" in item.get("providers", {}):
                 try:
                     detail = await self.integrations.detail("desktop-commander")

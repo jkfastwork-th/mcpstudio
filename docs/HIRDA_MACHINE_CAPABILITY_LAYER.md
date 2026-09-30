@@ -11,7 +11,9 @@ The configured `machine_local_id` is the default for existing sessions that pred
 
 Provider modes currently supported:
 
-- `desktop_commander.mode: local` — use HIRDA's local Desktop Commander backend.
+- `hirda_native.mode: local` — use HIRDA Native Computer on the local machine.
+- broker-paired devices with filesystem/process support use `hirda_native` automatically.
+- `desktop_commander.mode: local` — retain Desktop Commander as an optional fallback.
 - `desktop_commander.mode: agent` — use the bounded HIRDA machine agent over a private network.
 - `computer_use.mode: local` — use HIRDA's existing session-isolated VNC/Chrome runtime.
 - `computer_use.mode: agent` — ask the bound HIRDA Machine Agent for a session-specific remote WebSocket target; HIRDA keeps that target private and proxies it through the existing `/api/computer/vnc/ws/{session_id}` route.
@@ -23,16 +25,18 @@ readiness comes from `ComputerUseManager.status()`.
 ## Capability router
 
 `MachineCapabilityRouter` sits between HIRDA's permission/session gates and the physical backend. Tool names do
-not change when a session moves machines. For example `hirda__desktop_commander__read_file` is resolved using the
-managed session's `metadata.machine_id`:
+not change when a session moves machines. Native tools use
+`hirda__hirda_native_computer__read_file`; legacy
+`hirda__desktop_commander__read_file` calls are routed to native when available.
+The selected machine comes from the managed session's `metadata.machine_id`:
 
 ```text
 lane / MCP client
   -> HIRDA gateway
   -> managed-session permission + Reflex/JEV gates
   -> MachineCapabilityRouter
-       -> openclaw: local Desktop Commander
-       -> JKFASTDEV: HIRDA machine agent -> Desktop Commander
+       -> openclaw: local HIRDA Native Computer
+       -> JKFASTDEV: HIRDA machine agent -> Native Computer
 ```
 
 The remote machine agent exposes only the same bounded 13 Desktop Commander file/process tools already approved by

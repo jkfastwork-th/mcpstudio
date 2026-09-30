@@ -143,7 +143,7 @@ class MachineRegistry:
                 address="127.0.0.1",
                 capabilities=("filesystem", "process", "computer_use"),
                 providers={
-                    "desktop_commander": {"mode": "local"},
+                    "hirda_native": {"mode": "local"},
                     "computer_use": {"mode": "local"},
                 },
                 policy=dict(_DEFAULT_MACHINE_POLICY),
@@ -235,7 +235,9 @@ class MachineRegistry:
                 "device_broker": {"mode": "broker"},
             }
             if any(item in {"filesystem", "process"} for item in capabilities):
-                providers["desktop_commander"] = {"mode": "broker"}
+                providers["desktop_commander"] = {"mode": "broker", "fallback": True}
+                if "hirda_native" in capabilities:
+                    providers["hirda_native"] = {"mode": "broker"}
 
             effective_policy = dict(_DYNAMIC_DEVICE_POLICY)
             raw_policy = raw.get("policy")
@@ -398,6 +400,8 @@ class MachineRegistry:
                 ready = bool(ready and body.get("computer_use"))
             elif provider_name == "desktop_commander":
                 ready = bool(ready and body.get("desktop_commander", True))
+            elif provider_name == "hirda_native":
+                ready = bool(ready and body.get("hirda_native", True))
             return {
                 "configured": True,
                 "ready": ready,
@@ -442,8 +446,12 @@ class MachineRegistry:
     ) -> dict[str, Any]:
         machine = self.get(machine_id)
         session = await db.get_managed_session(session_id)
+        native_provider = dict(machine.providers.get("hirda_native") or {})
         desktop_provider = dict(machine.providers.get("desktop_commander") or {})
-        broker_managed = str(desktop_provider.get("mode") or "") == "broker"
+        broker_managed = "broker" in {
+            str(native_provider.get("mode") or ""),
+            str(desktop_provider.get("mode") or ""),
+        }
         if not broker_managed:
             self.workspace_root(
                 machine,
@@ -466,8 +474,9 @@ class MachineRegistry:
         workspace_key: str,
         project_path: str | None,
         session_id: str,
+        provider_name: str = "hirda_native",
     ) -> dict[str, Any]:
-        provider = dict(machine.providers.get("desktop_commander") or {})
+        provider = dict(machine.providers.get(provider_name) or {})
         mode = str(provider.get("mode") or "").strip()
 
         if mode == "broker":
@@ -478,7 +487,7 @@ class MachineRegistry:
             try:
                 result = await self.device_broker.call_device(
                     machine.machine_id,
-                    method="desktop_commander.call",
+                    method="hirda_native.call" if provider_name == "hirda_native" else "desktop_commander.call",
                     payload={
                         "name": tool_name,
                         "arguments": dict(arguments or {}),
@@ -497,7 +506,7 @@ class MachineRegistry:
 
         if mode != "agent":
             raise MachineRegistryError(
-                f"desktop commander agent is unavailable on {machine.machine_id}"
+                f"machine computer provider is unavailable on {machine.machine_id}"
             )
 
         endpoint = str(provider.get("endpoint") or "").rstrip("/")
