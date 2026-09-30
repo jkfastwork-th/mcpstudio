@@ -133,6 +133,9 @@ class MachineRegistry:
             if machine.machine_id in self._machines:
                 raise MachineRegistryError(f"duplicate machine id: {machine.machine_id}")
             self._machines[machine.machine_id] = machine
+        local_machine = self._machines.get(local_id)
+        if local_machine is not None and local_machine.local:
+            local_machine.providers.setdefault("hirda_native", {"mode": "local"})
         if local_id not in self._machines:
             self._machines[local_id] = MachineDescriptor(
                 machine_id=local_id,

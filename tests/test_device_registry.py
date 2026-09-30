@@ -58,6 +58,45 @@ def _trusted_device(tmp_path: Path):
     return studio, pairing, broker, registry, private, device
 
 
+def test_configured_local_machine_adds_native_provider_without_losing_existing_providers(tmp_path):
+    studio = _studio(tmp_path)
+    studio.machine_registry = [{
+        "id": "openclaw",
+        "local": True,
+        "providers": {
+            "desktop_commander": {"mode": "local"},
+            "computer_use": {"mode": "local"},
+        },
+    }]
+
+    machine = MachineRegistry(studio, base_dir=tmp_path).get("openclaw")
+
+    assert machine.providers == {
+        "desktop_commander": {"mode": "local"},
+        "computer_use": {"mode": "local"},
+        "hirda_native": {"mode": "local"},
+    }
+
+
+def test_configured_native_provider_is_not_overwritten(tmp_path):
+    studio = _studio(tmp_path)
+    studio.machine_registry = [{
+        "id": "openclaw",
+        "local": True,
+        "providers": {
+            "desktop_commander": {"mode": "local"},
+            "computer_use": {"mode": "local"},
+            "hirda_native": {"mode": "custom", "setting": "keep"},
+        },
+    }]
+
+    machine = MachineRegistry(studio, base_dir=tmp_path).get("openclaw")
+
+    assert machine.providers["hirda_native"] == {"mode": "custom", "setting": "keep"}
+    assert machine.providers["desktop_commander"] == {"mode": "local"}
+    assert machine.providers["computer_use"] == {"mode": "local"}
+
+
 class FakeDB:
     def __init__(self):
         self.session = {
