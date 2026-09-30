@@ -421,8 +421,11 @@ def _shell_scope_violation(
             tokens = shlex.split(segment)
             if not tokens:
                 continue
+            command_name = PureWindowsPath(tokens[0]).name.lower()
             for token in tokens[1:]:
                 cleaned = token.strip("'\"(),")
+                if command_name in {"cmd", "cmd.exe"} and re.fullmatch(r"/(?:c|k|d|s|q|a|u)", cleaned, re.IGNORECASE):
+                    continue
                 if "=" in cleaned and not cleaned.startswith(("/", "../", "./")):
                     _, cleaned = cleaned.split("=", 1)
                 if cleaned.startswith("~"):

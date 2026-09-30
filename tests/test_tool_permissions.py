@@ -249,6 +249,18 @@ def test_backend_declared_permission_classifies_unknown_tool(tmp_path):
     assert decision.category == "read"
 
 
+def test_native_windows_cmd_switch_is_not_treated_as_workspace_path(tmp_path):
+    decision = decide_tool_call(
+        studio(),
+        session(tmp_path),
+        "hirda__hirda_native_computer__start_process",
+        {"command": "cmd /c echo HIRDA_NATIVE_JKFASTDEV"},
+        declared_category="execute",
+    )
+    assert decision.allowed is True
+    assert decision.category == "execute"
+
+
 def test_backend_start_process_uses_command_risk_not_declared_execute(tmp_path):
     decision = decide_tool_call(
         studio(),
