@@ -749,6 +749,36 @@ class Database:
 
                 db.executescript(
                     """
+                    CREATE TABLE IF NOT EXISTS peer_messages (
+                        id TEXT PRIMARY KEY,
+                        peer_scope_id TEXT NOT NULL,
+                        thread_id TEXT NOT NULL,
+                        correlation_id TEXT NOT NULL,
+                        sender_principal_id TEXT NOT NULL,
+                        recipient_principal_id TEXT NOT NULL,
+                        reply_to TEXT,
+                        body TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        claimed_at TEXT,
+                        claimed_by_principal_id TEXT,
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        FOREIGN KEY(reply_to) REFERENCES peer_messages(id)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_peer_messages_recipient
+                        ON peer_messages(recipient_principal_id, claimed_at, created_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_peer_messages_thread
+                        ON peer_messages(thread_id, created_at ASC);
+                    CREATE INDEX IF NOT EXISTS idx_peer_messages_correlation
+                        ON peer_messages(correlation_id, created_at ASC);
+                    """
+                )
+                db.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version, name, applied_at) VALUES(13, 'hirda-peer-messaging-v1', ?)",
+                    (now,),
+                )
+
+                db.executescript(
+                    """
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id
                         ON events(event_id);
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_events_stream_seq
@@ -1196,7 +1226,7 @@ class Database:
                 integrity = db.execute("PRAGMA quick_check").fetchone()[0]
                 return {
                     "current_version": int(rows[-1]["version"]) if rows else 0,
-                    "expected_version": 12,
+                    "expected_version": 13,
                     "integrity": integrity,
                     "migrations": [dict(r) for r in rows],
                 }
@@ -1366,6 +1396,373 @@ class Database:
                         (tunnel_id, limit),
                     ).fetchall()
                 return [self._gateway_session_item(row) for row in rows]
+        return await self._run(op)
+
+    @staticmethod
+    def _peer_message_item(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "message_id": str(row["id"]),
+            "peer_scope_id": str(row["peer_scope_id"]),
+            "thread_id": str(row["thread_id"]),
+            "correlation_id": str(row["correlation_id"]),
+            "sender_principal_id": str(row["sender_principal_id"]),
+            "recipient_principal_id": str(row["recipient_principal_id"]),
+            "reply_to": row["reply_to"],
+            "text": str(row["body"]),
+            "created_at": str(row["created_at"]),
+            "claimed_at": row["claimed_at"],
+            "claimed_by_principal_id": row["claimed_by_principal_id"],
+            "metadata": json.loads(row["metadata_json"] or "{}"),
+        }
+
+    async def list_peer_principals(
+        self,
+        *,
+        current_principal_id: str | None = None,
+        peer_scope_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        sessions = await self.list_gateway_sessions(limit=1000)
+        peers: dict[str, dict[str, Any]] = {}
+        for session in sessions:
+            raw_metadata = session.get("metadata")
+            metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+            principal_id = str(metadata.get("connector_principal_id") or "").strip()
+            session_peer_scope = str(metadata.get("connector_peer_scope_id") or "").strip()
+            if not principal_id:
+                continue
+            if peer_scope_id and session_peer_scope != peer_scope_id:
+                continue
+            item = peers.setdefault(
+                principal_id,
+                {
+                    "principal_id": principal_id,
+                    "online": False,
+                    "last_seen_at": session.get("last_seen_at"),
+                    "client_types": set(),
+                    "conversation_ids": set(),
+                },
+            )
+            if str(session.get("status") or "") == "connected":
+                item["online"] = True
+            if str(session.get("last_seen_at") or "") > str(item.get("last_seen_at") or ""):
+                item["last_seen_at"] = session.get("last_seen_at")
+            client_type = str(session.get("client_type") or "").strip()
+            if client_type:
+                item["client_types"].add(client_type)
+            client_id = str(session.get("client_id") or "").strip()
+            if client_id:
+                item["conversation_ids"].add(client_id)
+
+        ordered = sorted(
+            peers.values(),
+            key=lambda item: (bool(item["online"]), str(item.get("last_seen_at") or "")),
+            reverse=True,
+        )[: max(1, min(int(limit or 100), 100))]
+        return [
+            {
+                "principal_id": item["principal_id"],
+                "online": bool(item["online"]),
+                "last_seen_at": item.get("last_seen_at"),
+                "client_types": sorted(item["client_types"]),
+                "conversation_count": len(item["conversation_ids"]),
+                "self": bool(current_principal_id and item["principal_id"] == current_principal_id),
+            }
+            for item in ordered
+        ]
+
+    async def create_peer_message(
+        self,
+        *,
+        peer_scope_id: str,
+        sender_principal_id: str,
+        recipient_principal_id: str,
+        text: str,
+        thread_id: str | None = None,
+        correlation_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        peer_scope = str(peer_scope_id or "").strip()
+        sender = str(sender_principal_id or "").strip()
+        recipient = str(recipient_principal_id or "").strip()
+        body = str(text or "").strip()
+        if not peer_scope:
+            raise ValueError("peer scope is required")
+        if not sender or not recipient:
+            raise ValueError("peer sender and recipient principals are required")
+        if sender == recipient:
+            raise ValueError("peer sender and recipient principals must differ")
+        if not body:
+            raise ValueError("peer message text is required")
+        if len(body) > 8000:
+            raise ValueError("peer message text exceeds 8000 characters")
+
+        message_id = f"pm-{uuid.uuid4().hex[:20]}"
+        requested_thread = str(thread_id or "").strip()
+        requested_correlation = str(correlation_id or "").strip()
+        stamp = _now()
+        safe_metadata = dict(metadata or {})
+
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                resolved_thread = requested_thread
+                resolved_correlation = requested_correlation
+
+                if resolved_thread:
+                    existing = db.execute(
+                        """SELECT * FROM peer_messages
+                           WHERE thread_id=?
+                           ORDER BY created_at ASC, id ASC
+                           LIMIT 1""",
+                        (resolved_thread,),
+                    ).fetchone()
+                    if existing is not None:
+                        if str(existing["peer_scope_id"]) != peer_scope:
+                            raise PermissionError(
+                                "peer thread belongs to a different peer scope"
+                            )
+                        participants = {
+                            str(existing["sender_principal_id"]),
+                            str(existing["recipient_principal_id"]),
+                        }
+                        if participants != {sender, recipient}:
+                            raise PermissionError(
+                                "peer thread belongs to different principals"
+                            )
+                        existing_correlation = str(existing["correlation_id"])
+                        if (
+                            resolved_correlation
+                            and resolved_correlation != existing_correlation
+                        ):
+                            raise ValueError(
+                                "peer thread correlation_id cannot change"
+                            )
+                        resolved_correlation = existing_correlation
+
+                if not resolved_thread:
+                    resolved_thread = f"pt-{uuid.uuid4().hex[:20]}"
+                if not resolved_correlation:
+                    resolved_correlation = f"pc-{uuid.uuid4().hex[:20]}"
+
+                db.execute(
+                    """INSERT INTO peer_messages(
+                           id, peer_scope_id, thread_id, correlation_id,
+                           sender_principal_id, recipient_principal_id,
+                           reply_to, body, created_at,
+                           claimed_at, claimed_by_principal_id, metadata_json
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        message_id,
+                        peer_scope,
+                        resolved_thread,
+                        resolved_correlation,
+                        sender,
+                        recipient,
+                        None,
+                        body,
+                        stamp,
+                        None,
+                        None,
+                        json.dumps(safe_metadata, ensure_ascii=False),
+                    ),
+                )
+                row = db.execute(
+                    "SELECT * FROM peer_messages WHERE id=?",
+                    (message_id,),
+                ).fetchone()
+                return self._peer_message_item(row)
+
+        return await self._run(op)
+
+    async def list_peer_inbox(
+        self,
+        principal_id: str,
+        *,
+        peer_scope_id: str,
+        limit: int = 20,
+        unclaimed_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        principal = str(principal_id or "").strip()
+        peer_scope = str(peer_scope_id or "").strip()
+        if not principal or not peer_scope:
+            raise ValueError("peer principal and scope are required")
+        limit = max(1, min(int(limit or 20), 100))
+
+        def op() -> list[dict[str, Any]]:
+            with self._connect() as db:
+                sql = (
+                    "SELECT * FROM peer_messages "
+                    "WHERE peer_scope_id=? AND recipient_principal_id=?"
+                )
+                params: list[Any] = [peer_scope, principal]
+                if unclaimed_only:
+                    sql += " AND claimed_at IS NULL"
+                sql += " ORDER BY created_at ASC, id ASC LIMIT ?"
+                params.append(limit)
+                rows = db.execute(sql, tuple(params)).fetchall()
+                return [self._peer_message_item(row) for row in rows]
+
+        return await self._run(op)
+
+    async def claim_peer_message(
+        self,
+        message_id: str,
+        *,
+        principal_id: str,
+        peer_scope_id: str,
+    ) -> dict[str, Any]:
+        message = str(message_id or "").strip()
+        principal = str(principal_id or "").strip()
+        peer_scope = str(peer_scope_id or "").strip()
+        if not message or not principal or not peer_scope:
+            raise ValueError("peer message_id, principal, and scope are required")
+        stamp = _now()
+
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT * FROM peer_messages WHERE id=?",
+                    (message,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(message)
+                if str(row["peer_scope_id"]) != peer_scope:
+                    raise PermissionError("peer message belongs to a different peer scope")
+                if str(row["recipient_principal_id"]) != principal:
+                    raise PermissionError(
+                        "peer message is not addressed to this principal"
+                    )
+                if row["claimed_at"] is None:
+                    db.execute(
+                        """UPDATE peer_messages
+                           SET claimed_at=?, claimed_by_principal_id=?
+                           WHERE id=? AND claimed_at IS NULL""",
+                        (stamp, principal, message),
+                    )
+                elif str(row["claimed_by_principal_id"] or "") != principal:
+                    raise PermissionError(
+                        "peer message was claimed by another principal"
+                    )
+                claimed = db.execute(
+                    "SELECT * FROM peer_messages WHERE id=?",
+                    (message,),
+                ).fetchone()
+                return self._peer_message_item(claimed)
+
+        return await self._run(op)
+
+    async def reply_peer_message(
+        self,
+        message_id: str,
+        *,
+        sender_principal_id: str,
+        peer_scope_id: str,
+        text: str,
+    ) -> dict[str, Any]:
+        parent_id = str(message_id or "").strip()
+        sender = str(sender_principal_id or "").strip()
+        peer_scope = str(peer_scope_id or "").strip()
+        body = str(text or "").strip()
+        if not parent_id or not sender or not peer_scope or not body:
+            raise ValueError("peer reply requires message_id, sender principal, scope, and text")
+        if len(body) > 8000:
+            raise ValueError("peer reply text exceeds 8000 characters")
+        new_id = f"pm-{uuid.uuid4().hex[:20]}"
+        stamp = _now()
+
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                parent = db.execute(
+                    "SELECT * FROM peer_messages WHERE id=?", (parent_id,)
+                ).fetchone()
+                if parent is None:
+                    raise KeyError(parent_id)
+                if str(parent["peer_scope_id"]) != peer_scope:
+                    raise PermissionError("peer message belongs to a different peer scope")
+                if str(parent["recipient_principal_id"]) != sender:
+                    raise PermissionError("peer reply principal mismatch")
+                db.execute(
+                    """INSERT INTO peer_messages(
+                        id, peer_scope_id, thread_id, correlation_id,
+                        sender_principal_id, recipient_principal_id, reply_to,
+                        body, created_at, claimed_at,
+                        claimed_by_principal_id, metadata_json
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        new_id, peer_scope, parent["thread_id"],
+                        parent["correlation_id"], sender,
+                        parent["sender_principal_id"], parent_id, body,
+                        stamp, None, None, "{}",
+                    ),
+                )
+                row = db.execute(
+                    "SELECT * FROM peer_messages WHERE id=?", (new_id,)
+                ).fetchone()
+                return self._peer_message_item(row)
+
+        return await self._run(op)
+
+    async def list_peer_threads(
+        self,
+        principal_id: str,
+        *,
+        peer_scope_id: str,
+        thread_id: str | None = None,
+        correlation_id: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        principal = str(principal_id or "").strip()
+        peer_scope = str(peer_scope_id or "").strip()
+        if not principal or not peer_scope:
+            raise ValueError("peer principal and scope are required")
+        thread_filter = str(thread_id or "").strip()
+        correlation_filter = str(correlation_id or "").strip()
+        thread_limit = max(1, min(int(limit or 20), 100))
+
+        def op() -> list[dict[str, Any]]:
+            with self._connect() as db:
+                where = ["(sender_principal_id=? OR recipient_principal_id=?)"]
+                params: list[Any] = [peer_scope, principal, principal]
+                if thread_filter:
+                    where.append("thread_id=?")
+                    params.append(thread_filter)
+                if correlation_filter:
+                    where.append("correlation_id=?")
+                    params.append(correlation_filter)
+                params.append(thread_limit * 20)
+                rows = db.execute(
+                    f"SELECT * FROM peer_messages WHERE peer_scope_id=? AND {' AND '.join(where)} "
+                    "ORDER BY created_at DESC, id DESC LIMIT ?",
+                    tuple(params),
+                ).fetchall()
+
+            grouped: dict[str, dict[str, Any]] = {}
+            order: list[str] = []
+            for row in rows:
+                message = self._peer_message_item(row)
+                tid = message["thread_id"]
+                if tid not in grouped:
+                    peer = (
+                        message["recipient_principal_id"]
+                        if message["sender_principal_id"] == principal
+                        else message["sender_principal_id"]
+                    )
+                    grouped[tid] = {
+                        "thread_id": tid,
+                        "correlation_id": message["correlation_id"],
+                        "peer_principal_id": peer,
+                        "last_message_at": message["created_at"],
+                        "messages": [],
+                    }
+                    order.append(tid)
+                grouped[tid]["messages"].append(message)
+
+            result = []
+            for tid in order[:thread_limit]:
+                grouped[tid]["messages"].reverse()
+                result.append(grouped[tid])
+            return result
+
         return await self._run(op)
 
     async def find_reusable_gateway_session(

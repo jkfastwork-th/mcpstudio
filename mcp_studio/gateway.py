@@ -45,10 +45,21 @@ from .machine_registry import MachineRegistryError
 from .machine_enrollment import MachineEnrollmentManager, MachineEnrollmentError
 
 
+PEER_TOOL_NAMES = (
+    "hirda_peer_list",
+    "hirda_peer_send",
+    "hirda_peer_inbox",
+    "hirda_peer_claim",
+    "hirda_peer_reply",
+    "hirda_peer_threads",
+)
+
+
 CONTROL_TOOL_NAMES = (
     "mcpstudio_use_workspace",
     "mcpstudio_create_session",
     "mcpstudio_use_session",
+    *PEER_TOOL_NAMES,
     "mcpstudio_pstack_status",
     "mcpstudio_pstack_checkpoint",
     "mcpstudio_lane_status",
@@ -189,15 +200,20 @@ class GatewaySessionManager:
             identity_scope = "anonymous"
             identity_source = "user-agent-fingerprint"
         if oauth_identity_material is not None:
+            assert oauth_claims is not None
             request.state.connector_principal_id = "oauth-" + hashlib.sha256(
                 oauth_identity_material.encode("utf-8")
             ).hexdigest()[:24]
-        elif static_ok and token:
-            request.state.connector_principal_id = "bearer-" + hashlib.sha256(
-                token.encode("utf-8")
+            request.state.connector_peer_scope_id = "oauth-scope-" + hashlib.sha256(
+                oauth_claims.client_id.encode("utf-8")
             ).hexdigest()[:24]
+        elif static_ok and token:
+            token_digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:24]
+            request.state.connector_principal_id = "bearer-" + token_digest
+            request.state.connector_peer_scope_id = "bearer-scope-" + token_digest
         else:
             request.state.connector_principal_id = None
+            request.state.connector_peer_scope_id = None
         client_type = (request.headers.get("x-mcp-studio-client-type") or "mcp-http").strip()[:80] or "mcp-http"
         return token, client_id, client_type, identity_scope, identity_source
 
@@ -215,6 +231,21 @@ class GatewaySessionManager:
         metadata = gateway.get("metadata") if isinstance(gateway.get("metadata"), dict) else {}
         principal = str(metadata.get("connector_principal_id") or "").strip()
         return principal or None
+
+
+    async def connector_peer_scope_for_gateway(
+        self, gateway_session_id: str
+    ) -> str | None:
+        getter = getattr(self.db, "get_gateway_session", None)
+        if getter is None:
+            return None
+        try:
+            gateway = await getter(gateway_session_id)
+        except KeyError:
+            return None
+        metadata = gateway.get("metadata") if isinstance(gateway.get("metadata"), dict) else {}
+        peer_scope = str(metadata.get("connector_peer_scope_id") or "").strip()
+        return peer_scope or None
 
     async def _adopt_reclaimed_logical_pin(
         self,
@@ -409,10 +440,126 @@ class GatewaySessionManager:
             return None
         return value if isinstance(value, dict) else None
 
+
+    @staticmethod
+    def _peer_tools() -> list[dict[str, Any]]:
+        return [
+            {
+                "name": "hirda_peer_list",
+                "description": (
+                    "List HIRDA connector principals visible to the peer bus. "
+                    "Shows online state and marks the authenticated caller as self."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 100,
+                            "default": 100,
+                        }
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "hirda_peer_send",
+                "description": (
+                    "Send a control-plane peer message to another HIRDA principal. "
+                    "The sender is always derived from the authenticated connector and cannot be supplied by the caller."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "recipient": {"type": "string", "minLength": 1, "maxLength": 256},
+                        "text": {"type": "string", "minLength": 1, "maxLength": 8000},
+                        "thread_id": {"type": "string", "maxLength": 128},
+                        "correlation_id": {"type": "string", "maxLength": 128},
+                    },
+                    "required": ["recipient", "text"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "hirda_peer_inbox",
+                "description": (
+                    "Read peer messages addressed to the authenticated HIRDA principal. "
+                    "Does not require a managed workspace or session."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 100,
+                            "default": 20,
+                        },
+                        "unclaimed_only": {"type": "boolean", "default": False},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "hirda_peer_claim",
+                "description": (
+                    "Claim one peer message addressed to the authenticated HIRDA principal. "
+                    "Claims are recipient-scoped and idempotent for that principal."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "message_id": {"type": "string", "minLength": 1, "maxLength": 128}
+                    },
+                    "required": ["message_id"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "hirda_peer_reply",
+                "description": (
+                    "Reply to one peer message. The authenticated principal must be the original recipient; "
+                    "thread_id and correlation_id are inherited automatically."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "message_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                        "text": {"type": "string", "minLength": 1, "maxLength": 8000},
+                    },
+                    "required": ["message_id", "text"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "hirda_peer_threads",
+                "description": (
+                    "List peer conversation threads involving the authenticated HIRDA principal. "
+                    "Optional thread/correlation filters never expose unrelated principals' messages."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "thread_id": {"type": "string", "maxLength": 128},
+                        "correlation_id": {"type": "string", "maxLength": 128},
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 100,
+                            "default": 20,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        ]
+
     def _management_tools(self) -> list[dict[str, Any]]:
+        tools = self._peer_tools()
         if not (self.managed_sessions and self.managed_sessions.enabled):
-            return []
-        tools = [
+            return tools
+        tools.extend([
             {
                 "name": "mcpstudio_list_workspaces",
                 "description": "List project workspaces approved for isolated MCP Studio managed sessions.",
@@ -822,7 +969,7 @@ class GatewaySessionManager:
                     "required": ["session"], "additionalProperties": False,
                 },
             },
-        ]
+        ])
         if self.world_authoring is not None:
             tools.append(
                 {
@@ -2805,9 +2952,128 @@ class GatewaySessionManager:
         )
 
     async def _handle_management_tool(self, gateway_session_id: str, name: str, args: dict[str, Any]) -> Any:
+        principal_id = await self.connector_principal_for_gateway(gateway_session_id)
+
+        if name in PEER_TOOL_NAMES:
+            peer_scope_id = await self.connector_peer_scope_for_gateway(gateway_session_id)
+            if not principal_id or not peer_scope_id:
+                raise ManagedSessionError(
+                    "peer messaging requires an authenticated connector principal and peer scope"
+                )
+            try:
+                if name == "hirda_peer_list":
+                    return {
+                        "self_principal_id": principal_id,
+                        "peers": await self.db.list_peer_principals(
+                            current_principal_id=principal_id,
+                            peer_scope_id=peer_scope_id,
+                            limit=int(args.get("limit") or 100),
+                        ),
+                    }
+                if name == "hirda_peer_send":
+                    message = await self.db.create_peer_message(
+                        peer_scope_id=peer_scope_id,
+                        sender_principal_id=principal_id,
+                        recipient_principal_id=str(args.get("recipient") or ""),
+                        text=str(args.get("text") or ""),
+                        thread_id=(
+                            str(args.get("thread_id"))
+                            if args.get("thread_id") is not None
+                            else None
+                        ),
+                        correlation_id=(
+                            str(args.get("correlation_id"))
+                            if args.get("correlation_id") is not None
+                            else None
+                        ),
+                        metadata={"source": "hirda_peer_send"},
+                    )
+                    await self.db.add_event(
+                        "peer.message.sent",
+                        f"Peer message {message['message_id']} queued.",
+                        data={
+                            "message_id": message["message_id"],
+                            "thread_id": message["thread_id"],
+                            "sender_principal_id": principal_id,
+                            "recipient_principal_id": message["recipient_principal_id"],
+                        },
+                        stream_id=f"peer:{message['thread_id']}",
+                        correlation_id=message["correlation_id"],
+                    )
+                    return {"message": message}
+                if name == "hirda_peer_inbox":
+                    return {
+                        "principal_id": principal_id,
+                        "messages": await self.db.list_peer_inbox(
+                            principal_id,
+                            peer_scope_id=peer_scope_id,
+                            limit=int(args.get("limit") or 20),
+                            unclaimed_only=bool(args.get("unclaimed_only", False)),
+                        ),
+                    }
+                if name == "hirda_peer_claim":
+                    message = await self.db.claim_peer_message(
+                        str(args.get("message_id") or ""),
+                        principal_id=principal_id,
+                        peer_scope_id=peer_scope_id,
+                    )
+                    await self.db.add_event(
+                        "peer.message.claimed",
+                        f"Peer message {message['message_id']} claimed.",
+                        data={
+                            "message_id": message["message_id"],
+                            "thread_id": message["thread_id"],
+                            "recipient_principal_id": principal_id,
+                        },
+                        stream_id=f"peer:{message['thread_id']}",
+                        correlation_id=message["correlation_id"],
+                    )
+                    return {"message": message}
+                if name == "hirda_peer_reply":
+                    message = await self.db.reply_peer_message(
+                        str(args.get("message_id") or ""),
+                        sender_principal_id=principal_id,
+                        peer_scope_id=peer_scope_id,
+                        text=str(args.get("text") or ""),
+                    )
+                    await self.db.add_event(
+                        "peer.message.replied",
+                        f"Peer reply {message['message_id']} queued.",
+                        data={
+                            "message_id": message["message_id"],
+                            "reply_to": message["reply_to"],
+                            "thread_id": message["thread_id"],
+                            "sender_principal_id": principal_id,
+                            "recipient_principal_id": message["recipient_principal_id"],
+                        },
+                        stream_id=f"peer:{message['thread_id']}",
+                        correlation_id=message["correlation_id"],
+                    )
+                    return {"message": message}
+                if name == "hirda_peer_threads":
+                    return {
+                        "principal_id": principal_id,
+                        "threads": await self.db.list_peer_threads(
+                            principal_id,
+                            peer_scope_id=peer_scope_id,
+                            thread_id=(
+                                str(args.get("thread_id"))
+                                if args.get("thread_id") is not None
+                                else None
+                            ),
+                            correlation_id=(
+                                str(args.get("correlation_id"))
+                                if args.get("correlation_id") is not None
+                                else None
+                            ),
+                            limit=int(args.get("limit") or 20),
+                        ),
+                    }
+            except (ValueError, PermissionError, KeyError) as exc:
+                raise ManagedSessionError(str(exc)) from exc
+
         if not self.managed_sessions:
             raise ManagedSessionError("managed sessions are unavailable")
-        principal_id = await self.connector_principal_for_gateway(gateway_session_id)
         principal_kwargs = {"principal_id": principal_id} if principal_id else {}
         if name == "mcpstudio_list_workspaces":
             return {"workspaces": await self.managed_sessions.list_workspaces(**principal_kwargs)}
@@ -3570,6 +3836,9 @@ class GatewaySessionManager:
         connector_principal_id = str(
             getattr(request.state, "connector_principal_id", "") or ""
         ).strip() or None
+        connector_peer_scope_id = str(
+            getattr(request.state, "connector_peer_scope_id", "") or ""
+        ).strip() or None
         if client_type == "openai-secure-tunnel":
             observation["openai_like"] = True
         ingress = ingress_override or await self.resolve_ingress(request, server.id)
@@ -3589,6 +3858,7 @@ class GatewaySessionManager:
                 "client_observation": observation,
                 "reclaim_scope": identity_scope,
                 "connector_principal_id": connector_principal_id,
+                "connector_peer_scope_id": connector_peer_scope_id,
                 "last_ingress": ingress,
             },
         }
@@ -3716,6 +3986,7 @@ class GatewaySessionManager:
                 "identity_scope": identity_scope,
                 "identity_source": identity_source,
                 "connector_principal_id": connector_principal_id,
+                "connector_peer_scope_id": connector_peer_scope_id,
                 "client_observation": observation,
                 "ingress": ingress,
                 "initialize_response": self._initialize_response_cache(
@@ -3966,7 +4237,11 @@ class GatewaySessionManager:
                 },
             )
 
-        if request.method == "POST" and rpc_method == "tools/call" and tool_name.startswith("mcpstudio_"):
+        if (
+            request.method == "POST"
+            and rpc_method == "tools/call"
+            and (tool_name.startswith("mcpstudio_") or tool_name in PEER_TOOL_NAMES)
+        ):
             try:
                 result = await self._handle_management_tool(gateway_session_id, tool_name, tool_args)
                 session = await self.db.get_gateway_session(gateway_session_id)

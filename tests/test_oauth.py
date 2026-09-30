@@ -210,6 +210,9 @@ async def test_gateway_accepts_oauth_access_token_with_connector_identity(tmp_pa
     assert request.state.connector_principal_id == (
         "oauth-" + hashlib.sha256(client["client_id"].encode("utf-8")).hexdigest()[:24]
     )
+    assert request.state.connector_peer_scope_id == (
+        "oauth-scope-" + hashlib.sha256(client["client_id"].encode("utf-8")).hexdigest()[:24]
+    )
     assert client_identity.startswith("oauth-")
     assert client_type == "mcp-http"
     assert scope == "connector"
@@ -240,6 +243,8 @@ async def test_gateway_scopes_oauth_identity_to_openai_subject(tmp_path: Path):
     _, somchai_client, _, somchai_scope, somchai_source = manager.authenticate(somchai)
 
     assert fern.state.connector_principal_id != somchai.state.connector_principal_id
+    assert fern.state.connector_peer_scope_id == somchai.state.connector_peer_scope_id
+    assert fern.state.connector_peer_scope_id.startswith("oauth-scope-")
     assert fern_client != somchai_client
     assert fern_scope == somchai_scope == "connector"
     assert fern_source == somchai_source == "oauth-client-id+x-openai-subject"
