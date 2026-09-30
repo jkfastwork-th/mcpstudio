@@ -55,6 +55,7 @@
 <a data-help="Quick start, daily workflow, setup, and troubleshooting guidance." data-view="guide" href="#guide"><span>?</span>Guide</a>
 <a data-help="Shared browser desktop for OAuth, login and consent screens." data-view="computer" href="#computer"><span>▤</span>Computer</a>
 <a data-help="Runtime health, tunnels, alerts, SLO and operational diagnostics." data-view="system" href="#system"><span>◫</span>System</a>
+<a data-help="Create OAuth clients for ChatGPT and other trusted MCP consumers." data-view="connections" href="#connections"><span>⌁</span>Connections</a>
 <a data-help="Appearance and interface preferences." data-view="settings" href="#settings"><span>⚙</span>Settings</a>
 </nav>
 </aside>
@@ -196,7 +197,6 @@
 <div class="agent-runtime-grid" id="agentRuntimeGrid"></div>
 </section>
 
-<section class="view-page" data-page="reflex">
 <section class="view-page" data-page="pstack">
 <div class="page-section-head focus-page-head pstack-page-head">
   <div><span class="eyebrow">METHODOLOGY TRACE</span><h2>Pstack Activity</h2><p>See the workflow Pstack selected, the exact methodology stages it completed, and the boundary where HIRDA takes over.</p></div>
@@ -211,6 +211,7 @@
 </div>
 </section>
 
+<section class="view-page" data-page="reflex">
 <div class="page-section-head focus-page-head reflex-page-head">
   <div><span class="eyebrow">DECISION ENGINE</span><h2>Reflex</h2><p>Observe HIRDA Reflex decisions, JEV teacher agreement, latency, risk, and dataset growth.</p></div>
   <div class="toolbar reflex-toolbar">
@@ -339,6 +340,48 @@
 <div><strong>Need context?</strong><p>Hover or focus a ? marker and key controls to see a short explanation.</p></div>
 </div>
 </section>
+<section class="view-page" data-page="connections">
+<div class="page-section-head focus-page-head">
+<div><span class="eyebrow">CONNECTIONS</span><h2>OAuth Clients</h2><p>Create a dedicated OAuth client for each ChatGPT account or trusted MCP consumer.</p></div>
+<div class="toolbar"><button class="button secondary small" id="oauthRefreshBtn" type="button">Refresh clients</button></div>
+</div>
+
+<div class="oauth-client-layout">
+<article class="panel-card oauth-client-create">
+<div class="panel-head"><div><span class="eyebrow">CONNECT CHATGPT</span><h3>Create OAuth client</h3><p>Copy the Callback URL from ChatGPT and paste it here. HIRDA will issue a dedicated Client ID.</p></div></div>
+<form class="oauth-client-form" id="oauthClientForm">
+<div class="oauth-server-url"><div><span>Server URL</span><code id="oauthServerUrl">Loading…</code></div><button class="button secondary small" data-copy-server-url="true" type="button">Copy Server URL</button></div>
+<div class="oauth-approval-bootstrap"><div><span>Approval token</span><code id="oauthApprovalToken">Not generated</code><small id="oauthApprovalMeta">Generate a one-time token before creating a new ChatGPT client.</small></div><div class="oauth-approval-actions"><button class="button secondary small" id="oauthGenerateApprovalBtn" type="button">Generate token</button><button class="text-button" data-copy-approval-token="true" type="button" hidden id="oauthCopyApprovalBtn">Copy</button></div></div>
+<label><span>Connection name</span><input id="oauthClientName" maxlength="240" placeholder="Jack Account B" required type="text" value="ChatGPT Account"></label>
+<label><span>ChatGPT Callback URL</span><input id="oauthRedirectUri" maxlength="2000" placeholder="https://chatgpt.com/connector/oauth/..." required type="url"></label>
+<div class="oauth-setup-note">Client creation is allowed from localhost or from a browser with an active HIRDA owner approval session.</div>
+<div class="oauth-client-fixed">
+<div><span>Token endpoint auth</span><strong>none</strong><small>Public client + PKCE S256</small></div>
+<div><span>Scopes</span><strong>Server defaults</strong><small>Includes supported MCP scopes</small></div>
+</div>
+<div class="toolbar"><button class="button" id="oauthCreateBtn" type="submit">Create ChatGPT client</button></div>
+</form>
+</article>
+
+<article class="panel-card oauth-client-result" id="oauthSetupCard" hidden>
+<div class="panel-head"><div><span class="eyebrow">READY TO PASTE</span><h3>ChatGPT setup</h3><p>Use these values in the other ChatGPT account.</p></div></div>
+<div class="oauth-setup-grid">
+<div><span>Server URL</span><code id="oauthSetupResource">—</code><button class="text-button" data-copy-oauth="resource" type="button">Copy</button></div>
+<div><span>OAuth Client ID</span><code id="oauthSetupClientId">—</code><button class="text-button" data-copy-oauth="client_id" type="button">Copy</button></div>
+<div><span>OAuth Client Secret</span><code id="oauthSetupSecret">Not required</code><button class="text-button" data-copy-oauth="client_secret" hidden type="button">Copy</button></div>
+<div><span>Token endpoint auth method</span><code id="oauthSetupAuth">none</code></div>
+</div>
+<div class="oauth-setup-note">In ChatGPT, keep Client Secret blank and select <strong>none</strong>. OAuth authorization will still require HIRDA owner approval.</div>
+<button class="button secondary small" id="oauthCopySetupBtn" type="button">Copy full setup</button>
+</article>
+</div>
+
+<article class="panel-card oauth-client-list-card">
+<div class="panel-head"><div><span class="eyebrow">REGISTERED</span><h3>OAuth clients</h3><p>Each ChatGPT account should use its own client identity.</p></div><small id="oauthClientCount">—</small></div>
+<div class="oauth-client-list" id="oauthClientList"><div class="empty-state">Open this page to load registered OAuth clients.</div></div>
+</article>
+</section>
+
 <section class="view-page" data-page="settings">
 <div class="page-section-head focus-page-head">
 <div><span class="eyebrow">SETTINGS</span><h2>Settings</h2><p>Configure appearance, text size, and color preferences.</p></div>
@@ -467,12 +510,14 @@
 <a class="active" data-view="home" href="#home"><span>▣</span><small>Dashboard</small></a>
 <a data-view="sessions" href="#sessions"><span>◉</span><small>Capsule Lanes</small></a>
 <a data-view="agents" href="#agents"><span>◈</span><small>Agents</small></a>
+<a data-view="pstack" href="#pstack"><span>⌘</span><small>Pstack</small></a>
 <a data-view="reflex" href="#reflex"><span>◇</span><small>Reflex</small></a>
 <a data-view="actions" href="#actions"><span>◎</span><small>Actions</small></a>
 <a data-view="workspaces" href="#workspaces"><span>▢</span><small>Workspaces</small></a>
 <a data-view="guide" href="#guide"><span>?</span><small>Guide</small></a>
 <a data-view="computer" href="#computer"><span>▤</span><small>Computer</small></a>
 <a data-view="system" href="#system"><span>◫</span><small>System</small></a>
+<a data-view="connections" href="#connections"><span>⌁</span><small>Connections</small></a>
 <a data-view="settings" href="#settings"><span>⚙</span><small>Settings</small></a>
 </nav>
 <div class="help-tooltip" hidden="" id="helpTooltip" role="tooltip"></div>
@@ -490,8 +535,7 @@
 </div>
 </div>
 </dialog>
+<script src="/static/app.pstack.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>
-<a data-view="pstack" href="#pstack"><span>⌘</span><small>Pstack</small></a>
-<script src="/static/app.pstack.js"></script>

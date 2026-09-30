@@ -612,6 +612,7 @@ const viewMeta = {
   guide:['Guide','Guide','Daily use first, then setup and troubleshooting.'],
   computer:['Computer','Computer','Open a shared browser desktop for OAuth, sign-in, consent, and other human-in-the-loop actions.'],
   system:['System','System','Monitor runtime health, ingress, reliability, and diagnostics.'],
+  connections:['Connections','OAuth Clients','Create dedicated OAuth clients for ChatGPT and other trusted MCP consumers.'],
   settings:['Settings','Settings','Configure appearance, language, text size, and color preferences.']
 };
 
@@ -627,14 +628,15 @@ function setView(view, updateHash=true){
   document.getElementById('viewSubtitle').textContent=tr(sub);
   if(updateHash && location.hash !== `#${view}`) history.replaceState(null,'',`#${view}`);
   if(view==='computer') setTimeout(refreshComputerView,0);
-  if(view==='reflex') setTimeout(()=>uiAction(refreshReflexMetrics),0);
   if(view==='pstack'){
     setTimeout(()=>uiAction(refreshPstackActivity),0);
     startPstackActivityStream();
   }else{
     stopPstackActivityStream();
   }
+  if(view==='reflex') setTimeout(()=>uiAction(refreshReflexMetrics),0);
   if(view==='actions') setTimeout(()=>uiAction(refreshActionPlayground),0);
+  if(view==='connections') setTimeout(()=>uiAction(refreshOAuthClients),0);
   window.scrollTo({top:0,behavior:'smooth'});
 }
 
@@ -1841,6 +1843,7 @@ async function runGlobalSearch(raw){
     [/(guide|help|tutorial|how to|quick start)/,'guide'],
     [/(computer|browser|vnc|tool)/,'computer'],
     [/(system|health|slo|tunnel|alert|diagnostic|telemetry)/,'system'],
+    [/(oauth|connection|connect chatgpt|client id|callback)/,'connections'],
     [/(setting|theme|appearance|language|font|color scheme)/,'settings']
   ];
   const hit=routes.find(([pattern])=>pattern.test(query));
@@ -1855,9 +1858,106 @@ async function runGlobalSearch(raw){
   });
 }
 
+let oauthSetupData=null;
+let oauthApprovalTokenValue='';
+let oauthApprovalExpiresAt='';
+
+function renderOAuthClients(status){
+  const list=document.getElementById('oauthClientList');
+  const count=document.getElementById('oauthClientCount');
+  if(!list)return;
+  const clients=(status&&status.clients)||[];
+  if(count)count.textContent=clients.length+' client'+(clients.length===1?'':'s');
+  if(!status?.enabled){
+    list.innerHTML='<div class="empty-state">OAuth is disabled in HIRDA configuration.</div>';
+    return;
+  }
+  if(!clients.length){
+    list.innerHTML='<div class="empty-state">No OAuth clients registered yet.</div>';
+    return;
+  }
+  list.innerHTML=clients.map(client=>{
+    const redirects=(client.redirect_uris||[]).map(uri=>'<code>'+esc(uri)+'</code>').join('');
+    const scopes=(client.scopes||[]).map(scope=>'<span class="pill healthy">'+esc(scope)+'</span>').join('');
+    return '<div class="oauth-client-row">'
+      +'<div class="oauth-client-main"><strong>'+esc(client.client_name||client.client_id)+'</strong><code>'+esc(client.client_id)+'</code><small>'+esc(client.token_endpoint_auth_method||'none')+' · '+(client.enabled?'enabled':'disabled')+'</small></div>'
+      +'<div class="oauth-client-meta"><div><span>Redirect URI</span>'+redirects+'</div><div><span>Scopes</span><div class="oauth-scope-list">'+scopes+'</div></div></div>'
+      +'</div>';
+  }).join('');
+}
+
+async function refreshOAuthClients(){
+  if((location.hash||'#home')!=='#connections')return;
+  const status=await getJson('/api/oauth/status');
+  renderOAuthClients(status);
+  const serverUrl=document.getElementById('oauthServerUrl');
+  if(serverUrl)serverUrl.textContent=status.resource||'—';
+}
+
+function renderOAuthSetup(data){
+  oauthSetupData=data;
+  const card=document.getElementById('oauthSetupCard');
+  if(!card)return;
+  card.hidden=false;
+  document.getElementById('oauthSetupResource').textContent=data.resource||data.issuer||'—';
+  document.getElementById('oauthSetupClientId').textContent=data.client_id||'—';
+  document.getElementById('oauthSetupSecret').textContent=data.client_secret||'Not required';
+  document.getElementById('oauthSetupAuth').textContent=data.token_endpoint_auth_method||'none';
+  const secretButton=card.querySelector('[data-copy-oauth="client_secret"]');
+  if(secretButton)secretButton.hidden=!data.client_secret;
+}
+
+function renderOAuthApprovalToken(data){
+  oauthApprovalTokenValue=data?.token||'';
+  oauthApprovalExpiresAt=data?.expires_at||'';
+  const token=document.getElementById('oauthApprovalToken');
+  const meta=document.getElementById('oauthApprovalMeta');
+  const copy=document.getElementById('oauthCopyApprovalBtn');
+  if(token)token.textContent=oauthApprovalTokenValue||'Not generated';
+  if(meta)meta.textContent=oauthApprovalTokenValue
+    ? 'One-time · expires '+new Date(oauthApprovalExpiresAt).toLocaleTimeString()
+    : 'Generate a one-time token before creating a new ChatGPT client.';
+  if(copy)copy.hidden=!oauthApprovalTokenValue;
+}
+
+async function requestOAuthApprovalToken(rootApproval=''){
+  const headers={};
+  if(rootApproval)headers['X-HIRDA-Owner-Approval']=rootApproval;
+  const response=await fetch('/api/oauth/owner-approval-tokens',{method:'POST',headers});
+  let body={};
+  try{body=await response.json();}catch{}
+  if(!response.ok){
+    const err=new Error(body.detail||('HTTP '+response.status));
+    err.status=response.status;
+    throw err;
+  }
+  renderOAuthApprovalToken(body);
+  return body;
+}
+
+function oauthSetupText(){
+  if(!oauthSetupData)return '';
+  return [
+    'HIRDA / ChatGPT OAuth setup',
+    'Server URL: '+(oauthSetupData.resource||oauthSetupData.issuer||''),
+    'OAuth Client ID: '+(oauthSetupData.client_id||''),
+    'OAuth Client Secret: '+(oauthSetupData.client_secret||'(leave blank)'),
+    'Token endpoint auth method: '+(oauthSetupData.token_endpoint_auth_method||'none'),
+    'Scopes: '+((oauthSetupData.scopes||[]).join(' ')||'(server defaults)')
+  ].join('\n');
+}
+
 document.querySelectorAll('.primary-nav a[data-view], .mobile-nav a[data-view]').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();setView(a.dataset.view);}));
 document.addEventListener('click',e=>uiAction(async()=>{
   const copy=e.target.closest('[data-copy-command],[data-copy-source]'); if(copy){await copyChatGPTCommand(copy);return;}
+  const serverUrlCopy=e.target.closest('[data-copy-server-url]'); if(serverUrlCopy){const value=document.getElementById('oauthServerUrl')?.textContent||'';if(value&&value!=='—'&&value!=='Loading…')await copyText(value);return;}
+  const approvalCopy=e.target.closest('[data-copy-approval-token]'); if(approvalCopy&&oauthApprovalTokenValue){await copyText(oauthApprovalTokenValue);return;}
+  const oauthCopy=e.target.closest('[data-copy-oauth]'); if(oauthCopy&&oauthSetupData){
+    const key=oauthCopy.dataset.copyOauth;
+    const value=key==='resource'?(oauthSetupData.resource||oauthSetupData.issuer||''):String(oauthSetupData[key]||'');
+    if(value)await copyText(value);
+    return;
+  }
   const settingsAction=e.target.closest('[data-settings-action]'); if(settingsAction){await handleSettingsAction(settingsAction.dataset.settingsAction);return;}
   const scheme=e.target.closest('button[data-color-scheme]'); if(scheme){applyColorScheme(scheme.dataset.colorScheme);return;}
   const laneApply=e.target.closest('[data-lane-state-apply]'); if(laneApply){await applyLaneState(laneApply.dataset.laneStateApply);return;}
@@ -1922,6 +2022,75 @@ document.addEventListener('click',e=>uiAction(async()=>{
   }
   const detach=e.target.closest('[data-gateway-detach]'); if(detach){await sendJson(`/api/gateway/sessions/${encodeURIComponent(detach.dataset.gatewayDetach)}/managed/detach`);await load();return;}
 }));
+document.getElementById('oauthGenerateApprovalBtn')?.addEventListener('click',()=>uiAction(async()=>{
+  const button=document.getElementById('oauthGenerateApprovalBtn');
+  button.disabled=true;
+  button.textContent='Generating…';
+  try{
+    try{
+      await requestOAuthApprovalToken();
+    }catch(err){
+      if(err.status!==403)throw err;
+      const approval=await openAppDialog({
+        title:'Bootstrap approval',
+        message:'For this self-hosted test, enter the current HIRDA owner token once. HIRDA will mint a short-lived one-time approval token for client registration.',
+        icon:'🔐',
+        tone:'info',
+        confirmText:'Generate token',
+        fields:[{name:'root_approval',label:'Current owner token',type:'password',required:true}]
+      });
+      if(!approval.confirmed)return;
+      await requestOAuthApprovalToken(approval.values.root_approval||'');
+    }
+  }finally{
+    button.disabled=false;
+    button.textContent='Generate token';
+  }
+}));
+
+document.getElementById('oauthClientForm')?.addEventListener('submit',e=>uiAction(async()=>{
+  e.preventDefault();
+  const button=document.getElementById('oauthCreateBtn');
+  const client_name=document.getElementById('oauthClientName').value.trim();
+  const redirect_uri=document.getElementById('oauthRedirectUri').value.trim();
+  if(!client_name||!redirect_uri)return;
+  if(!oauthApprovalTokenValue){
+    await openAppDialog({
+      title:'Generate approval token first',
+      message:'Create a one-time approval token above before registering this ChatGPT client.',
+      icon:'!',
+      tone:'info',
+      confirmText:'Close',
+      showCancel:false
+    });
+    return;
+  }
+  const payload={client_name,redirect_uri,token_endpoint_auth_method:'none'};
+  const headers={'Content-Type':'application/json','X-HIRDA-Owner-Approval':oauthApprovalTokenValue};
+  button.disabled=true;
+  button.textContent='Creating…';
+  try{
+    const response=await fetch('/api/oauth/clients',{method:'POST',headers,body:JSON.stringify(payload)});
+    let created={};
+    try{created=await response.json();}catch{}
+    if(!response.ok)throw new Error(created.detail||created.error_description||('HTTP '+response.status));
+    renderOAuthSetup(created);
+    oauthApprovalTokenValue='';
+    oauthApprovalExpiresAt='';
+    const token=document.getElementById('oauthApprovalToken');
+    const meta=document.getElementById('oauthApprovalMeta');
+    const copy=document.getElementById('oauthCopyApprovalBtn');
+    if(token)token.textContent='Consumed';
+    if(meta)meta.textContent='Approval token used successfully. Generate a new token for another client.';
+    if(copy)copy.hidden=true;
+    await refreshOAuthClients();
+  }finally{
+    button.disabled=false;
+    button.textContent='Create ChatGPT client';
+  }
+}));
+document.getElementById('oauthRefreshBtn')?.addEventListener('click',()=>uiAction(refreshOAuthClients));
+document.getElementById('oauthCopySetupBtn')?.addEventListener('click',()=>uiAction(async()=>{const value=oauthSetupText();if(value)await copyText(value);}));
 document.getElementById('languageSelect').addEventListener('change',e=>applyLanguage(e.target.value));
 document.getElementById('themeLightBtn').addEventListener('click',()=>applyTheme('light'));
 document.getElementById('themeDarkBtn').addEventListener('click',()=>applyTheme('dark'));

@@ -110,14 +110,15 @@ class ManagedSessionManager:
         return key[:96].rstrip("._-") or "workspace"
 
     async def _workspace_for_project_path(
-        self, *, project_path: str, name: str | None = None, actor: str = "operator"
+        self, *, project_path: str, name: str | None = None,
+        actor: str = "operator", principal_id: str | None = None,
     ) -> dict[str, Any]:
         """Return/create the durable workspace row for an approved canonical path."""
         normalized = self.validate_project_path(project_path)
         async with self._workspace_lock:
             existing = await self.db.find_managed_workspace_by_project(normalized)
             if existing:
-                return existing
+                return await self._authorize_workspace_principal(existing, principal_id)
 
             base = self._workspace_key_from_path(normalized)
             digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
@@ -136,12 +137,11 @@ class ManagedSessionManager:
                         project_path=normalized,
                         name=name or key,
                         actor=f"{actor}:auto-path",
+                        principal_id=principal_id,
                     )
                 if by_key["project_path"] == normalized:
-                    return by_key
+                    return await self._authorize_workspace_principal(by_key, principal_id)
 
-            # A full SHA-256 collision with an existing manually-created key is
-            # extraordinarily unlikely, but fail safely rather than overwrite it.
             raise ManagedSessionConflict(
                 f"could not allocate collision-safe workspace key for project path {normalized}"
             )
@@ -312,62 +312,134 @@ class ManagedSessionManager:
                 return port
         raise ManagedSessionError(f"no free managed Serena port in {start}-{end}")
 
-    async def register_workspace(self, *, key: str, project_path: str, name: str | None = None, actor: str = "operator") -> dict[str, Any]:
+    async def register_workspace(
+        self, *, key: str, project_path: str, name: str | None = None,
+        actor: str = "operator", principal_id: str | None = None,
+    ) -> dict[str, Any]:
         if not self.enabled:
             raise ManagedSessionError("managed sessions are disabled")
         key = str(key or "").strip()
-        if not key or len(key) > 120 or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for ch in key):
-            raise WorkspaceNotAllowed("workspace key must use A-Z, a-z, 0-9, dot, underscore or dash")
+        if not key or len(key) > 120 or any(
+            ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+            for ch in key
+        ):
+            raise WorkspaceNotAllowed(
+                "workspace key must use A-Z, a-z, 0-9, dot, underscore or dash"
+            )
         normalized = self.validate_project_path(project_path)
+        if principal_id:
+            try:
+                existing_key = await self.db.get_managed_workspace(key)
+            except KeyError:
+                existing_key = None
+            if existing_key:
+                existing_key = await self._authorize_workspace_principal(
+                    existing_key, principal_id
+                )
+            existing_path = await self.db.find_managed_workspace_by_project(normalized)
+            if existing_path:
+                existing_path = await self._authorize_workspace_principal(
+                    existing_path, principal_id
+                )
+                if existing_path["key"] != key:
+                    raise ManagedSessionConflict(
+                        f"project path is already registered as workspace {existing_path['key']}"
+                    )
         item = await self.db.upsert_managed_workspace(
-            key=key, name=(name or key).strip()[:240], project_path=normalized,
+            key=key,
+            name=(name or key).strip()[:240],
+            project_path=normalized,
             metadata={"source": actor},
+            principal_id=principal_id,
         )
+        if principal_id and not item.get("principal_id"):
+            item = await self.db.claim_managed_workspace(key, principal_id)
         await self.db.add_audit(
-            "managed.workspace.register", actor=actor, target_type="managed_workspace", target_id=key,
-            data={"project_path": normalized},
+            "managed.workspace.register",
+            actor=actor,
+            target_type="managed_workspace",
+            target_id=key,
+            data={"project_path": normalized, "principal_id": principal_id},
         )
         return item
 
-    async def list_workspaces(self) -> list[dict[str, Any]]:
-        return await self.db.list_managed_workspaces()
+    async def list_workspaces(
+        self, principal_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        return await self.db.list_managed_workspaces(principal_id=principal_id)
+
+
+    async def _authorize_workspace_principal(
+        self, workspace: dict[str, Any], principal_id: str | None
+    ) -> dict[str, Any]:
+        if not principal_id:
+            return workspace
+        owner = str(workspace.get("principal_id") or "")
+        if owner == principal_id:
+            return workspace
+        if owner:
+            raise WorkspaceNotAllowed("workspace is assigned to another connector")
+        try:
+            return await self.db.claim_legacy_workspace_for_principal(
+                str(workspace["key"]), principal_id
+            )
+        except PermissionError as exc:
+            raise WorkspaceNotAllowed(
+                "workspace is not assigned to this connector"
+            ) from exc
+
+
+    async def get_workspace(
+        self, workspace_key: str, principal_id: str | None = None
+    ) -> dict[str, Any]:
+        item = await self.db.get_managed_workspace(workspace_key)
+        if principal_id and str(item.get("principal_id") or "") != principal_id:
+            raise KeyError(workspace_key)
+        return item
 
     async def ensure_workspace_selector_session(
-        self, *, workspace: str, name: str | None = None, actor: str = "operator"
+        self, *, workspace: str, name: str | None = None,
+        actor: str = "operator", principal_id: str | None = None,
     ) -> dict[str, Any]:
-        """Resolve a registered key or an approved absolute project path.
-
-        Absolute paths are auto-registered durably using a collision-safe key.
-        Existing path registrations are reused, so a config alias such as
-        ``oriverse`` remains canonical when its project path is supplied.
-        """
+        """Resolve a registered key or an approved absolute project path."""
         selector = str(workspace or "").strip()
         if not selector:
             raise WorkspaceNotAllowed("workspace selector is required")
         candidate = Path(selector).expanduser()
         if candidate.is_absolute():
             item = await self._workspace_for_project_path(
-                project_path=selector, name=name, actor=actor
+                project_path=selector,
+                name=name,
+                actor=actor,
+                principal_id=principal_id,
             )
             workspace_key = item["key"]
         else:
             workspace_key = selector
         return await self.ensure_workspace_session(
-            workspace_key=workspace_key, name=name, actor=actor
+            workspace_key=workspace_key,
+            name=name,
+            actor=actor,
+            principal_id=principal_id,
         )
 
-    async def ensure_workspace_session(self, *, workspace_key: str, name: str | None = None, actor: str = "operator") -> dict[str, Any]:
-        """Return a durable managed session for a workspace, creating/resuming as needed.
-
-        Phase C uses this for production cutover so a client can say "use workspace X"
-        without knowing a managed-session id. The project path remains the durable pin.
-        """
+    async def ensure_workspace_session(
+        self, *, workspace_key: str, name: str | None = None,
+        actor: str = "operator", principal_id: str | None = None,
+    ) -> dict[str, Any]:
         if not self.enabled:
             raise ManagedSessionError("managed sessions are disabled")
         workspace = await self.db.get_managed_workspace(workspace_key)
+        workspace = await self._authorize_workspace_principal(workspace, principal_id)
         project = self.validate_project_path(workspace["project_path"])
         async with self._create_lock:
-            existing = await self.db.find_managed_session_by_project(project)
+            existing = await self.db.find_managed_session_by_project(
+                project, principal_id=principal_id
+            )
+            if existing is None and principal_id:
+                existing = await self.db.claim_unowned_managed_session_by_project(
+                    project, principal_id
+                )
             if existing:
                 if existing.get("desired_state") != "running":
                     await self.db.set_managed_session_desired_state(existing["id"], "running")
@@ -383,27 +455,43 @@ class ManagedSessionManager:
                     port=port,
                     desired_state="running",
                     metadata={"created_by": actor, "phase": "m6.2.3c"},
+                    principal_id=principal_id,
                 )
                 target_id = item["id"]
                 created = True
         ready = await self.ensure_running(target_id)
         await self.db.add_audit(
-            "managed.session.use_workspace", actor=actor, target_type="managed_session", target_id=target_id,
-            data={"workspace_key": workspace_key, "project_path": project, "created": created},
+            "managed.session.use_workspace",
+            actor=actor,
+            target_type="managed_session",
+            target_id=target_id,
+            data={
+                "workspace_key": workspace_key,
+                "project_path": project,
+                "created": created,
+                "principal_id": principal_id,
+            },
         )
         return ready
 
-    async def create_session(self, *, name: str, workspace_key: str, actor: str = "operator") -> dict[str, Any]:
+    async def create_session(
+        self, *, name: str, workspace_key: str, actor: str = "operator",
+        principal_id: str | None = None,
+    ) -> dict[str, Any]:
         if not self.enabled:
             raise ManagedSessionError("managed sessions are disabled")
         workspace = await self.db.get_managed_workspace(workspace_key)
+        workspace = await self._authorize_workspace_principal(workspace, principal_id)
         project = self.validate_project_path(workspace["project_path"])
         reused: dict[str, Any] | None = None
-        # Serialize project-pin creation and port allocation inside the Studio
-        # process. A stopped row is a durable session and is resumed rather
-        # than duplicated.
         async with self._create_lock:
-            existing = await self.db.find_managed_session_by_project(project)
+            existing = await self.db.find_managed_session_by_project(
+                project, principal_id=principal_id
+            )
+            if existing is None and principal_id:
+                existing = await self.db.claim_unowned_managed_session_by_project(
+                    project, principal_id
+                )
             if existing:
                 if existing.get("desired_state") == "running":
                     raise ManagedSessionConflict(
@@ -421,16 +509,33 @@ class ManagedSessionManager:
                     port=port,
                     desired_state="running",
                     metadata={"created_by": actor},
+                    principal_id=principal_id,
                 )
         if reused is not None:
             await self.db.add_audit(
-                "managed.session.resume", actor=actor, target_type="managed_session", target_id=reused["id"],
-                data={"workspace_key": workspace_key, "project_path": project, "port": reused["port"]},
+                "managed.session.resume",
+                actor=actor,
+                target_type="managed_session",
+                target_id=reused["id"],
+                data={
+                    "workspace_key": workspace_key,
+                    "project_path": project,
+                    "port": reused["port"],
+                    "principal_id": principal_id,
+                },
             )
             return await self.ensure_running(reused["id"])
         await self.db.add_audit(
-            "managed.session.create", actor=actor, target_type="managed_session", target_id=item["id"],
-            data={"workspace_key": workspace_key, "project_path": project, "port": port},
+            "managed.session.create",
+            actor=actor,
+            target_type="managed_session",
+            target_id=item["id"],
+            data={
+                "workspace_key": workspace_key,
+                "project_path": project,
+                "port": port,
+                "principal_id": principal_id,
+            },
         )
         return await self.ensure_running(item["id"])
 
@@ -521,6 +626,62 @@ class ManagedSessionManager:
             await asyncio.sleep(0.35)
         raise ManagedSessionError(f"managed Serena readiness timeout: {last_error or 'no response'}")
 
+    async def _probe_tool_execution_endpoint(
+        self,
+        endpoint: str,
+        *,
+        client_name: str,
+    ) -> None:
+        """Prove that Serena can execute project tools, not only initialize/list tools."""
+        await MCPClient(
+            endpoint,
+            timeout=min(
+                5.0,
+                max(1.0, float(self.settings.studio.request_timeout_seconds)),
+            ),
+            protocol_version="2025-06-18",
+        ).call_tools(
+            [
+                ("get_current_config", {}),
+                (
+                    "find_symbol",
+                    {
+                        "name_path_pattern": "__hirda_semantic_readiness_probe__",
+                        "relative_path": "",
+                        "include_body": False,
+                        "max_matches": 1,
+                    },
+                ),
+            ],
+            client_name=client_name,
+        )
+
+    async def probe_tool_execution(self, session_id: str) -> dict[str, Any]:
+        """Run a bounded, side-effect-free tool execution probe for one managed runtime."""
+        item = await self.db.get_managed_session(session_id)
+        endpoint = str(
+            item.get("endpoint")
+            or f"http://127.0.0.1:{item['port']}/mcp"
+        )
+        try:
+            await self._probe_tool_execution_endpoint(
+                endpoint,
+                client_name="hirda-managed-runtime-probe",
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "managed_session_id": session_id,
+                "generation": int(item.get("generation") or 0),
+                "error": str(exc)[:2000],
+            }
+        return {
+            "ok": True,
+            "managed_session_id": session_id,
+            "generation": int(item.get("generation") or 0),
+            "error": None,
+        }
+
     async def _wait_semantic_ready(
         self,
         item: dict[str, Any],
@@ -541,21 +702,8 @@ class ManagedSessionManager:
                     f"Serena exited before semantic readiness rc={process.returncode}"
                 )
             try:
-                await MCPClient(
+                await self._probe_tool_execution_endpoint(
                     endpoint,
-                    timeout=min(
-                        5.0,
-                        float(self.settings.studio.request_timeout_seconds),
-                    ),
-                    protocol_version="2025-06-18",
-                ).call_tool(
-                    "find_symbol",
-                    {
-                        "name_path_pattern": "__hirda_semantic_readiness_probe__",
-                        "relative_path": "",
-                        "include_body": False,
-                        "max_matches": 1,
-                    },
                     client_name="hirda-semantic-readiness",
                 )
                 return
@@ -563,7 +711,7 @@ class ManagedSessionManager:
                 last_error = exc
             await asyncio.sleep(0.35)
         raise ManagedSessionError(
-            f"managed Serena semantic readiness timeout: {last_error or 'no response'}"
+            f"managed Serena tool-execution readiness timeout: {last_error or 'no response'}"
         )
 
     async def ensure_running(self, session_id: str) -> dict[str, Any]:
@@ -749,18 +897,67 @@ class ManagedSessionManager:
         *,
         reason: str,
         actor: str = "system/lsp-recovery",
+        expected_generation: int | None = None,
     ) -> dict[str, Any]:
         async with self._runtime_recovery_lock:
+            before = await self.db.get_managed_session(session_id)
+            generation_before = int(before.get("generation") or 0)
+
+            if (
+                expected_generation is not None
+                and generation_before != int(expected_generation)
+            ):
+                probe = await self.probe_tool_execution(session_id)
+                if probe.get("ok"):
+                    await self.db.add_event(
+                        "managed.session.runtime_recovery_coalesced",
+                        f"Skipped duplicate runtime recovery for {session_id}",
+                        data={
+                            "managed_session_id": session_id,
+                            "expected_generation": int(expected_generation),
+                            "current_generation": generation_before,
+                            "reason": reason[:1000],
+                        },
+                    )
+                    return before
+
             await self._set_language_runtime_state(
                 session_id,
                 state="degraded",
                 error=reason,
                 increment_restart=True,
             )
-            before = await self.db.get_managed_session(session_id)
+            drained_gateway_ids = await self.db.drain_gateway_bindings_for_managed_session(
+                session_id,
+                reason=f"managed runtime recovery: {reason[:900]}",
+            )
+            if drained_gateway_ids:
+                await self.db.add_event(
+                    "managed.session.gateway_bindings_drained",
+                    f"Drained {len(drained_gateway_ids)} gateway binding(s) for {session_id}",
+                    severity="warning",
+                    data={
+                        "managed_session_id": session_id,
+                        "gateway_session_ids": drained_gateway_ids,
+                        "reason": reason[:1000],
+                    },
+                )
+
             await self._terminate_instance(session_id, preserve_desired=True)
             await self.db.set_managed_session_desired_state(session_id, "running")
             recovered = await self.ensure_running(session_id)
+            verification = await self.probe_tool_execution(session_id)
+            if not verification.get("ok"):
+                error = str(verification.get("error") or "tool execution probe failed")
+                await self._set_language_runtime_state(
+                    session_id,
+                    state="degraded",
+                    error=error,
+                )
+                raise ManagedSessionError(
+                    f"managed runtime recovered process but tool execution is unhealthy: {error}"
+                )
+
             await self.db.add_audit(
                 "managed.session.language_runtime_recover",
                 actor=actor,
@@ -769,8 +966,9 @@ class ManagedSessionManager:
                 data={
                     "workspace_key": recovered.get("workspace_key"),
                     "reason": reason[:1000],
-                    "generation_before": int(before.get("generation") or 0),
+                    "generation_before": generation_before,
                     "generation_after": int(recovered.get("generation") or 0),
+                    "drained_gateway_count": len(drained_gateway_ids),
                 },
             )
             await self.db.add_event(
@@ -779,8 +977,9 @@ class ManagedSessionManager:
                 data={
                     "managed_session_id": session_id,
                     "workspace_key": recovered.get("workspace_key"),
-                    "generation_before": int(before.get("generation") or 0),
+                    "generation_before": generation_before,
                     "generation_after": int(recovered.get("generation") or 0),
+                    "drained_gateway_count": len(drained_gateway_ids),
                 },
             )
             return recovered
@@ -872,11 +1071,20 @@ class ManagedSessionManager:
         item["language_runtime"] = dict(metadata.get("language_runtime") or {})
         return item
 
-    async def get_session(self, session_id: str) -> dict[str, Any]:
-        return self._with_tool_permissions(await self.db.get_managed_session(session_id))
+    async def get_session(
+        self, session_id: str, principal_id: str | None = None
+    ) -> dict[str, Any]:
+        item = self._with_tool_permissions(await self.db.get_managed_session(session_id))
+        if principal_id and str(item.get("principal_id") or "") != principal_id:
+            raise KeyError(session_id)
+        return item
 
-    async def list_sessions(self) -> list[dict[str, Any]]:
-        sessions = await self.db.managed_session_overview(limit=500)
+    async def list_sessions(
+        self, principal_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        sessions = await self.db.managed_session_overview(
+            limit=500, principal_id=principal_id
+        )
         return [self._with_tool_permissions(item) for item in sessions]
 
     async def permissions(self, session_id: str) -> dict[str, Any]:

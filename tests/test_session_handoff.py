@@ -146,7 +146,7 @@ def test_session_handoff_tools_are_exposed_and_classified(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_chatgpt_capsule_lane_control_tools_delegate_to_capsule_service(tmp_path: Path):
+async def test_chatgpt_capsule_lane_control_tools_delegate_to_capsule_service(tmp_path: Path, monkeypatch):
     settings = settings_for(tmp_path)
 
     class Pool:
@@ -184,6 +184,11 @@ async def test_chatgpt_capsule_lane_control_tools_delegate_to_capsule_service(tm
         managed_sessions=Pool(),
         capsules=Capsules(),
     )
+
+    async def no_connector_principal(_gateway_session_id):
+        return None
+
+    monkeypatch.setattr(manager, "connector_principal_for_gateway", no_connector_principal)
 
     status = await manager._handle_management_tool("gws-test", "mcpstudio_lane_status", {})
     assert status["lanes"]["claude"]["state"] == "normal"

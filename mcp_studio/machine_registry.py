@@ -601,3 +601,181 @@ class MachineRegistry:
             "descriptor": safe_descriptor,
             "websocket_url": websocket_url,
         }
+
+
+    async def remote_computer_monitors(
+        self,
+        machine: MachineDescriptor,
+    ) -> dict[str, Any]:
+        provider = dict(machine.providers.get("computer_use") or {})
+        if str(provider.get("mode") or "") != "agent":
+            raise MachineRegistryError(
+                f"computer use agent is unavailable on {machine.machine_id}"
+            )
+        endpoint = str(provider.get("endpoint") or "").rstrip("/")
+        if not endpoint:
+            raise MachineRegistryError("computer use endpoint is unavailable")
+        timeout = float(provider.get("timeout_seconds") or 10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(
+                endpoint + "/v1/computer/monitors",
+                headers=self._provider_headers(provider),
+            )
+        if response.status_code >= 400:
+            raise MachineRegistryError(
+                f"remote monitor status failed ({response.status_code}): "
+                f"{response.text[:500]}"
+            )
+        payload = response.json()
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            raise MachineRegistryError(
+                str((payload or {}).get("error") or "remote monitor status failed")
+            )
+        return payload
+
+    async def set_remote_computer_monitor(
+        self,
+        machine: MachineDescriptor,
+        *,
+        mode: str,
+    ) -> dict[str, Any]:
+        provider = dict(machine.providers.get("computer_use") or {})
+        if str(provider.get("mode") or "") != "agent":
+            raise MachineRegistryError(
+                f"computer use agent is unavailable on {machine.machine_id}"
+            )
+        endpoint = str(provider.get("endpoint") or "").rstrip("/")
+        if not endpoint:
+            raise MachineRegistryError("computer use endpoint is unavailable")
+        timeout = float(provider.get("timeout_seconds") or 10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                endpoint + "/v1/computer/monitor-selection",
+                headers=self._provider_headers(provider),
+                json={"mode": str(mode or "")},
+            )
+        if response.status_code >= 400:
+            raise MachineRegistryError(
+                f"remote monitor selection failed ({response.status_code}): "
+                f"{response.text[:500]}"
+            )
+        payload = response.json()
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            raise MachineRegistryError(
+                str((payload or {}).get("error") or "remote monitor selection failed")
+            )
+        return payload
+
+
+    async def remote_browser_profiles(
+        self,
+        machine: MachineDescriptor,
+    ) -> dict[str, Any]:
+        provider = dict(machine.providers.get("computer_use") or {})
+        if str(provider.get("mode") or "") != "agent":
+            raise MachineRegistryError(
+                f"computer use agent is unavailable on {machine.machine_id}"
+            )
+        endpoint = str(provider.get("endpoint") or "").rstrip("/")
+        timeout = float(provider.get("timeout_seconds") or 10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(
+                endpoint + "/v1/computer/browser/profiles",
+                headers=self._provider_headers(provider),
+            )
+        if response.status_code >= 400:
+            raise MachineRegistryError(
+                f"remote browser profiles failed ({response.status_code}): "
+                f"{response.text[:500]}"
+            )
+        payload = response.json()
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            raise MachineRegistryError(
+                str((payload or {}).get("error") or "remote browser profiles failed")
+            )
+        return payload
+
+    async def set_remote_browser_profile_alias(
+        self,
+        machine: MachineDescriptor,
+        *,
+        alias: str,
+        profile: str,
+    ) -> dict[str, Any]:
+        provider = dict(machine.providers.get("computer_use") or {})
+        endpoint = str(provider.get("endpoint") or "").rstrip("/")
+        timeout = float(provider.get("timeout_seconds") or 10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                endpoint + "/v1/computer/browser/profile-alias",
+                headers=self._provider_headers(provider),
+                json={"alias": alias, "profile": profile},
+            )
+        if response.status_code >= 400:
+            raise MachineRegistryError(
+                f"remote browser profile alias failed ({response.status_code}): "
+                f"{response.text[:500]}"
+            )
+        payload = response.json()
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            raise MachineRegistryError(
+                str((payload or {}).get("error") or "remote browser profile alias failed")
+            )
+        return payload
+
+    async def rename_remote_browser_profile_alias(
+        self,
+        machine: MachineDescriptor,
+        *,
+        alias: str,
+        new_alias: str,
+    ) -> dict[str, Any]:
+        provider = dict(machine.providers.get("computer_use") or {})
+        endpoint = str(provider.get("endpoint") or "").rstrip("/")
+        timeout = float(provider.get("timeout_seconds") or 10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                endpoint + "/v1/computer/browser/profile-alias/rename",
+                headers=self._provider_headers(provider),
+                json={"alias": alias, "new_alias": new_alias},
+            )
+        if response.status_code >= 400:
+            raise MachineRegistryError(
+                f"remote browser profile alias rename failed ({response.status_code}): "
+                f"{response.text[:500]}"
+            )
+        payload = response.json()
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            raise MachineRegistryError(
+                str((payload or {}).get("error") or "remote browser profile alias rename failed")
+            )
+        return payload
+
+    async def launch_remote_browser_profile(
+        self,
+        machine: MachineDescriptor,
+        *,
+        profile: str,
+        url: str | None,
+        monitor: str | None,
+    ) -> dict[str, Any]:
+        provider = dict(machine.providers.get("computer_use") or {})
+        endpoint = str(provider.get("endpoint") or "").rstrip("/")
+        timeout = max(12.0, float(provider.get("timeout_seconds") or 10.0))
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                endpoint + "/v1/computer/browser/launch",
+                headers=self._provider_headers(provider),
+                json={"profile": profile, "url": url, "monitor": monitor},
+            )
+        if response.status_code >= 400:
+            raise MachineRegistryError(
+                f"remote browser launch failed ({response.status_code}): "
+                f"{response.text[:500]}"
+            )
+        payload = response.json()
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            raise MachineRegistryError(
+                str((payload or {}).get("error") or "remote browser launch failed")
+            )
+        return payload

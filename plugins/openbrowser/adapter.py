@@ -6,19 +6,25 @@ import os
 import re
 import shutil
 import tempfile
+
+import httpx
+import websockets
+
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from mcp_studio.integrations import IntegrationManifest
 
 
 OPENBROWSER_VERSION = "0.1.54"
 _PERMISSION_MAP: dict[str, str] = {
+    "attach_session": "execute",
     "navigate": "execute",
     "state": "read",
     "click": "execute",
+    "click_xy": "execute",
     "input_text": "write",
     "select_dropdown": "write",
     "scroll": "execute",
@@ -83,6 +89,10 @@ def _descriptor(
 
 
 _TOOL_CATALOG = {
+    "attach_session": _descriptor(
+        "attach_session",
+        "Attach OpenBrowser to the existing HIRDA Computer Use Chromium session for this managed session. Reuses the current browser/CDP target instead of spawning a new Chromium process.",
+    ),
     "navigate": _descriptor(
         "navigate",
         "Navigate this HIRDA browser session to an HTTP(S) URL.",
@@ -109,6 +119,17 @@ _TOOL_CATALOG = {
         "Click an indexed interactive element.",
         {"index": {"type": "integer", "minimum": 1}},
         ["index"],
+    ),
+    "click_xy": _descriptor(
+        "click_xy",
+        "Click CSS viewport coordinates in an attached HIRDA browser session. Intended for canvas/native-rendered controls when no DOM index exists.",
+        {
+            "x": {"type": "number", "minimum": 0, "maximum": 10000},
+            "y": {"type": "number", "minimum": 0, "maximum": 10000},
+            "button": {"type": "string", "enum": ["left", "right", "middle"], "default": "left"},
+            "click_count": {"type": "integer", "minimum": 1, "maximum": 3, "default": 1},
+        },
+        ["x", "y"],
     ),
     "input_text": _descriptor(
         "input_text",
@@ -424,6 +445,265 @@ class _OpenBrowserSessionClient:
             await self._close_unlocked()
 
 
+
+class _ExistingCDPClient:
+    def __init__(self, port: int, *, timeout_seconds: float) -> None:
+        self.port = int(port)
+        self.timeout_seconds = max(2.0, float(timeout_seconds))
+
+    @staticmethod
+    def _result(payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                }
+            ],
+            "isError": False,
+        }
+
+    async def _targets(self) -> list[dict[str, Any]]:
+        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+            response = await client.get(f"http://127.0.0.1:{self.port}/json")
+            response.raise_for_status()
+            value = response.json()
+        if not isinstance(value, list):
+            raise OpenBrowserAdapterError("openbrowser_cdp_targets_invalid")
+        return [dict(item) for item in value if isinstance(item, dict)]
+
+    async def _page(self) -> dict[str, Any]:
+        pages = [
+            item
+            for item in await self._targets()
+            if str(item.get("type") or "") == "page"
+            and str(item.get("webSocketDebuggerUrl") or "")
+        ]
+        if not pages:
+            raise OpenBrowserAdapterError("openbrowser_cdp_page_missing")
+        preferred = [
+            item
+            for item in pages
+            if str(item.get("url") or "").startswith(("http://", "https://"))
+            and str(item.get("url") or "") != "about:blank"
+        ]
+        return (preferred or pages)[-1]
+
+    async def _rpc(self, websocket_url: str, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        async with websockets.connect(
+            websocket_url,
+            open_timeout=self.timeout_seconds,
+            close_timeout=self.timeout_seconds,
+            max_size=4 * 1024 * 1024,
+        ) as websocket:
+            request_id = 1
+            payload: dict[str, Any] = {"id": request_id, "method": method}
+            if params is not None:
+                payload["params"] = params
+            await websocket.send(json.dumps(payload, separators=(",", ":")))
+            while True:
+                raw = await asyncio.wait_for(websocket.recv(), timeout=self.timeout_seconds)
+                message = json.loads(raw)
+                if message.get("id") != request_id:
+                    continue
+                if message.get("error"):
+                    raise OpenBrowserAdapterError(
+                        "openbrowser_cdp_rpc_error:" + str(message["error"])[:1000]
+                    )
+                result = message.get("result") or {}
+                return dict(result) if isinstance(result, dict) else {}
+
+    async def state(self, max_elements: int) -> dict[str, Any]:
+        page = await self._page()
+        expression = """(() => {
+const visible = (el) => {
+  const r = el.getBoundingClientRect();
+  const s = getComputedStyle(el);
+  return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+};
+const nodes = [...document.querySelectorAll('a,button,input,textarea,select,[role="button"],[tabindex]')]
+  .filter(visible)
+  .slice(0, MAX_ELEMENTS)
+  .map((el, i) => {
+    const r = el.getBoundingClientRect();
+    return {
+      index: i + 1,
+      tag: (el.tagName || '').toLowerCase(),
+      text: ((el.getAttribute('type') || '').toLowerCase() === 'password'\n        ? (el.value ? '[REDACTED]' : (el.getAttribute('aria-label') || ''))\n        : (el.innerText || el.value || el.getAttribute('aria-label') || '') + '').trim().slice(0, 500),
+      attributes: {
+        id: el.id || null,
+        role: el.getAttribute('role'),
+        name: el.getAttribute('name'),
+        type: el.getAttribute('type'),
+      },
+      rect: {x: r.x, y: r.y, width: r.width, height: r.height},
+    };
+  });
+return {
+  url: location.href,
+  title: document.title,
+  viewport: {width: innerWidth, height: innerHeight, devicePixelRatio},
+  elements: nodes,
+};
+})()""".replace("MAX_ELEMENTS", str(int(max_elements)))
+        result = await self._rpc(
+            str(page["webSocketDebuggerUrl"]),
+            "Runtime.evaluate",
+            {"expression": expression, "returnByValue": True, "awaitPromise": True},
+        )
+        payload = ((result.get("result") or {}).get("value") or {})
+        if not isinstance(payload, dict):
+            raise OpenBrowserAdapterError("openbrowser_cdp_state_invalid")
+        tabs = [
+            {
+                "tab_id": str(item.get("id") or "")[-4:],
+                "url": item.get("url"),
+                "title": item.get("title"),
+            }
+            for item in await self._targets()
+            if str(item.get("type") or "") == "page"
+        ]
+        payload["tabs"] = tabs
+        payload["transport"] = "existing_hirda_cdp"
+        payload["cdp_port"] = self.port
+        return self._result(payload)
+
+    async def navigate(self, url: str, *, new_tab: bool) -> dict[str, Any]:
+        if new_tab:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                response = await client.put(
+                    f"http://127.0.0.1:{self.port}/json/new?{quote(url, safe='')}"
+                )
+                response.raise_for_status()
+                page = response.json()
+            return self._result(
+                {
+                    "ok": True,
+                    "url": page.get("url", url) if isinstance(page, dict) else url,
+                    "title": page.get("title") if isinstance(page, dict) else None,
+                    "transport": "existing_hirda_cdp",
+                }
+            )
+        page = await self._page()
+        await self._rpc(
+            str(page["webSocketDebuggerUrl"]),
+            "Page.navigate",
+            {"url": url},
+        )
+        return self._result(
+            {"ok": True, "url": url, "transport": "existing_hirda_cdp"}
+        )
+
+    async def click_xy(
+        self,
+        x: float,
+        y: float,
+        *,
+        button: str,
+        click_count: int,
+    ) -> dict[str, Any]:
+        page = await self._page()
+        websocket_url = str(page["webSocketDebuggerUrl"])
+        for event_type in ("mouseMoved", "mousePressed", "mouseReleased"):
+            params: dict[str, Any] = {
+                "type": event_type,
+                "x": float(x),
+                "y": float(y),
+                "button": "none" if event_type == "mouseMoved" else button,
+                "clickCount": int(click_count),
+            }
+            await self._rpc(websocket_url, "Input.dispatchMouseEvent", params)
+        return self._result(
+            {
+                "ok": True,
+                "action": "click_xy",
+                "x": float(x),
+                "y": float(y),
+                "button": button,
+                "click_count": int(click_count),
+                "transport": "existing_hirda_cdp",
+            }
+        )
+
+    async def input_text(
+        self,
+        index: int,
+        text: str,
+        *,
+        clear: bool,
+    ) -> dict[str, Any]:
+        if not 1 <= int(index) <= 200:
+            raise OpenBrowserAdapterError("openbrowser_index_invalid")
+        value = str(text)
+        if len(value) > 20000:
+            raise OpenBrowserAdapterError("openbrowser_input_too_long")
+
+        page = await self._page()
+        websocket_url = str(page["webSocketDebuggerUrl"])
+        expression = """(() => {
+const visible = (el) => {
+  const r = el.getBoundingClientRect();
+  const s = getComputedStyle(el);
+  return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+};
+const nodes = [...document.querySelectorAll('a,button,input,textarea,select,[role="button"],[tabindex]')]
+  .filter(visible);
+const el = nodes[INDEX - 1];
+if (!el) return {ok:false};
+el.focus();
+return {
+  ok:true,
+  tag:(el.tagName || '').toLowerCase(),
+  type:(el.getAttribute('type') || '').toLowerCase(),
+};
+})()""".replace("INDEX", str(int(index)))
+        focused = await self._rpc(
+            websocket_url,
+            "Runtime.evaluate",
+            {"expression": expression, "returnByValue": True, "awaitPromise": True},
+        )
+        focus_payload = ((focused.get("result") or {}).get("value") or {})
+        if not isinstance(focus_payload, dict) or not focus_payload.get("ok"):
+            raise OpenBrowserAdapterError("openbrowser_input_target_missing")
+
+        if clear:
+            key_events = [
+                ("keyDown", "Control", "ControlLeft", 17, 2),
+                ("keyDown", "a", "KeyA", 65, 2),
+                ("keyUp", "a", "KeyA", 65, 2),
+                ("keyUp", "Control", "ControlLeft", 17, 0),
+                ("keyDown", "Backspace", "Backspace", 8, 0),
+                ("keyUp", "Backspace", "Backspace", 8, 0),
+            ]
+            for event_type, key, code, vk, modifiers in key_events:
+                await self._rpc(
+                    websocket_url,
+                    "Input.dispatchKeyEvent",
+                    {
+                        "type": event_type,
+                        "key": key,
+                        "code": code,
+                        "windowsVirtualKeyCode": vk,
+                        "nativeVirtualKeyCode": vk,
+                        "modifiers": modifiers,
+                    },
+                )
+
+        await self._rpc(
+            websocket_url,
+            "Input.insertText",
+            {"text": value},
+        )
+        return self._result(
+            {
+                "ok": True,
+                "action": "input_text",
+                "index": int(index),
+                "transport": "existing_hirda_cdp",
+                "sensitive": str(focus_payload.get("type") or "") == "password",
+            }
+        )
+
 class OpenBrowserIntegration:
     def __init__(self) -> None:
         self.version = str(
@@ -454,6 +734,7 @@ class OpenBrowserIntegration:
         ).strip()
         self.profile_root = Path(root_value).expanduser().resolve(strict=False)
         self._clients: dict[str, _OpenBrowserSessionClient] = {}
+        self._attached_cdp: dict[str, _ExistingCDPClient] = {}
         self._clients_lock = asyncio.Lock()
         self.manifest = IntegrationManifest.from_mapping(
             {
@@ -650,6 +931,23 @@ print(json.dumps({{
                 f"await click({index})\n"
                 f"print(json.dumps({{'ok': True, 'action': 'click', 'index': {index}}}))"
             )
+        if name == "click_xy":
+            x = arguments.get("x")
+            y = arguments.get("y")
+            if isinstance(x, bool) or not isinstance(x, (int, float)) or not 0 <= float(x) <= 10000:
+                raise OpenBrowserAdapterError("openbrowser_x_invalid")
+            if isinstance(y, bool) or not isinstance(y, (int, float)) or not 0 <= float(y) <= 10000:
+                raise OpenBrowserAdapterError("openbrowser_y_invalid")
+            button = str(arguments.get("button") or "left")
+            if button not in {"left", "right", "middle"}:
+                raise OpenBrowserAdapterError("openbrowser_button_invalid")
+            click_count = arguments.get("click_count", 1)
+            if isinstance(click_count, bool) or not isinstance(click_count, int) or not 1 <= click_count <= 3:
+                raise OpenBrowserAdapterError("openbrowser_click_count_invalid")
+            return (
+                f"await click_xy({float(x)!r}, {float(y)!r}, button={button!r}, click_count={click_count!r})\n"
+                "print(json.dumps({'ok': True, 'action': 'click_xy'}))"
+            )
         if name == "input_text":
             index = self._positive_index(arguments)
             text_value = str(arguments.get("text") or "")
@@ -736,6 +1034,81 @@ print(json.dumps({{
             raise OpenBrowserAdapterError(
                 f"openbrowser_tool_not_exposed:{tool_name}"
             )
+        session_id = str(context.get("managed_session_id") or "").strip()
+        if not session_id:
+            raise OpenBrowserAdapterError("openbrowser_session_context_missing")
+
+        if tool_name == "attach_session":
+            raw_port = context.get("cdp_port")
+            if isinstance(raw_port, bool) or not isinstance(raw_port, int) or not 1 <= raw_port <= 65535:
+                raise OpenBrowserAdapterError("openbrowser_existing_cdp_unavailable")
+            client = _ExistingCDPClient(
+                raw_port,
+                timeout_seconds=self.timeout_seconds,
+            )
+            # Verify the CDP endpoint before remembering the attachment.
+            await client.state(1)
+            self._attached_cdp[session_id] = client
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "ok": True,
+                                "attached": True,
+                                "managed_session_id": session_id,
+                                "transport": "existing_hirda_cdp",
+                            },
+                            separators=(",", ":"),
+                        ),
+                    }
+                ],
+                "isError": False,
+            }
+
+        attached = self._attached_cdp.get(session_id)
+        if attached is not None:
+            if tool_name == "state":
+                raw_max = arguments.get("max_elements", 80)
+                if isinstance(raw_max, bool) or not isinstance(raw_max, int):
+                    raise OpenBrowserAdapterError("openbrowser_max_elements_invalid")
+                return await attached.state(max(1, min(raw_max, 200)))
+            if tool_name == "navigate":
+                return await attached.navigate(
+                    self._url(arguments),
+                    new_tab=bool(arguments.get("new_tab", False)),
+                )
+            if tool_name == "click_xy":
+                x = arguments.get("x")
+                y = arguments.get("y")
+                if isinstance(x, bool) or not isinstance(x, (int, float)) or not 0 <= float(x) <= 10000:
+                    raise OpenBrowserAdapterError("openbrowser_x_invalid")
+                if isinstance(y, bool) or not isinstance(y, (int, float)) or not 0 <= float(y) <= 10000:
+                    raise OpenBrowserAdapterError("openbrowser_y_invalid")
+                button = str(arguments.get("button") or "left")
+                if button not in {"left", "right", "middle"}:
+                    raise OpenBrowserAdapterError("openbrowser_button_invalid")
+                click_count = arguments.get("click_count", 1)
+                if isinstance(click_count, bool) or not isinstance(click_count, int) or not 1 <= click_count <= 3:
+                    raise OpenBrowserAdapterError("openbrowser_click_count_invalid")
+                return await attached.click_xy(
+                    float(x),
+                    float(y),
+                    button=button,
+                    click_count=click_count,
+                )
+            if tool_name == "input_text":
+                index = self._positive_index(arguments)
+                text_value = str(arguments.get("text") or "")
+                if len(text_value) > 20000:
+                    raise OpenBrowserAdapterError("openbrowser_input_too_long")
+                return await attached.input_text(
+                    index,
+                    text_value,
+                    clear=bool(arguments.get("clear", True)),
+                )
+
         code = self._build_code(tool_name, dict(arguments or {}))
         client = await self._client_for(context)
         return await client.execute_code(code)

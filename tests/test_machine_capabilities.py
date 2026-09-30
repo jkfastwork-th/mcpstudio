@@ -221,6 +221,41 @@ async def test_router_uses_remote_agent_for_remote_machine(tmp_path: Path, monke
 
 
 @pytest.mark.asyncio
+async def test_remote_windows_start_process_defaults_to_cmd_shell(tmp_path: Path, monkeypatch):
+    registry = MachineRegistry(studio(machine_config()), base_dir=tmp_path)
+    integrations = FakeIntegrations()
+    router = MachineCapabilityRouter(registry, integrations, FakeComputer())
+    calls = []
+
+    async def remote_call(machine, **kwargs):
+        calls.append((machine.machine_id, kwargs))
+        return {"content": [{"type": "text", "text": "REMOTE"}]}
+
+    monkeypatch.setattr(registry, "remote_call", remote_call)
+    monkeypatch.setattr(
+        integrations,
+        "backend_route",
+        lambda name: ("desktop-commander", "start_process")
+        if name == "hirda__desktop_commander__start_process"
+        else None,
+    )
+    await router.call_backend_tool(
+        "hirda__desktop_commander__start_process",
+        {"command": "echo hello"},
+        context={
+            "machine_id": "JKFASTDEV",
+            "managed_session_id": "ms-2",
+            "workspace_key": "mcp-studio",
+            "project_path": "/home/alfred/mcp-studio",
+            "policy": {"scope": "workspace"},
+        },
+    )
+
+    assert calls[0][1]["tool_name"] == "start_process"
+    assert calls[0][1]["arguments"]["shell"] == "cmd.exe"
+
+
+@pytest.mark.asyncio
 async def test_remote_machine_cannot_fall_through_to_local_computer_use(tmp_path: Path):
     registry = MachineRegistry(studio(machine_config()), base_dir=tmp_path)
     router = MachineCapabilityRouter(registry, FakeIntegrations(), FakeComputer())
@@ -264,6 +299,42 @@ async def test_remote_computer_descriptor_is_machine_bound_and_hides_upstream(tm
     assert calls == [
         ("JKFASTDEV", "ms-remote-gui"),
         ("JKFASTDEV", "ms-remote-gui"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_remote_monitor_selection_is_machine_bound(tmp_path: Path, monkeypatch):
+    registry = MachineRegistry(studio(machine_config_with_remote_computer()), base_dir=tmp_path)
+    router = MachineCapabilityRouter(registry, FakeIntegrations(), FakeComputer())
+    calls = []
+
+    async def remote_monitors(machine):
+        calls.append(("status", machine.machine_id))
+        return {
+            "ok": True,
+            "mode": "active",
+            "selected": {"index": 1},
+            "monitors": [{"index": 1}, {"index": 2}],
+        }
+
+    async def set_monitor(machine, *, mode):
+        calls.append(("select", machine.machine_id, mode))
+        return {"ok": True, "mode": mode}
+
+    monkeypatch.setattr(registry, "remote_computer_monitors", remote_monitors)
+    monkeypatch.setattr(registry, "set_remote_computer_monitor", set_monitor)
+
+    session = {"metadata": {"machine_id": "JKFASTDEV"}}
+    status = await router.computer_monitors(session)
+    selected = await router.select_computer_monitor(session, "monitor:2")
+
+    assert status["machine"]["id"] == "JKFASTDEV"
+    assert status["mode"] == "active"
+    assert selected["machine"]["id"] == "JKFASTDEV"
+    assert selected["mode"] == "monitor:2"
+    assert calls == [
+        ("status", "JKFASTDEV"),
+        ("select", "JKFASTDEV", "monitor:2"),
     ]
 
 

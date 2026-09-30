@@ -1,7 +1,7 @@
 schema: hirda-plugin-v1
 id: openbrowser
 name: OpenBrowser
-version: 0.1.2
+version: 0.1.3
 adapter:
   runtime: python
   entry: adapter.py
@@ -12,9 +12,11 @@ capabilities:
   - browser_dom
   - web_interaction
 tools:
+  - attach_session
   - navigate
   - state
   - click
+  - click_xy
   - input_text
   - select_dropdown
   - scroll
@@ -24,9 +26,11 @@ tools:
   - close_tab
   - send_keys
 permissions:
+  attach_session: execute
   navigate: execute
   state: read
   click: execute
+  click_xy: execute
   input_text: write
   select_dropdown: write
   scroll: execute

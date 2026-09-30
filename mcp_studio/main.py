@@ -61,6 +61,8 @@ from .device_broker import DeviceBroker, DeviceBrokerError
 from .machine_router import MachineCapabilityRouter
 from .reflex_metrics import ReflexMetrics
 from .action_adapter import evaluate_action_envelope
+from .visual_reflex import VisualReflexError, evaluate_visual_reflex
+from .target_collector import TargetCollectorError, VisualTargetCollector
 from .action_registry import ActionProviderRegistryError, build_action_provider_registry
 from .cognitive_router import CognitiveRouter, CognitiveRouterError
 from .hermes_groups import HermesGroupClient
@@ -148,6 +150,7 @@ machine_enrollment = MachineEnrollmentManager(
     settings.studio, machine_registry, base_dir=settings.config_path.parent
 )
 machine_router = MachineCapabilityRouter(machine_registry, integration_manager, computer)
+visual_target_collector = VisualTargetCollector(machine_registry)
 gateway_sessions = GatewaySessionManager(
     settings,
     db,
@@ -664,6 +667,71 @@ async def integration_reconcile(integration_id: str):
         raise HTTPException(status_code=404, detail="Unknown integration") from exc
 
 
+def _require_loopback_control(request: Request) -> None:
+    host = str(request.client.host if request.client else "").strip()
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Not Found") from exc
+    if not address.is_loopback:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+@app.post("/api/openbrowser/local-control")
+async def openbrowser_local_control(request: Request, payload: dict[str, Any]):
+    """Loopback-only HIRDA gate for bounded existing-CDP browser control.
+
+    This endpoint intentionally exposes only the small OpenBrowser subset needed
+    by local control-plane services. Request bodies are never persisted or
+    audited, which allows sensitive input_text values to remain ephemeral.
+    """
+    _require_loopback_control(request)
+    owner_session = str(request.headers.get("X-HIRDA-Owner-Session") or "").strip()
+    if not oauth.verify_owner_session(owner_session):
+        raise HTTPException(status_code=403, detail="owner_session_required")
+    action = str(payload.get("action") or "").strip()
+    if action not in {"attach_session", "state", "navigate", "click_xy", "input_text"}:
+        raise HTTPException(status_code=400, detail="unsupported_openbrowser_action")
+
+    managed_session_id = str(payload.get("managed_session_id") or "").strip()
+    if not managed_session_id or len(managed_session_id) > 160:
+        raise HTTPException(status_code=400, detail="managed_session_id_required")
+
+    arguments = payload.get("arguments")
+    if not isinstance(arguments, dict):
+        arguments = {}
+
+    context: dict[str, Any] = {"managed_session_id": managed_session_id}
+    if action == "attach_session":
+        raw_port = payload.get("cdp_port")
+        if isinstance(raw_port, bool) or not isinstance(raw_port, int) or not 1 <= raw_port <= 65535:
+            raise HTTPException(status_code=400, detail="valid_cdp_port_required")
+        context["cdp_port"] = raw_port
+
+    call_arguments = dict(arguments)
+    try:
+        result = await integration_manager.call_backend_tool(
+            f"hirda__openbrowser__{action}",
+            call_arguments,
+            context=context,
+        )
+        return JSONResponse(
+            result,
+            headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+        )
+    except (IntegrationError, RuntimeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"openbrowser_control_failed:{type(exc).__name__}",
+        ) from exc
+    finally:
+        if action == "input_text":
+            call_arguments["text"] = ""
+            if isinstance(arguments, dict) and "text" in arguments:
+                arguments["text"] = ""
+            payload["arguments"] = {}
+
+
 def _pstack_activity_adapter():
     try:
         registration = integration_manager.get("pstack")
@@ -1036,6 +1104,53 @@ async def action_adapter_evaluate(provider_id: str):
     }
 
 
+@app.post("/api/visual-reflex/evaluate")
+async def visual_reflex_evaluate(request: Request):
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Request body must be valid JSON") from exc
+    try:
+        return await evaluate_visual_reflex(settings.studio, payload)
+    except VisualReflexError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/visual-reflex/collect-evaluate")
+async def visual_reflex_collect_evaluate(request: Request):
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Request body must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+
+    try:
+        max_targets = int(payload.get("max_targets", 32))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="max_targets must be an integer") from exc
+
+    try:
+        collection = await visual_target_collector.collect(
+            machine_id=str(payload.get("machine_id") or ""),
+            request_id=str(payload.get("request_id") or ""),
+            goal=str(payload.get("goal") or ""),
+            workspace_key=str(payload.get("workspace_key") or "mcp-studio"),
+            session_id=str(
+                payload.get("session_id") or "visual-reflex-target-collector"
+            ),
+            max_targets=max_targets,
+        )
+        result = await evaluate_visual_reflex(settings.studio, collection.request)
+    except (TargetCollectorError, VisualReflexError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        **result,
+        "collector": collection.summary(),
+    }
+
+
 @app.get("/api/cognition/status")
 async def cognitive_router_status():
     runtime_backoff = await cognitive_router.runtime_backoff_status()
@@ -1364,6 +1479,107 @@ def _loopback_request(request: Request) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+@app.post("/api/internal/video-forge/owner-session")
+async def video_forge_owner_session_api(request: Request, payload: dict[str, Any]):
+    if not _loopback_request(request):
+        raise HTTPException(status_code=404, detail="not_found")
+    owner_token = payload.get("owner_token")
+    if not isinstance(owner_token, str) or not owner_token:
+        raise HTTPException(status_code=403, detail="Owner approval is required")
+    approved = oauth.verify_owner_token(owner_token)
+    if not approved:
+        approved = await oauth.consume_owner_approval_token(
+            owner_token,
+            purpose="owner_approval",
+        )
+    if not approved:
+        raise HTTPException(status_code=403, detail="Owner approval is required")
+    session = oauth.issue_owner_session()
+    await db.add_audit(
+        "video_forge.owner_session.issued",
+        actor="video-forge/http",
+        outcome="success",
+        data={"raw_owner_token_persisted": False},
+    )
+    return JSONResponse(
+        {
+            "owner_session": session,
+            "expires_in": int(settings.studio.oauth_owner_session_ttl_seconds),
+        },
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+    )
+
+
+@app.post("/api/internal/video-forge/profile-approval")
+async def video_forge_profile_approval_api(
+    request: Request,
+    payload: dict[str, Any],
+):
+    if not _loopback_request(request):
+        raise HTTPException(status_code=404, detail="not_found")
+    owner_session = str(
+        request.headers.get("X-HIRDA-Owner-Session") or ""
+    ).strip()
+    if not oauth.verify_owner_session(owner_session):
+        raise HTTPException(status_code=403, detail="owner_session_required")
+
+    profile = str(payload.get("profile") or "").strip()
+    allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+    if (
+        not profile
+        or len(profile) > 64
+        or any(char not in allowed for char in profile)
+    ):
+        raise HTTPException(status_code=400, detail="invalid_profile")
+
+    pool_id = str(payload.get("pool_id") or "nova-motion").strip()
+    if not pool_id or len(pool_id) > 96:
+        raise HTTPException(status_code=400, detail="invalid_pool_id")
+
+    raw_models = payload.get("allowed_models")
+    if not isinstance(raw_models, list):
+        raise HTTPException(status_code=400, detail="allowed_models_required")
+    models = list(
+        dict.fromkeys(
+            str(value).strip()
+            for value in raw_models
+            if str(value).strip()
+        )
+    )
+    if not models or len(models) > 32:
+        raise HTTPException(status_code=400, detail="invalid_allowed_models")
+
+    approval = await db.approve_video_profile(
+        profile,
+        pool_id=pool_id,
+        allowed_models=models,
+        approved_by="owner/session",
+    )
+    await db.add_audit(
+        "video_forge.profile.approved",
+        actor="owner/session",
+        target_type="video_profile",
+        target_id=profile,
+        outcome="success",
+        data={
+            "pool_id": pool_id,
+            "allowed_models": models,
+            "authority": "HIRDA",
+        },
+    )
+    return JSONResponse(
+        {
+            "approved": True,
+            "authority": "HIRDA",
+            "profile": profile,
+            "pool_id": pool_id,
+            "allowed_models": models,
+            "approved_at": approval.get("approved_at"),
+        },
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+    )
 
 
 @app.post("/api/world-authoring/preview")
@@ -3149,6 +3365,128 @@ async def computer_descriptor(managed_session_id: str):
         session = await managed_sessions.get_session(managed_session_id)
         _require_machine_permission(session, "read")
         return await machine_router.computer_descriptor(managed_session_id, session)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown managed session")
+    except (RuntimeError, ValueError, OSError, MachineRegistryError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/api/computer/monitors/{managed_session_id}")
+async def computer_monitors(managed_session_id: str):
+    try:
+        session = await managed_sessions.get_session(managed_session_id)
+        _require_machine_permission(session, "read")
+        return await machine_router.computer_monitors(session)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown managed session")
+    except (RuntimeError, ValueError, OSError, MachineRegistryError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.post("/api/computer/monitor/{managed_session_id}")
+async def computer_monitor_select(managed_session_id: str, request: Request):
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="Request body must be an object")
+        mode = str(body.get("mode") or "").strip().lower()
+        valid = mode in {"active", "primary", "follow-cursor"}
+        if mode.startswith("monitor:"):
+            suffix = mode.split(":", 1)[1]
+            valid = suffix.isdigit() and int(suffix) >= 1
+        if not valid:
+            raise HTTPException(
+                status_code=400,
+                detail="mode must be active, primary, follow-cursor, or monitor:N",
+            )
+        session = await managed_sessions.get_session(managed_session_id)
+        _require_machine_permission(session, "execute")
+        return await machine_router.select_computer_monitor(session, mode)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown managed session")
+    except (RuntimeError, ValueError, OSError, MachineRegistryError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/api/computer/browser/profiles/{managed_session_id}")
+async def computer_browser_profiles(managed_session_id: str):
+    try:
+        session = await managed_sessions.get_session(managed_session_id)
+        _require_machine_permission(session, "read")
+        return await machine_router.browser_profiles(session)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown managed session")
+    except (RuntimeError, ValueError, OSError, MachineRegistryError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.post("/api/computer/browser/profile-alias/{managed_session_id}")
+async def computer_browser_profile_alias(managed_session_id: str, request: Request):
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="Request body must be an object")
+        alias = str(body.get("alias") or "").strip()
+        profile = str(body.get("profile") or "").strip()
+        if not alias or not profile:
+            raise HTTPException(status_code=400, detail="alias and profile are required")
+        session = await managed_sessions.get_session(managed_session_id)
+        _require_machine_permission(session, "write")
+        return await machine_router.set_browser_profile_alias(
+            session,
+            alias=alias,
+            profile=profile,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown managed session")
+    except (RuntimeError, ValueError, OSError, MachineRegistryError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.post("/api/computer/browser/profile-alias/rename/{managed_session_id}")
+async def computer_browser_profile_alias_rename(managed_session_id: str, request: Request):
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="Request body must be an object")
+        alias = str(body.get("alias") or "").strip()
+        new_alias = str(body.get("new_alias") or "").strip()
+        if not alias or not new_alias:
+            raise HTTPException(status_code=400, detail="alias and new_alias are required")
+        session = await managed_sessions.get_session(managed_session_id)
+        _require_machine_permission(session, "write")
+        return await machine_router.rename_browser_profile_alias(
+            session,
+            alias=alias,
+            new_alias=new_alias,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown managed session")
+    except (RuntimeError, ValueError, OSError, MachineRegistryError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.post("/api/computer/browser/launch/{managed_session_id}")
+async def computer_browser_launch(managed_session_id: str, request: Request):
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="Request body must be an object")
+        profile = str(body.get("profile") or "").strip()
+        if not profile:
+            raise HTTPException(status_code=400, detail="profile is required")
+        raw_url = body.get("url")
+        url = str(raw_url).strip() if raw_url is not None else None
+        raw_monitor = body.get("monitor")
+        monitor = str(raw_monitor).strip().lower() if raw_monitor is not None else None
+        session = await managed_sessions.get_session(managed_session_id)
+        _require_machine_permission(session, "execute")
+        return await machine_router.launch_browser_profile(
+            session,
+            profile=profile,
+            url=url,
+            monitor=monitor,
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="Unknown managed session")
     except (RuntimeError, ValueError, OSError, MachineRegistryError) as exc:

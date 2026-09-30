@@ -117,8 +117,8 @@ async def test_h3_legacy_events_are_backfilled_into_canonical_stream(tmp_path: P
     await db.init()
 
     schema = await db.schema_status()
-    assert schema["current_version"] == 10
-    assert schema["expected_version"] == 10
+    assert schema["current_version"] == 12
+    assert schema["expected_version"] == 12
 
     events = await db.list_events(stream_id="capsule:C-LEGACY", ascending=True)
     assert len(events) == 1

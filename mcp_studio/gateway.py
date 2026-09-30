@@ -149,13 +149,19 @@ class GatewaySessionManager:
 
         explicit = (request.headers.get("x-mcp-studio-client-id") or "").strip()
         openai_session = (request.headers.get("x-openai-session") or "").strip()
+        openai_subject = (request.headers.get("x-openai-subject") or "").strip()
+        oauth_identity_material = None
+        if oauth_claims is not None:
+            oauth_identity_material = oauth_claims.client_id
+            if openai_subject:
+                oauth_identity_material += "\0subject:" + openai_subject
         if explicit:
             client_id = explicit[:240]
             identity_scope = "explicit"
             identity_source = "x-mcp-studio-client-id"
         elif openai_session:
-            if oauth_claims is not None:
-                connector_namespace = f"oauth:{oauth_claims.client_id}"
+            if oauth_identity_material is not None:
+                connector_namespace = "oauth:" + oauth_identity_material
             elif token:
                 connector_namespace = "bearer:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
             else:
@@ -167,10 +173,12 @@ class GatewaySessionManager:
             client_id = "conversation-" + digest
             identity_scope = "conversation"
             identity_source = "x-openai-session-fingerprint"
-        elif oauth_claims is not None:
-            client_id = "oauth-" + hashlib.sha256(oauth_claims.client_id.encode("utf-8")).hexdigest()[:24]
+        elif oauth_identity_material is not None:
+            client_id = "oauth-" + hashlib.sha256(oauth_identity_material.encode("utf-8")).hexdigest()[:24]
             identity_scope = "connector"
-            identity_source = "oauth-client-id"
+            identity_source = (
+                "oauth-client-id+x-openai-subject" if openai_subject else "oauth-client-id"
+            )
         elif token:
             client_id = "bearer-" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:24]
             identity_scope = "connector"
@@ -180,8 +188,95 @@ class GatewaySessionManager:
             client_id = "anon-" + hashlib.sha256(ua.encode("utf-8")).hexdigest()[:24]
             identity_scope = "anonymous"
             identity_source = "user-agent-fingerprint"
+        if oauth_identity_material is not None:
+            request.state.connector_principal_id = "oauth-" + hashlib.sha256(
+                oauth_identity_material.encode("utf-8")
+            ).hexdigest()[:24]
+        elif static_ok and token:
+            request.state.connector_principal_id = "bearer-" + hashlib.sha256(
+                token.encode("utf-8")
+            ).hexdigest()[:24]
+        else:
+            request.state.connector_principal_id = None
         client_type = (request.headers.get("x-mcp-studio-client-type") or "mcp-http").strip()[:80] or "mcp-http"
         return token, client_id, client_type, identity_scope, identity_source
+
+
+    async def connector_principal_for_gateway(
+        self, gateway_session_id: str
+    ) -> str | None:
+        getter = getattr(self.db, "get_gateway_session", None)
+        if getter is None:
+            return None
+        try:
+            gateway = await getter(gateway_session_id)
+        except KeyError:
+            return None
+        metadata = gateway.get("metadata") if isinstance(gateway.get("metadata"), dict) else {}
+        principal = str(metadata.get("connector_principal_id") or "").strip()
+        return principal or None
+
+    async def _adopt_reclaimed_logical_pin(
+        self,
+        studio_session_id: str,
+        principal_id: str | None,
+        *,
+        strict: bool = False,
+    ) -> dict[str, Any]:
+        """Adopt a legacy managed pin without starting the managed runtime."""
+        logical = await self.db.get_session(studio_session_id)
+        desired = str(logical.get("managed_session_id") or "").strip()
+        principal = str(principal_id or "").strip()
+        if (
+            not desired
+            or not principal
+            or not (self.managed_sessions and self.managed_sessions.enabled)
+        ):
+            return logical
+        try:
+            adopted = await self.db.claim_reclaimed_managed_session_for_principal(
+                studio_session_id,
+                desired,
+                principal,
+            )
+        except (PermissionError, KeyError) as exc:
+            await self.db.add_event(
+                "managed.legacy_pin_adoption_denied",
+                f"Legacy managed pin {desired} could not be adopted.",
+                severity="warning",
+                data={
+                    "studio_session_id": studio_session_id,
+                    "managed_session_id": desired,
+                    "principal_id": principal,
+                    "error": str(exc)[:240],
+                },
+            )
+            if strict:
+                raise ManagedSessionError(
+                    "legacy managed session is not assigned to this connector"
+                ) from exc
+            return logical
+
+        if adopted is None:
+            cleared = await self.db.clear_logical_session_managed_pin(
+                studio_session_id,
+                expected_managed_session_id=desired,
+            )
+            if cleared:
+                await self.db.add_event(
+                    "managed.stale_logical_pin_cleared",
+                    f"Cleared missing managed session pin {desired}.",
+                    severity="warning",
+                    data={
+                        "studio_session_id": studio_session_id,
+                        "managed_session_id": desired,
+                        "principal_id": principal,
+                    },
+                )
+                return await self.db.get_session(studio_session_id)
+            return logical
+
+        return await self.db.get_session(studio_session_id)
 
     def client_observation(
         self,
@@ -1025,18 +1120,30 @@ class GatewaySessionManager:
             "result": {"tools": self._all_local_tools()},
         }
 
-    async def _resolve_managed_session(self, value: str) -> dict[str, Any]:
+    async def _resolve_managed_session(
+        self, value: str, principal_id: str | None = None
+    ) -> dict[str, Any]:
         if not self.managed_sessions:
             raise ManagedSessionError("managed sessions are unavailable")
         value = str(value or "").strip()
         try:
+            if principal_id:
+                return await self.managed_sessions.get_session(value, principal_id=principal_id)
             return await self.managed_sessions.get_session(value)
         except KeyError:
-            matches = [x for x in await self.managed_sessions.list_sessions() if x.get("name") == value]
+            matches = [
+                x for x in (
+                    await self.managed_sessions.list_sessions(principal_id=principal_id)
+                    if principal_id else await self.managed_sessions.list_sessions()
+                )
+                if x.get("name") == value
+            ]
             if len(matches) == 1:
                 return matches[0]
             if len(matches) > 1:
-                raise ManagedSessionConflict(f"managed session name is ambiguous: {value}")
+                raise ManagedSessionConflict(
+                    f"managed session name is ambiguous: {value}"
+                )
             raise ManagedSessionError(f"unknown managed session: {value}")
 
     async def resolve_session_natural(self, gateway_session_id: str, text: str) -> dict[str, Any]:
@@ -1059,7 +1166,11 @@ class GatewaySessionManager:
         if not query:
             raise ManagedSessionError("session request is required")
 
-        sessions = await self.managed_sessions.list_sessions()
+        principal_id = await self.connector_principal_for_gateway(gateway_session_id)
+        sessions = (
+            await self.managed_sessions.list_sessions(principal_id=principal_id)
+            if principal_id else await self.managed_sessions.list_sessions()
+        )
         if not sessions:
             raise ManagedSessionError("no managed sessions are available")
 
@@ -1400,11 +1511,21 @@ class GatewaySessionManager:
         except Exception:
             return False
 
-    async def bind_managed_session(self, gateway_session_id: str, managed_session_id: str, *, actor: str = "mcp") -> dict[str, Any]:
+    async def bind_managed_session(
+        self, gateway_session_id: str, managed_session_id: str, *,
+        actor: str = "mcp"
+    ) -> dict[str, Any]:
         if not (self.managed_sessions and self.managed_sessions.enabled):
             raise ManagedSessionError("managed sessions are disabled")
         gateway = await self.db.get_gateway_session(gateway_session_id)
-        managed = await self.managed_sessions.ensure_running(managed_session_id)
+        principal_id = await self.connector_principal_for_gateway(gateway_session_id)
+        if principal_id:
+            managed = await self.managed_sessions.get_session(
+                managed_session_id, principal_id=principal_id
+            )
+            managed = await self.managed_sessions.ensure_running(managed["id"])
+        else:
+            managed = await self.managed_sessions.ensure_running(managed_session_id)
         endpoint = managed.get("endpoint") or f"http://127.0.0.1:{managed['port']}/mcp"
         new_upstream_id = await self._open_upstream_session(gateway, endpoint)
         old_url = gateway.get("upstream_url") or next(
@@ -1412,19 +1533,56 @@ class GatewaySessionManager:
         )
         old_id = gateway.get("upstream_session_id")
         updated = await self.db.bind_gateway_managed_session(
-            gateway_session_id, managed_session_id=managed["id"], upstream_url=endpoint,
+            gateway_session_id,
+            managed_session_id=managed["id"],
+            upstream_url=endpoint,
             upstream_session_id=new_upstream_id,
         )
         try:
             managed = await self.db.touch_managed_session(managed["id"])
         except KeyError:
-            # Compatibility for externally supplied/fake managed pools; routing
-            # remains authoritative even if lifecycle telemetry is unavailable.
             pass
+
+        # ChatGPT may create a fresh Streamable-HTTP transport for each tool
+        # call while reclaiming the same durable Studio logical session. Once
+        # the newest transport is explicitly bound to a managed runtime, older
+        # connected siblings from that same logical session are superseded.
+        # Retire only those siblings; transports owned by other logical
+        # sessions/conversations remain untouched.
+        retired_gateway_ids: list[str] = []
+        studio_session_id = str(gateway.get("studio_session_id") or "")
+        if studio_session_id:
+            for sibling in await self.db.list_gateway_sessions_for_managed_session(managed["id"]):
+                sibling_id = str(sibling.get("id") or "")
+                if (
+                    not sibling_id
+                    or sibling_id == gateway_session_id
+                    or sibling.get("status") != "connected"
+                    or str(sibling.get("studio_session_id") or "") != studio_session_id
+                ):
+                    continue
+                await self._close_upstream_session(
+                    sibling.get("upstream_url"),
+                    sibling.get("upstream_session_id"),
+                )
+                await self.db.close_gateway_session(
+                    sibling_id,
+                    error=f"superseded by gateway {gateway_session_id}",
+                )
+                retired_gateway_ids.append(sibling_id)
+
         await self._close_upstream_session(old_url, old_id)
         await self.db.add_audit(
-            "managed.gateway.attach", actor=actor, target_type="gateway_session", target_id=gateway_session_id,
-            data={"managed_session_id": managed["id"], "workspace_key": managed["workspace_key"]},
+            "managed.gateway.attach",
+            actor=actor,
+            target_type="gateway_session",
+            target_id=gateway_session_id,
+            data={
+                "managed_session_id": managed["id"],
+                "workspace_key": managed["workspace_key"],
+                "principal_id": principal_id,
+                "retired_sibling_gateway_ids": retired_gateway_ids,
+            },
         )
         return {"gateway_session": updated, "managed_session": managed}
 
@@ -1460,21 +1618,69 @@ class GatewaySessionManager:
         logical = await self.db.get_session(session["studio_session_id"])
         desired = logical.get("managed_session_id")
         current = session.get("managed_session_id")
+
+        if desired and self.managed_sessions and self.managed_sessions.enabled:
+            principal_id = await self.connector_principal_for_gateway(
+                gateway_session_id
+            )
+            if principal_id:
+                managed = await self.db.get_managed_session(str(desired))
+                workspace = await self.db.get_managed_workspace(
+                    str(managed.get("workspace_key") or "")
+                )
+                managed_owner = str(managed.get("principal_id") or "").strip()
+                workspace_owner = str(
+                    workspace.get("principal_id") or ""
+                ).strip()
+
+                if (
+                    managed_owner == principal_id
+                    and workspace_owner == principal_id
+                ):
+                    # Ownership migration is already complete. Do not re-run
+                    # legacy evidence scans on every normal tool call; the
+                    # durable owner fields are now authoritative.
+                    pass
+                elif (
+                    (managed_owner and managed_owner != principal_id)
+                    or (
+                        workspace_owner
+                        and workspace_owner != principal_id
+                    )
+                ):
+                    raise ManagedSessionError(
+                        "managed session is not assigned to this connector"
+                    )
+                else:
+                    logical = await self._adopt_reclaimed_logical_pin(
+                        session["studio_session_id"],
+                        principal_id,
+                        strict=True,
+                    )
+                    desired = logical.get("managed_session_id")
+
         if desired == current:
             return session
-        if desired and not (self.managed_sessions and self.managed_sessions.enabled):
+        if desired and not (
+            self.managed_sessions and self.managed_sessions.enabled
+        ):
             raise HTTPException(
                 status_code=503,
-                detail="Managed project pin exists but managed sessions are disabled",
+                detail=(
+                    "Managed project pin exists but managed sessions are disabled"
+                ),
             )
         if desired:
             result = await self.bind_managed_session(
-                gateway_session_id, str(desired), actor="system/reconcile"
+                gateway_session_id,
+                str(desired),
+                actor="system/reconcile",
             )
             return result["gateway_session"]
         if current:
             result = await self.detach_managed_session(
-                gateway_session_id, actor="system/reconcile"
+                gateway_session_id,
+                actor="system/reconcile",
             )
             return result["gateway_session"]
         return session
@@ -1482,12 +1688,19 @@ class GatewaySessionManager:
     async def _resolve_graft_workspace(
         self, gateway_session_id: str, args: dict[str, Any]
     ) -> str:
+        principal_id = await self.connector_principal_for_gateway(gateway_session_id)
         if args.get("workspace"):
             key = str(args.get("workspace") or "").strip()
-            await self.db.get_managed_workspace(key)
+            if principal_id:
+                await self.managed_sessions.get_workspace(key, principal_id=principal_id)
+            else:
+                await self.db.get_managed_workspace(key)
             return key
         if args.get("session"):
-            session = await self._resolve_managed_session(str(args.get("session") or ""))
+            session = await self._resolve_managed_session(
+                str(args.get("session") or ""),
+                principal_id=principal_id,
+            )
             return str(session["workspace_key"])
         gateway = await self.db.get_gateway_session(gateway_session_id)
         managed_id = gateway.get("managed_session_id")
@@ -1495,7 +1708,13 @@ class GatewaySessionManager:
             raise GraftError(
                 "Graft workspace is required when no managed session is attached"
             )
-        session = await self.managed_sessions.get_session(str(managed_id))
+        session = (
+            await self.managed_sessions.get_session(
+                str(managed_id), principal_id=principal_id
+            )
+            if principal_id
+            else await self.managed_sessions.get_session(str(managed_id))
+        )
         return str(session["workspace_key"])
 
 
@@ -1695,9 +1914,14 @@ class GatewaySessionManager:
         actor: str = "chatgpt/mcp",
     ) -> dict[str, Any]:
         gateway = await self.db.get_gateway_session(gateway_session_id)
+        principal_id = await self.connector_principal_for_gateway(gateway_session_id)
         managed_id = str(gateway.get("managed_session_id") or "").strip()
         if not managed_id:
             raise ManagedSessionError("SESSION_HANDOFF_REQUIRES_BOUND_SESSION")
+        managed = (
+            await self.managed_sessions.get_session(managed_id, principal_id=principal_id)
+            if principal_id else await self.managed_sessions.get_session(managed_id)
+        )
         clean_summary = str(summary or "").strip()
         if not clean_summary:
             raise ManagedSessionError("session handoff summary is required")
@@ -1740,7 +1964,6 @@ class GatewaySessionManager:
             )
         except ValueError as exc:
             raise ManagedSessionError(str(exc)) from exc
-        managed = await self.managed_sessions.get_session(managed_id)
         await self.db.add_audit(
             "managed.session.handoff.prepare",
             actor=actor,
@@ -1777,6 +2000,7 @@ class GatewaySessionManager:
             raise ManagedSessionError("invalid session handoff token")
         token_hash = hashlib.sha256(clean_token.encode("utf-8")).hexdigest()
         target_gateway = await self.db.get_gateway_session(gateway_session_id)
+        target_principal = await self.connector_principal_for_gateway(gateway_session_id)
         try:
             reserved = await self.db.reserve_session_handoff(
                 token_hash,
@@ -1791,6 +2015,14 @@ class GatewaySessionManager:
 
         handoff_id = str(reserved["id"])
         managed_id = str(reserved["managed_session_id"])
+        source_gateway_id = str(reserved["source_gateway_session_id"])
+        source_principal = await self.connector_principal_for_gateway(source_gateway_id)
+        if target_principal or source_principal:
+            if not target_principal or target_principal != source_principal:
+                await self.db.release_session_handoff(
+                    handoff_id, error="connector principal mismatch"
+                )
+                raise ManagedSessionError("session handoff belongs to another connector")
         previous_target_managed = str(target_gateway.get("managed_session_id") or "").strip() or None
         if previous_target_managed == managed_id:
             await self.db.release_session_handoff(
@@ -1800,7 +2032,10 @@ class GatewaySessionManager:
             raise ManagedSessionError("target gateway is already attached to the handoff session")
 
         try:
-            managed = await self.managed_sessions.get_session(managed_id)
+            managed = (
+                await self.managed_sessions.get_session(managed_id, principal_id=target_principal)
+                if target_principal else await self.managed_sessions.get_session(managed_id)
+            )
             transferred = await self.db.transfer_session_handoff_ownership(handoff_id)
         except Exception as exc:
             try:
@@ -1861,7 +2096,11 @@ class GatewaySessionManager:
         task_goal = str(claimed.get("summary") or "").strip()
         if not task_goal:
             task_goal = f"Continue engineering work in {managed.get('workspace_key') or managed.get('name') or 'workspace'}"
-        pstack_task = await self._open_pstack_gateway_task(gateway_session_id, managed_session=managed, goal=task_goal)
+        pstack_task = await self._open_pstack_gateway_task(
+            gateway_session_id,
+            managed_session=managed,
+            goal=task_goal,
+        )
         return {
             "handoff": self._public_session_handoff(claimed),
             "gateway_session": target_after,
@@ -2568,8 +2807,10 @@ class GatewaySessionManager:
     async def _handle_management_tool(self, gateway_session_id: str, name: str, args: dict[str, Any]) -> Any:
         if not self.managed_sessions:
             raise ManagedSessionError("managed sessions are unavailable")
+        principal_id = await self.connector_principal_for_gateway(gateway_session_id)
+        principal_kwargs = {"principal_id": principal_id} if principal_id else {}
         if name == "mcpstudio_list_workspaces":
-            return {"workspaces": await self.managed_sessions.list_workspaces()}
+            return {"workspaces": await self.managed_sessions.list_workspaces(**principal_kwargs)}
         if name == "mcpstudio_list_machines":
             if self.machine_router is None:
                 raise ManagedSessionError("machine capability router is unavailable")
@@ -2614,13 +2855,13 @@ class GatewaySessionManager:
                 raise ManagedSessionError("machine capability router is unavailable")
             selector = str(args.get("session") or "").strip()
             if selector:
-                target = await self._resolve_managed_session(selector)
+                target = await self._resolve_managed_session(selector, principal_id=principal_id)
             else:
                 gateway = await self.db.get_gateway_session(gateway_session_id)
                 managed_id = str(gateway.get("managed_session_id") or "")
                 if not managed_id:
                     raise ManagedSessionError("no managed session is attached")
-                target = await self.managed_sessions.get_session(managed_id)
+                target = await self.managed_sessions.get_session(managed_id, **principal_kwargs)
             return await self.machine_router.bind_session(
                 self.db, target["id"], str(args.get("machine") or ""), actor="chatgpt/mcp"
             )
@@ -2628,18 +2869,19 @@ class GatewaySessionManager:
             return {"workspace": await self.managed_sessions.register_workspace(
                 key=str(args.get("key") or ""), project_path=str(args.get("project_path") or ""),
                 name=(str(args.get("name")) if args.get("name") is not None else None), actor="chatgpt/mcp",
+                **principal_kwargs,
             )}
         if name == "mcpstudio_list_sessions":
-            return {"sessions": await self.managed_sessions.list_sessions()}
+            return {"sessions": await self.managed_sessions.list_sessions(**principal_kwargs)}
         if name == "mcpstudio_get_session":
-            return {"session": await self._resolve_managed_session(str(args.get("session") or ""))}
+            return {"session": await self._resolve_managed_session(str(args.get("session") or ""), principal_id=principal_id)}
         if name == "mcpstudio_rename_session":
-            target = await self._resolve_managed_session(str(args.get("session") or ""))
+            target = await self._resolve_managed_session(str(args.get("session") or ""), principal_id=principal_id)
             return {"session": await self.managed_sessions.rename_session(
                 target["id"], name=str(args.get("name") or ""), actor="chatgpt/mcp"
             )}
         if name == "mcpstudio_set_permissions":
-            target = await self._resolve_managed_session(str(args.get("session") or ""))
+            target = await self._resolve_managed_session(str(args.get("session") or ""), principal_id=principal_id)
             changes = {
                 key: args[key]
                 for key in ("read", "write", "execute", "destructive", "scope", "fail_closed_unknown")
@@ -2696,11 +2938,14 @@ class GatewaySessionManager:
                 except CapsuleNotFound as exc:
                     raise ManagedSessionError("capsule not found") from exc
         if name == "mcpstudio_world_authoring_audit":
+            workspace_key = str(args.get("workspace") or "").strip()
+            if principal_id:
+                await self.managed_sessions.get_workspace(workspace_key, principal_id=principal_id)
             raw_events = args.get("events")
             if not isinstance(raw_events, list):
                 raise WorldAuthoringError("events must be an array")
             return await self.world_authoring_audit(
-                workspace=str(args.get("workspace") or ""),
+                workspace=workspace_key,
                 events=[
                     dict(event) if isinstance(event, dict) else event
                     for event in raw_events
@@ -2708,6 +2953,9 @@ class GatewaySessionManager:
                 actor="chatgpt/mcp",
             )
         if name == "mcpstudio_world_authoring_preview":
+            workspace_key = str(args.get("workspace") or "").strip()
+            if principal_id:
+                await self.managed_sessions.get_workspace(workspace_key, principal_id=principal_id)
             raw_providers = args.get("providers") or []
             if not isinstance(raw_providers, list) or any(
                 not isinstance(provider, dict) for provider in raw_providers
@@ -2717,7 +2965,7 @@ class GatewaySessionManager:
             if not isinstance(proposal, dict):
                 raise WorldAuthoringError("proposal must be an object")
             return await self.world_authoring_preview(
-                workspace=str(args.get("workspace") or ""),
+                workspace=workspace_key,
                 proposal=proposal,
                 providers=[dict(provider) for provider in raw_providers],
                 actor="chatgpt/mcp",
@@ -2757,41 +3005,73 @@ class GatewaySessionManager:
             if name == "mcpstudio_graft_rearm":
                 return await self.graft.rearm(workspace_key, actor="chatgpt/mcp")
         if name == "mcpstudio_session_history":
-            target = await self._resolve_managed_session(str(args.get("session") or ""))
+            target = await self._resolve_managed_session(str(args.get("session") or ""), principal_id=principal_id)
             return await self.managed_sessions.history(target["id"])
         if name == "mcpstudio_create_session":
             created = await self.managed_sessions.create_session(
                 name=str(args.get("name") or ""), workspace_key=str(args.get("workspace") or ""), actor="chatgpt/mcp",
+                **principal_kwargs,
             )
             if args.get("machine") and self.machine_router is not None:
-                await self.machine_router.bind_session(self.db, created["id"], str(args.get("machine")), actor="chatgpt/mcp")
+                await self.machine_router.bind_session(
+                    self.db, created["id"], str(args.get("machine")), actor="chatgpt/mcp"
+                )
                 created = await self.managed_sessions.get_session(created["id"])
-            attached = None; pstack_task = None
+            attached = None
+            pstack_task = None
             if args.get("attach", True):
-                attached = await self.bind_managed_session(gateway_session_id, created["id"], actor="chatgpt/mcp")
-                task_goal = str(args.get("request") or "").strip() or f"Engineering work in {created.get('workspace_key') or created.get('name') or 'workspace'}"
-                pstack_task = await self._open_pstack_gateway_task(gateway_session_id, managed_session=attached["managed_session"], goal=task_goal)
+                attached = await self.bind_managed_session(
+                    gateway_session_id, created["id"], actor="chatgpt/mcp"
+                )
+                task_goal = str(args.get("request") or "").strip()
+                if not task_goal:
+                    task_goal = f"Engineering work in {created.get('workspace_key') or created.get('name') or 'workspace'}"
+                pstack_task = await self._open_pstack_gateway_task(
+                    gateway_session_id,
+                    managed_session=attached["managed_session"],
+                    goal=task_goal,
+                )
                 pstack_task = self._require_pstack_admission(pstack_task)
-            return {"session": created, "attached": bool(attached), "pstack_task": pstack_task}
+            return {
+                "session": created,
+                "attached": bool(attached),
+                "pstack_task": pstack_task,
+            }
         if name == "mcpstudio_use_workspace":
             target = await self.managed_sessions.ensure_workspace_selector_session(
                 workspace=str(args.get("workspace") or ""),
                 name=(str(args.get("name")) if args.get("name") is not None else None),
                 actor="chatgpt/mcp",
+                **principal_kwargs,
             )
             if args.get("machine") and self.machine_router is not None:
-                await self.machine_router.bind_session(self.db, target["id"], str(args.get("machine")), actor="chatgpt/mcp")
-            attached = await self.bind_managed_session(gateway_session_id, target["id"], actor="chatgpt/mcp")
-            task_goal = str(args.get("request") or "").strip() or f"Engineering work in {target.get('workspace_key') or target.get('name') or 'workspace'}"
-            pstack_task = await self._open_pstack_gateway_task(gateway_session_id, managed_session=attached["managed_session"], goal=task_goal)
+                await self.machine_router.bind_session(
+                    self.db, target["id"], str(args.get("machine")), actor="chatgpt/mcp"
+                )
+            attached = await self.bind_managed_session(
+                gateway_session_id,
+                target["id"],
+                actor="chatgpt/mcp",
+            )
+            task_goal = str(args.get("request") or "").strip()
+            if not task_goal:
+                task_goal = f"Engineering work in {target.get('workspace_key') or target.get('name') or 'workspace'}"
+            pstack_task = await self._open_pstack_gateway_task(
+                gateway_session_id,
+                managed_session=attached["managed_session"],
+                goal=task_goal,
+            )
             pstack_task = self._require_pstack_admission(pstack_task)
-            return {**attached, "pstack_task": pstack_task}
+            return {
+                **attached,
+                "pstack_task": pstack_task,
+            }
         if name == "mcpstudio_use_session":
             selector = str(args.get("session") or "").strip()
             natural_request = str(args.get("request") or "").strip()
             if selector:
                 try:
-                    target = await self._resolve_managed_session(selector)
+                    target = await self._resolve_managed_session(selector, principal_id=principal_id)
                     resolution = {"session": target, "confidence": 1.0, "reason": "explicit", "candidates": [target]}
                 except ManagedSessionError:
                     resolution = await self.resolve_session_natural(gateway_session_id, selector)
@@ -2817,27 +3097,64 @@ class GatewaySessionManager:
                     reason="natural-language-session-continuation" if natural_request or selector != str(target.get("id")) else "session-continuation",
                     actor="chatgpt/mcp",
                 )
-            task_goal = natural_request or f"Continue engineering work in {target.get('workspace_key') or target.get('name') or 'workspace'}"
-            pstack_task = await self._open_pstack_gateway_task(gateway_session_id, managed_session=attached["managed_session"], goal=task_goal)
+            task_goal = natural_request
+            if not task_goal:
+                task_goal = f"Continue engineering work in {target.get('workspace_key') or target.get('name') or 'workspace'}"
+            pstack_task = await self._open_pstack_gateway_task(
+                gateway_session_id,
+                managed_session=attached["managed_session"],
+                goal=task_goal,
+            )
             pstack_task = self._require_pstack_admission(pstack_task)
             return {
                 **attached,
-                "resolution": {"confidence": resolution.get("confidence"), "reason": resolution.get("reason")},
+                "resolution": {
+                    "confidence": resolution.get("confidence"),
+                    "reason": resolution.get("reason"),
+                },
                 "handoff": self._public_session_handoff(observed) if observed else None,
                 "pstack_task": pstack_task,
             }
         if name == "mcpstudio_pstack_status":
             gateway = await self.db.get_gateway_session(gateway_session_id)
             managed_id = str(gateway.get("managed_session_id") or "").strip()
-            managed = await self.db.get_managed_session(managed_id) if managed_id else None
-            task = await self._active_pstack_gateway_task(gateway_session_id, managed_session=managed)
-            if not task: return {"active": False, "status": "not_bound", "message": "No active Pstack engineering workflow is bound to this session."}
-            lifecycle = ensure_pstack_lifecycle(task.get("lifecycle"), workflow=str(task.get("workflow") or "feature"))
+            managed = (
+                await self.db.get_managed_session(managed_id)
+                if managed_id else None
+            )
+            task = await self._active_pstack_gateway_task(
+                gateway_session_id,
+                managed_session=managed,
+            )
+            if not task:
+                return {
+                    "active": False,
+                    "status": "not_bound",
+                    "message": "No active Pstack engineering workflow is bound to this session.",
+                }
+            lifecycle = ensure_pstack_lifecycle(
+                task.get("lifecycle"),
+                workflow=str(task.get("workflow") or "feature"),
+            )
             if task.get("lifecycle") != lifecycle:
-                task = {**task, "lifecycle": lifecycle}; await self._persist_active_pstack_task(gateway_session_id, task)
-            return {"active": True, "task_id": task.get("task_id"), "trace_id": task.get("trace_id"), "goal": task.get("goal"), "workflow": task.get("workflow"), "status": task.get("status"), "lifecycle": lifecycle}
+                task = {**task, "lifecycle": lifecycle}
+                await self._persist_active_pstack_task(gateway_session_id, task)
+            return {
+                "active": True,
+                "task_id": task.get("task_id"),
+                "trace_id": task.get("trace_id"),
+                "goal": task.get("goal"),
+                "workflow": task.get("workflow"),
+                "status": task.get("status"),
+                "lifecycle": lifecycle,
+            }
         if name == "mcpstudio_pstack_checkpoint":
-            return await self._checkpoint_active_pstack_task(gateway_session_id, phase=str(args.get("phase") or ""), status=str(args.get("status") or ""), evidence=str(args.get("evidence") or ""))
+            return await self._checkpoint_active_pstack_task(
+                gateway_session_id,
+                phase=str(args.get("phase") or ""),
+                status=str(args.get("status") or ""),
+                evidence=str(args.get("evidence") or ""),
+            )
         if name == "mcpstudio_context_status":
             return await self.context_status(gateway_session_id)
         if name == "mcpstudio_report_context_usage":
@@ -2873,7 +3190,7 @@ class GatewaySessionManager:
                 )
             selector = str(args.get("session") or "").strip()
             if selector:
-                target = await self._resolve_managed_session(selector)
+                target = await self._resolve_managed_session(selector, principal_id=principal_id)
             else:
                 gateway = await self.db.get_gateway_session(gateway_session_id)
                 managed_id = str(gateway.get("managed_session_id") or "")
@@ -2882,7 +3199,7 @@ class GatewaySessionManager:
                     managed_id = str(logical.get("managed_session_id") or "")
                 if not managed_id:
                     raise ManagedSessionError("no managed session is attached")
-                target = await self.managed_sessions.get_session(managed_id)
+                target = await self.managed_sessions.get_session(managed_id, **principal_kwargs)
 
             probe_file = str(
                 args.get("probe_file") or "mcp_studio/managed_sessions.py"
@@ -2892,7 +3209,7 @@ class GatewaySessionManager:
                 target["id"],
                 actor="system/lsp-certification",
             )
-            before = await self.managed_sessions.get_session(target["id"])
+            before = await self.managed_sessions.get_session(target["id"], **principal_kwargs)
             runtime_before = dict(before.get("language_runtime") or {})
             generation_before = int(before.get("generation") or 0)
             restart_before = int(runtime_before.get("restart_count") or 0)
@@ -2916,7 +3233,7 @@ class GatewaySessionManager:
                 relative_path=probe_file,
             )
 
-            final = await self.managed_sessions.get_session(target["id"])
+            final = await self.managed_sessions.get_session(target["id"], **principal_kwargs)
             runtime_after = dict(final.get("language_runtime") or {})
             generation_after = int(final.get("generation") or 0)
             restart_after = int(runtime_after.get("restart_count") or 0)
@@ -2959,7 +3276,7 @@ class GatewaySessionManager:
             # reconciling the managed runtime.
             logical = await self.db.get_session(gateway["studio_session_id"])
             managed_id = logical.get("managed_session_id")
-            managed = await self.managed_sessions.get_session(managed_id) if managed_id else None
+            managed = await self.managed_sessions.get_session(managed_id, **principal_kwargs) if managed_id else None
             machine = (
                 self.machine_router.session_machine(managed)
                 if managed is not None and self.machine_router is not None
@@ -2974,7 +3291,7 @@ class GatewaySessionManager:
         if name == "mcpstudio_detach_session":
             return await self.detach_managed_session(gateway_session_id, actor="chatgpt/mcp")
         if name == "mcpstudio_close_session":
-            target = await self._resolve_managed_session(str(args.get("session") or ""))
+            target = await self._resolve_managed_session(str(args.get("session") or ""), principal_id=principal_id)
             gateway = await self.db.get_gateway_session(gateway_session_id)
             if gateway.get("managed_session_id") == target["id"]:
                 await self.detach_managed_session(gateway_session_id, actor="chatgpt/mcp")
@@ -3061,6 +3378,142 @@ class GatewaySessionManager:
                 return message[:2000]
         return None
 
+    @classmethod
+    def _managed_runtime_error(
+        cls,
+        content: bytes,
+        content_type: str,
+        status_code: int,
+    ) -> str | None:
+        lsp_error = cls._language_runtime_error(content, content_type)
+        if lsp_error:
+            return lsp_error
+        text = content.decode("utf-8", errors="replace").strip()
+        if int(status_code or 0) >= 500:
+            return (text or f"upstream HTTP {status_code}")[:2000]
+        try:
+            payloads: list[dict[str, Any]] = []
+            if "text/event-stream" in str(content_type or ""):
+                for line in text.splitlines():
+                    if not line.startswith("data:"):
+                        continue
+                    raw = line[5:].strip()
+                    if not raw or raw == "[DONE]":
+                        continue
+                    value = json.loads(raw)
+                    if isinstance(value, dict):
+                        payloads.append(value)
+            else:
+                value = json.loads(text)
+                if isinstance(value, dict):
+                    payloads.append(value)
+        except Exception:
+            return None
+
+        for payload in payloads:
+            error = payload.get("error")
+            if isinstance(error, dict):
+                message = str(error.get("message") or error).strip()
+                lowered = message.casefold()
+                if any(
+                    token in lowered
+                    for token in (
+                        "internal error",
+                        "failed internally",
+                        "tool failed internally",
+                        "server error",
+                        "unavailable",
+                        "connection closed",
+                        "connection reset",
+                        "transport",
+                        "session closed",
+                        "session not found",
+                    )
+                ):
+                    return message[:2000]
+            result = payload.get("result")
+            if not isinstance(result, dict) or not result.get("isError"):
+                continue
+            blocks = result.get("content")
+            if not isinstance(blocks, list):
+                continue
+            message = "\n".join(
+                str(block.get("text") or "")
+                for block in blocks
+                if isinstance(block, dict) and block.get("type") == "text"
+            ).strip()
+            lowered = message.casefold()
+            if message and any(
+                token in lowered
+                for token in (
+                    "internal error",
+                    "failed internally",
+                    "tool failed internally",
+                    "server unavailable",
+                    "connection closed",
+                    "connection reset",
+                    "transport error",
+                    "session closed",
+                )
+            ):
+                return message[:2000]
+        return None
+
+    async def _self_heal_managed_runtime(
+        self,
+        gateway_session_id: str,
+        session: dict[str, Any],
+        *,
+        reason: str,
+        tool_name: str | None,
+        force_restart: bool,
+    ) -> dict[str, Any]:
+        if self.managed_sessions is None:
+            raise ManagedSessionError("managed sessions are unavailable")
+        managed_id = str(session.get("managed_session_id") or "").strip()
+        if not managed_id:
+            raise ManagedSessionError("no managed session is attached")
+
+        managed_before = await self.managed_sessions.get_session(managed_id)
+        expected_generation = int(managed_before.get("generation") or 0)
+        probe: dict[str, Any] | None = None
+        restart_required = bool(force_restart)
+        if not restart_required:
+            probe = await self.managed_sessions.probe_tool_execution(managed_id)
+            restart_required = not bool(probe.get("ok"))
+
+        if restart_required:
+            await self.managed_sessions.recover_language_runtime(
+                managed_id,
+                reason=reason,
+                actor="system/gateway-runtime-self-heal",
+                expected_generation=expected_generation,
+            )
+
+        rebound = await self.bind_managed_session(
+            gateway_session_id,
+            managed_id,
+            actor="system/gateway-runtime-self-heal",
+        )
+        healed = rebound["gateway_session"]
+        await self.db.add_event(
+            "managed.session.runtime_self_heal",
+            (
+                f"Managed runtime {'restarted' if restart_required else 'rebound'} "
+                f"for {managed_id}"
+            ),
+            severity="warning" if restart_required else "info",
+            data={
+                "managed_session_id": managed_id,
+                "gateway_session_id": gateway_session_id,
+                "tool": tool_name,
+                "reason": reason[:1000],
+                "restart_required": restart_required,
+                "probe": probe,
+            },
+        )
+        return healed
+
     async def _send(
         self,
         *,
@@ -3114,6 +3567,9 @@ class GatewaySessionManager:
         observation = self.client_observation(
             request, jsonrpc, identity_scope=identity_scope, identity_source=identity_source
         )
+        connector_principal_id = str(
+            getattr(request.state, "connector_principal_id", "") or ""
+        ).strip() or None
         if client_type == "openai-secure-tunnel":
             observation["openai_like"] = True
         ingress = ingress_override or await self.resolve_ingress(request, server.id)
@@ -3132,6 +3588,7 @@ class GatewaySessionManager:
                 "user_agent": request.headers.get("user-agent", ""),
                 "client_observation": observation,
                 "reclaim_scope": identity_scope,
+                "connector_principal_id": connector_principal_id,
                 "last_ingress": ingress,
             },
         }
@@ -3139,6 +3596,13 @@ class GatewaySessionManager:
             studio_session, reclaimed = await self.db.reclaim_session(session_payload)
         else:
             studio_session, reclaimed = await self.db.create_session(session_payload), False
+
+        if reclaimed and connector_principal_id:
+            studio_session = await self._adopt_reclaimed_logical_pin(
+                studio_session["id"],
+                connector_principal_id,
+                strict=False,
+            )
 
         # Reclaim restores logical identity/project continuity only. MCP
         # initialize/reconnect is transport lifecycle traffic and must never
@@ -3158,6 +3622,12 @@ class GatewaySessionManager:
                 server_id=server.id,
                 managed_session_id=(str(managed_session_id) if managed_session_id else None),
             )
+            if reusable is not None and connector_principal_id:
+                reusable_principal = str(
+                    (reusable.get("metadata") or {}).get("connector_principal_id") or ""
+                )
+                if reusable_principal != connector_principal_id:
+                    reusable = None
             if reusable is not None:
                 cached = self._cached_initialize_response(
                     reusable, request_id=jsonrpc.get("id")
@@ -3245,6 +3715,7 @@ class GatewaySessionManager:
                 "reclaimed_studio_session": reclaimed,
                 "identity_scope": identity_scope,
                 "identity_source": identity_source,
+                "connector_principal_id": connector_principal_id,
                 "client_observation": observation,
                 "ingress": ingress,
                 "initialize_response": self._initialize_response_cache(
@@ -3313,6 +3784,19 @@ class GatewaySessionManager:
         try:
             session = await self.db.get_gateway_session(gateway_session_id)
         except KeyError:
+            raise HTTPException(status_code=404, detail="Unknown MCP Studio gateway session")
+        request_principal = str(
+            getattr(request.state, "connector_principal_id", "") or ""
+        ).strip()
+        session_principal = str(
+            (session.get("metadata") or {}).get("connector_principal_id") or ""
+        ).strip()
+        if request_principal and not session_principal:
+            raise HTTPException(
+                status_code=409,
+                detail="Gateway session predates connector isolation; initialize a new transport session",
+            )
+        if session_principal and session_principal != request_principal:
             raise HTTPException(status_code=404, detail="Unknown MCP Studio gateway session")
         if session["server_id"] != server.id:
             raise HTTPException(status_code=409, detail="Gateway session belongs to another MCP server")
@@ -3921,7 +4405,69 @@ class GatewaySessionManager:
                 server_url=target_url, method=request.method, headers=headers, body=body, stream=True
             )
         except Exception as exc:
-            if request.method == "POST" and rpc_method == "tools/list" and self._management_tools():
+            if (
+                request.method == "POST"
+                and rpc_method == "tools/call"
+                and session.get("managed_session_id")
+                and self.managed_sessions is not None
+            ):
+                managed_id = str(session["managed_session_id"])
+                runtime_error = f"{type(exc).__name__}: {exc}"
+                await self.db.add_event(
+                    "managed.session.runtime_transport_failure",
+                    f"Managed runtime transport failed for {managed_id}",
+                    severity="warning",
+                    server_id=server.id,
+                    data={
+                        "managed_session_id": managed_id,
+                        "gateway_session_id": gateway_session_id,
+                        "tool": tool_name,
+                        "error": runtime_error[:1000],
+                    },
+                )
+                try:
+                    session = await self._self_heal_managed_runtime(
+                        gateway_session_id,
+                        session,
+                        reason=runtime_error,
+                        tool_name=tool_name,
+                        force_restart=False,
+                    )
+                    target_url = session.get("upstream_url") or server.url
+                    headers = self._proxy_headers(
+                        request, session.get("upstream_session_id")
+                    )
+                    client, response = await self._send(
+                        server_url=target_url,
+                        method=request.method,
+                        headers=headers,
+                        body=body,
+                        stream=True,
+                    )
+                except Exception as recovery_exc:
+                    await self.db.add_event(
+                        "managed.session.runtime_self_heal_failed",
+                        f"Managed runtime self-heal failed for {managed_id}: {recovery_exc}",
+                        severity="error",
+                        server_id=server.id,
+                        data={
+                            "managed_session_id": managed_id,
+                            "gateway_session_id": gateway_session_id,
+                            "tool": tool_name,
+                            "trigger": runtime_error[:1000],
+                            "error": str(recovery_exc)[:1000],
+                        },
+                    )
+                    return local_tool_response(
+                        {
+                            "error": "MANAGED_RUNTIME_SELF_HEAL_FAILED",
+                            "message": str(recovery_exc),
+                            "tool": tool_name,
+                            "managed_session_id": managed_id,
+                        },
+                        is_error=True,
+                    )
+            elif request.method == "POST" and rpc_method == "tools/list" and self._management_tools():
                 await self.db.add_event(
                     "gateway.control_tools.fallback",
                     f"Serving MCP Studio control tools because upstream tool discovery failed: {exc}",
@@ -3935,7 +4481,8 @@ class GatewaySessionManager:
                     },
                 )
                 return local_tools_list_response()
-            raise
+            else:
+                raise
 
         # A deterministic MCP 404 means the selected upstream process/session
         # lost its private session id. Reinitialize against the same upstream
@@ -3971,17 +4518,32 @@ class GatewaySessionManager:
         ):
             ctype = response.headers.get("content-type", "")
             buffered_response_headers = self._response_headers(response)
-            content = await response.aread()
             status_code = response.status_code
-            runtime_error = self._language_runtime_error(content, ctype)
-            await response.aclose()
-            await client.aclose()
+            stream_read_error: str | None = None
+            try:
+                content = await response.aread()
+            except Exception as exc:
+                stream_read_error = f"{type(exc).__name__}: {exc}"
+                content = b""
+            finally:
+                await response.aclose()
+                await client.aclose()
+            language_runtime_error = (
+                None
+                if stream_read_error
+                else self._language_runtime_error(content, ctype)
+            )
+            runtime_error = (
+                stream_read_error
+                or language_runtime_error
+                or self._managed_runtime_error(content, ctype, status_code)
+            )
 
             if runtime_error:
                 managed_id = str(session["managed_session_id"])
                 await self.db.add_event(
-                    "managed.session.language_runtime_failure",
-                    f"Language runtime failure detected for {managed_id}",
+                    "managed.session.runtime_failure",
+                    f"Managed runtime failure detected for {managed_id}",
                     severity="warning",
                     server_id=server.id,
                     data={
@@ -3989,20 +4551,18 @@ class GatewaySessionManager:
                         "gateway_session_id": gateway_session_id,
                         "tool": tool_name,
                         "error": runtime_error[:1000],
+                        "language_runtime_failure": bool(language_runtime_error),
+                        "status_code": status_code,
                     },
                 )
                 try:
-                    await self.managed_sessions.recover_language_runtime(
-                        managed_id,
-                        reason=runtime_error,
-                        actor="system/gateway-lsp-recovery",
-                    )
-                    rebound = await self.bind_managed_session(
+                    session = await self._self_heal_managed_runtime(
                         gateway_session_id,
-                        managed_id,
-                        actor="system/gateway-lsp-recovery",
+                        session,
+                        reason=runtime_error,
+                        tool_name=tool_name,
+                        force_restart=bool(language_runtime_error),
                     )
-                    session = rebound["gateway_session"]
                     target_url = session.get("upstream_url") or server.url
                     headers = self._proxy_headers(
                         request, session.get("upstream_session_id")
@@ -4020,11 +4580,13 @@ class GatewaySessionManager:
                     status_code = response.status_code
                     await response.aclose()
                     await client.aclose()
-                    retry_error = self._language_runtime_error(content, ctype)
+                    retry_error = self._managed_runtime_error(
+                        content, ctype, status_code
+                    )
                     await self.db.add_event(
-                        "managed.session.language_runtime_replay",
+                        "managed.session.runtime_replay",
                         (
-                            f"Language runtime replay {'failed' if retry_error else 'succeeded'} "
+                            f"Managed runtime replay {'failed' if retry_error else 'succeeded'} "
                             f"for {managed_id}"
                         ),
                         severity="warning" if retry_error else "info",
@@ -4039,8 +4601,8 @@ class GatewaySessionManager:
                     )
                 except Exception as exc:
                     await self.db.add_event(
-                        "managed.session.language_runtime_recovery_failed",
-                        f"Language runtime recovery failed for {managed_id}: {exc}",
+                        "managed.session.runtime_self_heal_failed",
+                        f"Managed runtime self-heal failed for {managed_id}: {exc}",
                         severity="error",
                         server_id=server.id,
                         data={
@@ -4052,7 +4614,7 @@ class GatewaySessionManager:
                     )
                     return local_tool_response(
                         {
-                            "error": "LANGUAGE_RUNTIME_RECOVERY_FAILED",
+                            "error": "MANAGED_RUNTIME_SELF_HEAL_FAILED",
                             "message": str(exc),
                             "tool": tool_name,
                             "managed_session_id": managed_id,
@@ -4082,10 +4644,24 @@ class GatewaySessionManager:
                 )
             await record_reflex_outcome(
                 status_code,
-                "buffered-lsp-recovery" if runtime_error else "buffered-managed-tool",
+                "buffered-runtime-self-heal" if runtime_error else "buffered-managed-tool",
             )
-            final_lsp_error = self._language_runtime_error(content, ctype)
-            await self._finalize_pstack_tool(gateway_session_id, session=session, pstack_task=pstack_task, pstack_managed=pstack_managed, tool_name=tool_name, tool_class=pstack_tool_class, status_code=status_code, runtime_error=final_lsp_error, runtime_recovered=bool(runtime_error and not final_lsp_error))
+            final_runtime_error = self._managed_runtime_error(
+                content,
+                ctype,
+                status_code,
+            )
+            await self._finalize_pstack_tool(
+                gateway_session_id,
+                session=session,
+                pstack_task=pstack_task,
+                pstack_managed=pstack_managed,
+                tool_name=tool_name,
+                tool_class=pstack_tool_class,
+                status_code=status_code,
+                runtime_error=final_runtime_error,
+                runtime_recovered=bool(runtime_error and not final_runtime_error),
+            )
             media = (
                 "text/event-stream"
                 if "text/event-stream" in ctype
@@ -4168,7 +4744,16 @@ class GatewaySessionManager:
                 content = self._augment_tool_result_context_notice(content, ctype, context_notice)
             await record_reflex_outcome(status_code, "buffered")
             if rpc_method == "tools/call":
-                await self._finalize_pstack_tool(gateway_session_id, session=session, pstack_task=pstack_task, pstack_managed=pstack_managed, tool_name=tool_name, tool_class=pstack_tool_class, status_code=status_code, runtime_error=self._language_runtime_error(content, ctype))
+                await self._finalize_pstack_tool(
+                    gateway_session_id,
+                    session=session,
+                    pstack_task=pstack_task,
+                    pstack_managed=pstack_managed,
+                    tool_name=tool_name,
+                    tool_class=pstack_tool_class,
+                    status_code=status_code,
+                    runtime_error=self._managed_runtime_error(content, ctype, status_code),
+                )
             return Response(content=content, status_code=status_code, headers=response_headers)
 
         # A rollover transition must be visible to the model in the same tool
@@ -4181,7 +4766,16 @@ class GatewaySessionManager:
             await client.aclose()
             content = self._augment_tool_result_context_notice(content, ctype, context_notice)
             await record_reflex_outcome(status_code, "buffered-context-notice")
-            await self._finalize_pstack_tool(gateway_session_id, session=session, pstack_task=pstack_task, pstack_managed=pstack_managed, tool_name=tool_name, tool_class=pstack_tool_class, status_code=status_code, runtime_error=self._language_runtime_error(content, ctype))
+            await self._finalize_pstack_tool(
+                gateway_session_id,
+                session=session,
+                pstack_task=pstack_task,
+                pstack_managed=pstack_managed,
+                tool_name=tool_name,
+                tool_class=pstack_tool_class,
+                status_code=status_code,
+                runtime_error=self._managed_runtime_error(content, ctype, status_code),
+            )
             return Response(
                 content=content,
                 status_code=status_code,
@@ -4193,22 +4787,52 @@ class GatewaySessionManager:
 
         stream_status_code = int(response.status_code or 0)
         async def body_iter() -> AsyncIterator[bytes]:
-            collected = bytearray(); completed = False
+            collected = bytearray()
+            completed = False
             try:
                 async for chunk in response.aiter_raw():
                     if len(collected) < 2_000_000:
-                        remaining = 2_000_000 - len(collected); collected.extend(chunk[:remaining])
+                        remaining = 2_000_000 - len(collected)
+                        collected.extend(chunk[:remaining])
                     yield chunk
                 completed = True
             finally:
                 try:
                     if rpc_method == "tools/call":
-                        stream_error = self._language_runtime_error(bytes(collected), ctype) if completed else "stream_aborted"
-                        await self._finalize_pstack_tool(gateway_session_id, session=session, pstack_task=pstack_task, pstack_managed=pstack_managed, tool_name=tool_name, tool_class=pstack_tool_class, status_code=stream_status_code, runtime_error=stream_error)
+                        stream_error = (
+                            self._managed_runtime_error(
+                                bytes(collected),
+                                ctype,
+                                stream_status_code,
+                            )
+                            if completed
+                            else "stream_aborted"
+                        )
+                        await self._finalize_pstack_tool(
+                            gateway_session_id,
+                            session=session,
+                            pstack_task=pstack_task,
+                            pstack_managed=pstack_managed,
+                            tool_name=tool_name,
+                            tool_class=pstack_tool_class,
+                            status_code=stream_status_code,
+                            runtime_error=stream_error,
+                        )
                 except Exception as exc:
-                    await self.db.add_event("pstack.lifecycle.evidence_error", f"Pstack streaming evidence finalization failed: {type(exc).__name__}", severity="warning", data={"gateway_session_id": gateway_session_id, "managed_session_id": session.get("managed_session_id"), "tool": tool_name, "error": str(exc)[:1000]})
+                    await self.db.add_event(
+                        "pstack.lifecycle.evidence_error",
+                        f"Pstack streaming evidence finalization failed: {type(exc).__name__}",
+                        severity="warning",
+                        data={
+                            "gateway_session_id": gateway_session_id,
+                            "managed_session_id": session.get("managed_session_id"),
+                            "tool": tool_name,
+                            "error": str(exc)[:1000],
+                        },
+                    )
                 finally:
-                    await response.aclose(); await client.aclose()
+                    await response.aclose()
+                    await client.aclose()
 
         return StreamingResponse(
             body_iter(),
