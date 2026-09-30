@@ -85,6 +85,19 @@ class NativePreferredIntegrations(FakeIntegrations):
         return {"content": [{"type": "text", "text": name}]}
 
 
+class DesktopCommanderOnlyIntegrations(FakeIntegrations):
+    def backend_tools(self):
+        return [{"name": "hirda__desktop_commander__read_file", "inputSchema": {"type": "object"}}]
+
+    def is_backend_tool(self, name):
+        return name == "hirda__desktop_commander__read_file"
+
+    def backend_route(self, name):
+        if name == "hirda__desktop_commander__read_file":
+            return ("desktop-commander", "read_file")
+        return None
+
+
 class FakeComputer:
     session_isolation_enabled = True
 
@@ -269,6 +282,19 @@ async def test_legacy_desktop_namespace_prefers_native_for_overlapping_tool(tmp_
         context={"machine_id": "openclaw", "managed_session_id": "ms-1", "workspace_key": "mcp-studio", "project_path": str(tmp_path), "policy": {"scope": "workspace"}},
     )
     assert integrations.local_calls[0][0] == "hirda__hirda_native_computer__read_file"
+
+
+@pytest.mark.asyncio
+async def test_legacy_desktop_namespace_stays_on_dc_when_native_tool_is_not_registered(tmp_path: Path):
+    config = machine_config()
+    integrations = DesktopCommanderOnlyIntegrations()
+    router = MachineCapabilityRouter(MachineRegistry(studio(config), base_dir=tmp_path), integrations, FakeComputer())
+    await router.call_backend_tool(
+        "hirda__desktop_commander__read_file",
+        {"path": "README.md"},
+        context={"machine_id": "openclaw", "managed_session_id": "ms-1", "workspace_key": "mcp-studio", "project_path": str(tmp_path), "policy": {"scope": "workspace"}},
+    )
+    assert integrations.local_calls[0][0] == "hirda__desktop_commander__read_file"
 
 
 @pytest.mark.asyncio

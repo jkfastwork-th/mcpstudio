@@ -739,8 +739,17 @@ class MachineCapabilityRouter:
         if integration_id not in {"desktop-commander", _NATIVE_PROVIDER_ID}:
             return await self.integrations.call_backend_tool(exposed_name, arguments, context=context)
         # Legacy Desktop Commander names remain stable, but overlapping calls
-        # are handled by HIRDA Native Computer whenever that provider exists.
-        native_selected = integration_id == _NATIVE_PROVIDER_ID or raw_name in _NATIVE_TOOLS
+        # use Native Computer only when its matching local tool is registered,
+        # or the bound remote machine advertises the native provider.
+        native_name = f"hirda__hirda_native_computer__{raw_name}"
+        native_available = (
+            self.integrations.is_backend_tool(native_name)
+            if machine.local
+            else bool(machine.providers.get("hirda_native"))
+        )
+        native_selected = integration_id == _NATIVE_PROVIDER_ID or (
+            raw_name in _NATIVE_TOOLS and native_available
+        )
         if (
             integration_id == "desktop-commander"
             and native_selected
