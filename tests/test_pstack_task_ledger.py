@@ -242,6 +242,8 @@ async def test_gateway_task_envelope_persists_trace_and_tool_activity():
     assert task["lifecycle"]["status"] == "active"
     assert task["workflow_directive"]["capability"] == "coding"
     assert task["workflow_directive"]["context"]["workflow_provider"] == "pstack"
+    assert "HIRDA PSTACK LIFECYCLE CONTROL" in task["workflow_directive"]["prompt"]
+    assert "mcpstudio_pstack_checkpoint" in task["workflow_directive"]["prompt"]
     assert "PSTACK METHODOLOGY" in task["workflow_directive"]["prompt"]
     assert gateway.db.metadata["active_pstack_task"]["task_id"] == task["task_id"]
     assert gateway.db.logical_metadata["active_pstack_task"]["trace_id"] == "TRACE-GW"
@@ -274,6 +276,13 @@ async def test_gateway_task_envelope_persists_trace_and_tool_activity():
     assert len(tool_events) == 2
     assert tool_events[0][2]["data"]["trace_id"] == "TRACE-GW"
     assert tool_events[1][2]["data"]["status"] == "passed"
+    hirda_events = [
+        item for item in gateway.db.events
+        if item[0] == "pstack.hirda_execution_started"
+    ]
+    assert len(hirda_events) == 1
+    assert hirda_events[0][2]["data"]["trace_status"] == "executing"
+    assert gateway.db.logical_metadata["active_pstack_task"]["status"] == "active"
 
 
 @pytest.mark.asyncio

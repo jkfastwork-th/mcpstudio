@@ -2442,12 +2442,22 @@ class GatewaySessionManager:
                 return None
             coordinator = dict(routed.get("coordinator") or {})
             hirda_request = dict(coordinator.get("hirda_request") or {})
+            lifecycle_prompt = (
+                "HIRDA PSTACK LIFECYCLE CONTROL:\n"
+                "- Before any file write, complete Analyze then Plan by calling "
+                "mcpstudio_pstack_checkpoint with status=passed and concrete evidence.\n"
+                "- Perform writes only while the lifecycle is in Implement.\n"
+                "- After implementation, advance Review, Verify, then Done with evidence.\n"
+                "- If a write is blocked by PSTACK_PLAN_REQUIRED or "
+                "PSTACK_IMPLEMENTATION_GATE_CLOSED, checkpoint the required phase; do not "
+                "work around the gate.\n\n"
+            )
             directive = {
                 "schema": "hirda-pstack-workflow-directive-v1",
                 "request_id": hirda_request.get("request_id"),
                 "capability": hirda_request.get("capability"),
                 "preferred_depth": hirda_request.get("preferred_depth"),
-                "prompt": hirda_request.get("prompt"),
+                "prompt": lifecycle_prompt + str(hirda_request.get("prompt") or ""),
                 "context": dict(hirda_request.get("context") or {}),
             }
             task = {
@@ -2540,6 +2550,35 @@ class GatewaySessionManager:
         trace_id = str(task.get("trace_id") or "").strip()
         if not trace_id:
             return
+        if status == "running" and str(task.get("status") or "").casefold() == "ready_for_hirda":
+            task = {**task, "status": "active"}
+            studio_session_id = str(session.get("studio_session_id") or "").strip()
+            if studio_session_id:
+                await self.db.heartbeat_session(
+                    studio_session_id,
+                    {"metadata": {"active_pstack_task": task}},
+                )
+            gateway_session_id = str(session.get("id") or "").strip()
+            if gateway_session_id:
+                await self.db.update_gateway_session_metadata(
+                    gateway_session_id,
+                    {"active_pstack_task": task},
+                )
+            await self.db.add_event(
+                "pstack.hirda_execution_started",
+                "HIRDA execution started",
+                data={
+                    **task,
+                    "actor": "hirda",
+                    "phase": "hirda_execution_started",
+                    "title": "HIRDA execution started",
+                    "detail": "HIRDA accepted the PStack handoff and dispatched the first downstream tool.",
+                    "status": "running",
+                    "trace_status": "executing",
+                },
+                stream_id=f"pstack:{trace_id}",
+                correlation_id=trace_id,
+            )
         phase = "tool_started" if status == "running" else "tool_completed"
         title = (
             f"{tool_name} started"
