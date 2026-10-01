@@ -280,12 +280,15 @@ class _GatewayDb:
     def __init__(self):
         self.metadata = {}
         self.logical_metadata = {}
+        self.managed_metadata = {}
+        self.sibling_gateways = []
         self.events = []
 
     async def get_gateway_session(self, gateway_id):
         return {
             "id": gateway_id,
             "studio_session_id": "studio-1",
+            "managed_session_id": "ms-1",
             "metadata": dict(self.metadata),
         }
 
@@ -313,7 +316,17 @@ class _GatewayDb:
         return {
             "id": "ms-1",
             "workspace_key": "mcp-studio",
+            "metadata": dict(self.managed_metadata),
         }
+
+    async def update_managed_session_metadata(self, session_id, metadata):
+        assert session_id == "ms-1"
+        self.managed_metadata = dict(metadata)
+        return await self.get_managed_session(session_id)
+
+    async def list_gateway_sessions_for_managed_session(self, managed_session_id):
+        assert managed_session_id == "ms-1"
+        return [dict(item) for item in self.sibling_gateways]
 
     async def add_event(self, kind, message, **kwargs):
         self.events.append((kind, message, kwargs))
@@ -720,3 +733,112 @@ def test_pstack_ui_exposes_multi_task_ledger():
     assert ".pstack-flow-step" in css
     assert ".pstack-task-row" in css
     assert ".pstack-ledger-card" in css
+
+
+@pytest.mark.asyncio
+async def test_gateway_rehydrates_pstack_task_from_managed_session_after_transport_rollover():
+    gateway = object.__new__(GatewaySessionManager)
+    gateway.db = _GatewayDb()
+    gateway.integrations = _GatewayIntegrations()
+    gateway.db.managed_metadata["active_pstack_task"] = {
+        "task_id": "TASK-MANAGED",
+        "trace_id": "TRACE-MANAGED",
+        "goal": "Engineering work in mcp-studio",
+        "workflow": "feature",
+        "workspace_key": "mcp-studio",
+        "managed_session_id": "ms-1",
+        "status": "active",
+        "lifecycle": {
+            "schema": "hirda-pstack-lifecycle-v1",
+            "workflow": "feature",
+            "status": "active",
+            "current_phase": "implement",
+            "revision": 9,
+            "updated_at": 9.0,
+            "stages": [],
+        },
+    }
+
+    task = await gateway._active_pstack_gateway_task(
+        "gws-1",
+        managed_session=await gateway.db.get_managed_session("ms-1"),
+    )
+
+    assert task is not None
+    assert task["trace_id"] == "TRACE-MANAGED"
+    assert gateway.db.metadata["active_pstack_task"]["trace_id"] == "TRACE-MANAGED"
+    assert gateway.db.logical_metadata["active_pstack_task"]["trace_id"] == "TRACE-MANAGED"
+
+
+@pytest.mark.asyncio
+async def test_gateway_recovers_pstack_task_from_sibling_transport_and_seeds_managed_session():
+    gateway = object.__new__(GatewaySessionManager)
+    gateway.db = _GatewayDb()
+    gateway.integrations = _GatewayIntegrations()
+    gateway.db.sibling_gateways = [{
+        "id": "gws-old",
+        "metadata": {
+            "active_pstack_task": {
+                "task_id": "TASK-SIBLING",
+                "trace_id": "TRACE-SIBLING",
+                "goal": "Engineering work in mcp-studio",
+                "workflow": "feature",
+                "workspace_key": "mcp-studio",
+                "managed_session_id": "ms-1",
+                "status": "active",
+                "lifecycle": {
+                    "schema": "hirda-pstack-lifecycle-v1",
+                    "workflow": "feature",
+                    "status": "active",
+                    "current_phase": "analyze",
+                    "revision": 4,
+                    "updated_at": 4.0,
+                    "stages": [],
+                },
+            }
+        },
+    }]
+
+    task = await gateway._active_pstack_gateway_task(
+        "gws-1",
+        managed_session=await gateway.db.get_managed_session("ms-1"),
+    )
+
+    assert task is not None
+    assert task["trace_id"] == "TRACE-SIBLING"
+    assert gateway.db.managed_metadata["active_pstack_task"]["trace_id"] == "TRACE-SIBLING"
+    assert gateway.db.metadata["active_pstack_task"]["trace_id"] == "TRACE-SIBLING"
+
+
+@pytest.mark.asyncio
+async def test_gateway_self_heals_missing_pstack_registration_before_admission():
+    class _RecoveringIntegrations(_GatewayIntegrations):
+        def __init__(self):
+            super().__init__()
+            self.available = False
+            self.activations = 0
+
+        def get(self, integration_id):
+            assert integration_id == "pstack"
+            if not self.available:
+                raise KeyError("pstack")
+            return self.registration
+
+        def activate_trusted_plugins(self):
+            self.activations += 1
+            self.available = True
+            return {"activated": ["pstack"]}
+
+    gateway = object.__new__(GatewaySessionManager)
+    gateway.db = _GatewayDb()
+    gateway.integrations = _RecoveringIntegrations()
+
+    task = await gateway._open_pstack_gateway_task(
+        "gws-1",
+        managed_session=await gateway.db.get_managed_session("ms-1"),
+        goal="Engineering work in mcp-studio",
+    )
+
+    assert task is not None
+    assert task["trace_id"] == "TRACE-GW"
+    assert gateway.integrations.activations == 1

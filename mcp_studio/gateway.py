@@ -2679,6 +2679,34 @@ class GatewaySessionManager:
         expected_workspace = str(
             (managed_session or {}).get("workspace_key") or ""
         )
+        managed_task: dict[str, Any] = {}
+        managed_record = managed_session
+        if expected_id and managed_record is None:
+            try:
+                managed_record = await self.db.get_managed_session(expected_id)
+            except KeyError:
+                managed_record = None
+        if managed_record is not None:
+            managed_task = dict(
+                (managed_record.get("metadata") or {}).get("active_pstack_task") or {}
+            )
+            if managed_task:
+                candidates.append(("managed", managed_task))
+
+        sibling_lister = getattr(
+            self.db,
+            "list_gateway_sessions_for_managed_session",
+            None,
+        )
+        if expected_id and callable(sibling_lister):
+            for sibling in await sibling_lister(expected_id):
+                if str(sibling.get("id") or "") == gateway_session_id:
+                    continue
+                sibling_task = dict(
+                    (sibling.get("metadata") or {}).get("active_pstack_task") or {}
+                )
+                if sibling_task:
+                    candidates.append(("sibling", sibling_task))
         eligible: list[tuple[str, dict[str, Any]]] = []
         for source, task in candidates:
             if not str(task.get("trace_id") or "").strip():
@@ -2717,8 +2745,10 @@ class GatewaySessionManager:
             return revision, updated_at, opened_at
 
         _source, selected = max(eligible, key=freshness)
-        if selected != gateway_task or (
-            logical_task and selected != logical_task
+        if (
+            selected != gateway_task
+            or selected != logical_task
+            or (expected_id and selected != managed_task)
         ):
             await self._persist_active_pstack_task(
                 gateway_session_id,
@@ -2742,6 +2772,18 @@ class GatewaySessionManager:
                 studio_session_id,
                 {"metadata": {"active_pstack_task": task}},
             )
+        managed_session_id = str(gateway.get("managed_session_id") or "").strip()
+        if managed_session_id:
+            try:
+                managed = await self.db.get_managed_session(managed_session_id)
+            except KeyError:
+                managed = None
+            if managed is not None:
+                managed_metadata = dict(managed.get("metadata") or {})
+                managed_metadata["active_pstack_task"] = task
+                updater = getattr(self.db, "update_managed_session_metadata", None)
+                if callable(updater):
+                    await updater(managed_session_id, managed_metadata)
 
     async def _checkpoint_active_pstack_task(
         self,
@@ -2921,7 +2963,13 @@ class GatewaySessionManager:
         if not goal_text:
             return None
         try:
-            registration = self.integrations.get("pstack")
+            try:
+                registration = self.integrations.get("pstack")
+            except KeyError:
+                activator = getattr(self.integrations, "activate_trusted_plugins", None)
+                if callable(activator):
+                    activator()
+                registration = self.integrations.get("pstack")
             if registration.stage != "ready":
                 await self.integrations.reconcile("pstack")
             current_gateway = await self.db.get_gateway_session(gateway_session_id)
@@ -4792,6 +4840,17 @@ class GatewaySessionManager:
                     gateway_session_id,
                     managed_session=pstack_managed,
                 )
+                if pstack_task:
+                    existing_lifecycle = ensure_pstack_lifecycle(
+                        pstack_task.get("lifecycle"),
+                        workflow=str(pstack_task.get("workflow") or "feature"),
+                    )
+                    if (
+                        str(pstack_task.get("status") or "").casefold() == "completed"
+                        or str(existing_lifecycle.get("status") or "").casefold()
+                        == "completed"
+                    ):
+                        pstack_task = None
                 if not pstack_task:
                     pstack_task = await self._open_pstack_gateway_task(
                         gateway_session_id,
