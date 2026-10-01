@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -117,6 +118,98 @@ class GatewaySessionManager:
         self.integrations = integrations
         self.machine_router = machine_router
         self.machine_enrollment = machine_enrollment
+        self._peer_notification_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
+        self._peer_notification_seen: dict[str, set[str]] = {}
+
+    def _peer_notification_queue(self, gateway_session_id: str) -> asyncio.Queue[dict[str, Any]]:
+        queue = self._peer_notification_queues.get(gateway_session_id)
+        if queue is None:
+            queue = asyncio.Queue(maxsize=100)
+            self._peer_notification_queues[gateway_session_id] = queue
+        self._peer_notification_seen.setdefault(gateway_session_id, set())
+        return queue
+
+    @staticmethod
+    def _peer_notification_event(message: dict[str, Any]) -> bytes:
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "notifications/message",
+            "params": {
+                "level": "info",
+                "logger": "hirda.peer",
+                "data": {
+                    "schema": "hirda-peer-notification-v1",
+                    "message_id": message.get("message_id"),
+                    "thread_id": message.get("thread_id"),
+                    "correlation_id": message.get("correlation_id"),
+                    "sender_principal_id": message.get("sender_principal_id"),
+                    "recipient_principal_id": message.get("recipient_principal_id"),
+                    "reply_to": message.get("reply_to"),
+                    "text": message.get("text"),
+                    "created_at": message.get("created_at"),
+                },
+            },
+        }
+        return ("event: message\ndata: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8")
+
+    def _enqueue_peer_notification(self, gateway_session_id: str, message: dict[str, Any]) -> bool:
+        message_id = str(message.get("message_id") or "").strip()
+        if not message_id:
+            return False
+        seen = self._peer_notification_seen.setdefault(gateway_session_id, set())
+        if message_id in seen:
+            return False
+        queue = self._peer_notification_queue(gateway_session_id)
+        if queue.full():
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        queue.put_nowait(dict(message))
+        seen.add(message_id)
+        return True
+
+    async def _publish_peer_notification(self, message: dict[str, Any]) -> list[str]:
+        peer_scope_id = str(message.get("peer_scope_id") or "").strip()
+        recipient_principal_id = str(message.get("recipient_principal_id") or "").strip()
+        if not peer_scope_id or not recipient_principal_id:
+            return []
+        delivered_to: list[str] = []
+        for session in await self.db.list_gateway_sessions(limit=1000):
+            if str(session.get("status") or "") != "connected":
+                continue
+            raw_metadata = session.get("metadata")
+            metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
+            if str(metadata.get("connector_peer_scope_id") or "").strip() != peer_scope_id:
+                continue
+            if str(metadata.get("connector_principal_id") or "").strip() != recipient_principal_id:
+                continue
+            gateway_session_id = str(session.get("id") or "").strip()
+            if gateway_session_id and self._enqueue_peer_notification(gateway_session_id, message):
+                delivered_to.append(gateway_session_id)
+        return delivered_to
+
+    async def _seed_peer_notifications_for_gateway(
+        self,
+        gateway_session_id: str,
+        session: dict[str, Any],
+    ) -> int:
+        raw_metadata = session.get("metadata")
+        metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
+        principal_id = str(metadata.get("connector_principal_id") or "").strip()
+        peer_scope_id = str(metadata.get("connector_peer_scope_id") or "").strip()
+        if not principal_id or not peer_scope_id:
+            return 0
+        added = 0
+        for message in await self.db.list_peer_inbox(
+            principal_id,
+            peer_scope_id=peer_scope_id,
+            limit=100,
+            unclaimed_only=True,
+        ):
+            if self._enqueue_peer_notification(gateway_session_id, message):
+                added += 1
+        return added
 
     def authenticate(self, request: Request) -> tuple[str, str, str, str, str]:
         """Authenticate and derive a stable client identity.
@@ -3000,7 +3093,15 @@ class GatewaySessionManager:
                         stream_id=f"peer:{message['thread_id']}",
                         correlation_id=message["correlation_id"],
                     )
-                    return {"message": message}
+                    pushed = await self._publish_peer_notification(message)
+                    return {
+                        "message": message,
+                        "notification": {
+                            "schema": "hirda-peer-notification-delivery-v1",
+                            "queued_gateway_sessions": pushed,
+                            "online_delivery_count": len(pushed),
+                        },
+                    }
                 if name == "hirda_peer_inbox":
                     return {
                         "principal_id": principal_id,
@@ -3049,7 +3150,15 @@ class GatewaySessionManager:
                         stream_id=f"peer:{message['thread_id']}",
                         correlation_id=message["correlation_id"],
                     )
-                    return {"message": message}
+                    pushed = await self._publish_peer_notification(message)
+                    return {
+                        "message": message,
+                        "notification": {
+                            "schema": "hirda-peer-notification-delivery-v1",
+                            "queued_gateway_sessions": pushed,
+                            "online_delivery_count": len(pushed),
+                        },
+                    }
                 if name == "hirda_peer_threads":
                     return {
                         "principal_id": principal_id,
@@ -5054,6 +5163,51 @@ class GatewaySessionManager:
             return Response(
                 content=content,
                 status_code=status_code,
+                headers=response_headers,
+                media_type="text/event-stream",
+            )
+
+        if request.method == "GET":
+            await self._seed_peer_notifications_for_gateway(
+                gateway_session_id,
+                session,
+            )
+            peer_queue = self._peer_notification_queue(gateway_session_id)
+            upstream_iter = response.aiter_raw()
+
+            async def peer_body_iter() -> AsyncIterator[bytes]:
+                upstream_task: asyncio.Task[bytes] | None = asyncio.create_task(anext(upstream_iter))
+                peer_task: asyncio.Task[dict[str, Any]] | None = asyncio.create_task(peer_queue.get())
+                try:
+                    while upstream_task is not None and peer_task is not None:
+                        done, _pending = await asyncio.wait(
+                            {upstream_task, peer_task},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if upstream_task in done:
+                            try:
+                                chunk = upstream_task.result()
+                            except StopAsyncIteration:
+                                break
+                            yield chunk
+                            upstream_task = asyncio.create_task(anext(upstream_iter))
+                        if peer_task in done:
+                            yield self._peer_notification_event(peer_task.result())
+                            peer_task = asyncio.create_task(peer_queue.get())
+                finally:
+                    for task in (upstream_task, peer_task):
+                        if task is not None and not task.done():
+                            task.cancel()
+                    if upstream_task is not None:
+                        await asyncio.gather(upstream_task, return_exceptions=True)
+                    if peer_task is not None:
+                        await asyncio.gather(peer_task, return_exceptions=True)
+                    await response.aclose()
+                    await client.aclose()
+
+            return StreamingResponse(
+                peer_body_iter(),
+                status_code=response.status_code,
                 headers=response_headers,
                 media_type="text/event-stream",
             )

@@ -298,3 +298,93 @@ async def test_peer_list_collapses_conversations_to_principals(tmp_path, monkeyp
     assert peers[0]["conversation_count"] == 2
     assert peers[0]["self"] is True
     assert peers[1]["online"] is False
+
+
+@pytest.mark.asyncio
+async def test_peer_notification_push_targets_matching_online_gateway(tmp_path):
+    db = Database(str(tmp_path / "peer.sqlite3"))
+    await db.init()
+    gateway = GatewaySessionManager(
+        cast(Any, SimpleNamespace()),
+        db,
+        managed_sessions=None,
+    )
+
+    async def add_gateway(client_id: str, principal: str, scope: str):
+        studio = await db.create_session(
+            {"client_id": client_id, "client_type": "openai-chatgpt", "server_id": "serena-8001"}
+        )
+        return await db.create_gateway_session(
+            studio_session_id=studio["id"],
+            client_id=client_id,
+            client_type="openai-chatgpt",
+            server_id="serena-8001",
+            upstream_session_id="upstream",
+            protocol_version="2025-11-25",
+            init_payload={},
+            metadata={
+                "connector_principal_id": principal,
+                "connector_peer_scope_id": scope,
+            },
+        )
+
+    somchai = await add_gateway("conversation-somchai", "oauth-somchai", "scope-main")
+    await add_gateway("conversation-fern", "oauth-fern", "scope-main")
+    await add_gateway("conversation-other-scope", "oauth-somchai", "scope-other")
+
+    message = await db.create_peer_message(
+        peer_scope_id="scope-main",
+        sender_principal_id="oauth-fern",
+        recipient_principal_id="oauth-somchai",
+        text="push me",
+        correlation_id="notify-cert",
+    )
+    delivered = await gateway._publish_peer_notification(message)
+
+    assert delivered == [somchai["id"]]
+    queued = gateway._peer_notification_queue(somchai["id"]).get_nowait()
+    assert queued["message_id"] == message["message_id"]
+
+
+@pytest.mark.asyncio
+async def test_peer_notification_replays_unclaimed_inbox_on_reconnect(tmp_path):
+    db = Database(str(tmp_path / "peer.sqlite3"))
+    await db.init()
+    gateway = GatewaySessionManager(
+        cast(Any, SimpleNamespace()),
+        db,
+        managed_sessions=None,
+    )
+    message = await db.create_peer_message(
+        peer_scope_id="scope-main",
+        sender_principal_id="oauth-fern",
+        recipient_principal_id="oauth-somchai",
+        text="offline replay",
+        correlation_id="notify-replay-cert",
+    )
+    studio = await db.create_session(
+        {"client_id": "conversation-somchai", "client_type": "openai-chatgpt", "server_id": "serena-8001"}
+    )
+    session = await db.create_gateway_session(
+        studio_session_id=studio["id"],
+        client_id="conversation-somchai",
+        client_type="openai-chatgpt",
+        server_id="serena-8001",
+        upstream_session_id="upstream",
+        protocol_version="2025-11-25",
+        init_payload={},
+        metadata={
+            "connector_principal_id": "oauth-somchai",
+            "connector_peer_scope_id": "scope-main",
+        },
+    )
+
+    assert await gateway._seed_peer_notifications_for_gateway(session["id"], session) == 1
+    assert await gateway._seed_peer_notifications_for_gateway(session["id"], session) == 0
+
+    queued = gateway._peer_notification_queue(session["id"]).get_nowait()
+    event = gateway._peer_notification_event(queued).decode("utf-8")
+    assert queued["message_id"] == message["message_id"]
+    assert '"method": "notifications/message"' in event
+    assert '"logger": "hirda.peer"' in event
+    assert "offline replay" in event
