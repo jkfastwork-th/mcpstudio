@@ -376,6 +376,23 @@
 </article>
 </div>
 
+<article class="panel-card connection-plugin-card">
+  <div class="panel-head"><div><span class="eyebrow">PORTABLE PACKAGE</span><h3>Install in ChatGPT</h3><p>Download the portable HIRDA package and upload it in ChatGPT.</p></div></div>
+  <form class="connection-plugin-form" id="pluginBundleForm" novalidate>
+    <label><span>Package name</span><input id="pluginPackageName" name="plugin_name" type="text" value="hirda" maxlength="64" required autocomplete="off"><small>Use lowercase letters, numbers, dots, or hyphens.</small></label>
+    <label><span>Version</span><input id="pluginPackageVersion" name="version" type="text" value="1.0.0" maxlength="64" required autocomplete="off"></label>
+    <label><span>Description</span><input id="pluginPackageDescription" name="description" type="text" value="Connect ChatGPT to HIRDA tools and usage guidance." maxlength="4000"></label>
+    <label><span>MCP URL</span><input id="pluginMcpUrl" name="mcp_url" type="url" placeholder="https://example.com/mcp" required autocomplete="url"></label>
+    <div class="connection-plugin-actions">
+      <button class="button connection-plugin-primary" data-plugin-format="zip" id="pluginZipBtn" type="button" disabled>Download ZIP</button>
+      <button class="button secondary" data-plugin-format="tar.gz" id="pluginTarBtn" type="button" disabled>Download tar.gz</button>
+    </div>
+    <p class="connection-plugin-recommendation">ZIP is recommended for manual upload in ChatGPT.</p>
+    <p aria-live="polite" class="connection-plugin-message" id="pluginBundleMessage"></p>
+  </form>
+  <div class="connection-plugin-safety"><span aria-hidden="true">ⓘ</span><p>OAuth, client, and owner credentials are never included in the archive. Each ChatGPT account authorizes separately through HIRDA OAuth after installation.</p></div>
+</article>
+
 <article class="panel-card oauth-client-list-card">
 <div class="panel-head"><div><span class="eyebrow">REGISTERED</span><h3>OAuth clients</h3><p>Each ChatGPT account should use its own client identity.</p></div><small id="oauthClientCount">—</small></div>
 <div class="oauth-client-list" id="oauthClientList"><div class="empty-state">Open this page to load registered OAuth clients.</div></div>

@@ -12,6 +12,7 @@ let latestData = null;
 const SUPPORTED_LANGUAGES=['en','th'];
 const I18N_TH={
   'Production':'โปรดักชัน','Live':'ใช้งานจริง','All ingress through HIRDA Gateway':'ทุกช่องทางเข้าใช้งานผ่าน HIRDA Gateway',
+  'PORTABLE PACKAGE':'แพ็กเกจพกพา','Install in ChatGPT':'ติดตั้งใน ChatGPT','Download the portable HIRDA package and upload it in ChatGPT.':'ดาวน์โหลดแพ็กเกจ HIRDA แล้วอัปโหลดใน ChatGPT','Package name':'ชื่อแพ็กเกจ','Use lowercase letters, numbers, dots, or hyphens.':'ใช้ตัวอักษรอังกฤษตัวพิมพ์เล็ก ตัวเลข จุด หรือขีดกลาง','Version':'เวอร์ชัน','Description':'คำอธิบาย','MCP URL':'ที่อยู่ MCP','Download ZIP':'ดาวน์โหลด ZIP','Download tar.gz':'ดาวน์โหลด tar.gz','ZIP is recommended for manual upload in ChatGPT.':'แนะนำ ZIP สำหรับอัปโหลดใน ChatGPT','OAuth, client, and owner credentials are never included in the archive. Each ChatGPT account authorizes separately through HIRDA OAuth after installation.':'ไฟล์นี้ไม่มีข้อมูล OAuth ข้อมูล client หรือข้อมูลเจ้าของบัญชี แต่ละบัญชี ChatGPT จะยืนยันสิทธิ์ผ่าน HIRDA OAuth หลังติดตั้ง','Package details are invalid.':'ข้อมูลแพ็กเกจไม่ถูกต้อง','Preparing download…':'กำลังเตรียมดาวน์โหลด…','Download ready.':'ดาวน์โหลดพร้อมแล้ว','Download failed. Check the package details and try again.':'ดาวน์โหลดไม่สำเร็จ โปรดตรวจข้อมูลแล้วลองอีกครั้ง','Package name must use lowercase letters, numbers, dots, or hyphens.':'ชื่อแพ็กเกจใช้ตัวอักษรอังกฤษตัวพิมพ์เล็ก ตัวเลข จุด หรือขีดกลางเท่านั้น','Version must be a short version string.':'รูปแบบเวอร์ชันไม่ถูกต้อง','Description contains credential-like text.':'คำอธิบายมีข้อความที่ดูเหมือนข้อมูลยืนยันตัวตน','MCP URL must be an HTTPS address without credentials, query parameters, or secret-like paths.':'ที่อยู่ MCP ต้องเป็น HTTPS และไม่มีข้อมูลยืนยันตัวตน พารามิเตอร์ หรือส่วนของที่อยู่ที่ดูคล้ายความลับ',
   'Home':'หน้าหลัก','Sessions':'เซสชัน','Workspaces':'เวิร์กสเปซ','Guide':'คู่มือ','System':'ระบบ',
   'Production isolated':'แยกโปรดักชันแล้ว','Only what matters right now.':'แสดงเฉพาะสิ่งที่สำคัญตอนนี้',
   'Waiting…':'กำลังรอ…','Light':'สว่าง','Dark':'มืด','Refresh':'รีเฟรช','UNKNOWN':'ไม่ทราบ',
@@ -1894,6 +1895,56 @@ async function refreshOAuthClients(){
   renderOAuthClients(status);
   const serverUrl=document.getElementById('oauthServerUrl');
   if(serverUrl)serverUrl.textContent=status.resource||'—';
+  const packageUrl=document.getElementById('pluginMcpUrl');
+  if(packageUrl&&status.resource&&!packageUrl.dataset.userEdited)packageUrl.value=status.resource;
+  updatePluginBundleButtons();
+}
+
+function validPluginBundleForm(){
+  const name=document.getElementById('pluginPackageName')?.value.trim()||'';
+  const version=document.getElementById('pluginPackageVersion')?.value.trim()||'';
+  const url=document.getElementById('pluginMcpUrl')?.value.trim()||'';
+  const description=document.getElementById('pluginPackageDescription')?.value.trim()||'';
+  let safeUrl=false;
+  try{
+    const parsed=new URL(url);
+    safeUrl=parsed.protocol==='https:'&&!!parsed.hostname&&!parsed.username&&!parsed.password&&!parsed.search&&!parsed.hash&&!/(?:^|\/)(?:token|secret|client[-_]?secret|access[-_]?token|refresh[-_]?token|owner[-_]?token|credential|api[-_]?key)(?:\/|$)/i.test(parsed.pathname);
+  }catch{}
+  const secretLike=/(?:authorization\s*[:=]|bearer\s+\S+|(?:client[_-]?secret|access[_-]?token|refresh[_-]?token|owner[_-]?token|oauth[_-]?token|signing[_-]?secret|api[_-]?key|password)\s*[:=])/i.test(description);
+  return /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(name)&&!/(?:--|\.\.)/.test(name)&&name.length<=64&&/^[A-Za-z0-9][A-Za-z0-9.+-]{0,63}$/.test(version)&&safeUrl&&description.length<=4000&&!secretLike;
+}
+
+function updatePluginBundleButtons(){
+  const valid=validPluginBundleForm();
+  document.querySelectorAll('[data-plugin-format]').forEach(button=>{button.disabled=!valid||button.dataset.busy==='true';});
+}
+
+async function downloadPluginBundle(format){
+  const message=document.getElementById('pluginBundleMessage');
+  const payload={
+    plugin_name:document.getElementById('pluginPackageName').value.trim(),
+    version:document.getElementById('pluginPackageVersion').value.trim(),
+    description:document.getElementById('pluginPackageDescription').value.trim(),
+    mcp_url:document.getElementById('pluginMcpUrl').value.trim(),
+    format
+  };
+  if(!validPluginBundleForm()){message.textContent=tr('Package details are invalid.');return;}
+  const buttons=[...document.querySelectorAll('[data-plugin-format]')];
+  buttons.forEach(button=>{button.dataset.busy='true';button.disabled=true;});
+  message.textContent=tr('Preparing download…');
+  try{
+    const response=await fetch('/api/connections/plugin-bundle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    if(!response.ok){let detail='';try{detail=(await response.json()).detail||'';}catch{}throw new Error(detail||tr('Download failed. Check the package details and try again.'));}
+    const blob=await response.blob();
+    const disposition=response.headers.get('Content-Disposition')||'';
+    const match=disposition.match(/filename="?([^";]+)"?/i);
+    const filename=match?.[1]||`${payload.plugin_name}-chatgpt-${payload.version}.${format}`;
+    const objectUrl=URL.createObjectURL(blob);
+    const anchor=document.createElement('a');anchor.href=objectUrl;anchor.download=filename;document.body.appendChild(anchor);anchor.click();anchor.remove();
+    window.setTimeout(()=>URL.revokeObjectURL(objectUrl),1000);
+    message.textContent=tr('Download ready.');
+  }catch(error){message.textContent=error?.message||tr('Download failed. Check the package details and try again.');}
+  finally{buttons.forEach(button=>{button.dataset.busy='false';});updatePluginBundleButtons();}
 }
 
 function renderOAuthSetup(data){
@@ -1951,6 +2002,7 @@ function oauthSetupText(){
 
 document.querySelectorAll('.primary-nav a[data-view], .mobile-nav a[data-view]').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();setView(a.dataset.view);}));
 document.addEventListener('click',e=>uiAction(async()=>{
+  const pluginDownload=e.target.closest('[data-plugin-format]');if(pluginDownload){await downloadPluginBundle(pluginDownload.dataset.pluginFormat);return;}
   const copy=e.target.closest('[data-copy-command],[data-copy-source]'); if(copy){await copyChatGPTCommand(copy);return;}
   const serverUrlCopy=e.target.closest('[data-copy-server-url]'); if(serverUrlCopy){const value=document.getElementById('oauthServerUrl')?.textContent||'';if(value&&value!=='—'&&value!=='Loading…')await copyText(value);return;}
   const approvalCopy=e.target.closest('[data-copy-approval-token]'); if(approvalCopy&&oauthApprovalTokenValue){await copyText(oauthApprovalTokenValue);return;}
@@ -2024,6 +2076,7 @@ document.addEventListener('click',e=>uiAction(async()=>{
   }
   const detach=e.target.closest('[data-gateway-detach]'); if(detach){await sendJson(`/api/gateway/sessions/${encodeURIComponent(detach.dataset.gatewayDetach)}/managed/detach`);await load();return;}
 }));
+['pluginPackageName','pluginPackageVersion','pluginPackageDescription','pluginMcpUrl'].forEach(id=>document.getElementById(id)?.addEventListener('input',event=>{if(id==='pluginMcpUrl')event.target.dataset.userEdited='true';updatePluginBundleButtons();}));
 document.getElementById('oauthGenerateApprovalBtn')?.addEventListener('click',()=>uiAction(async()=>{
   const button=document.getElementById('oauthGenerateApprovalBtn');
   button.disabled=true;

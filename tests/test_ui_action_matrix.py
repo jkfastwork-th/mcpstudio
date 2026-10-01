@@ -56,6 +56,7 @@ STATIC_DATA_HANDLERS = {
     "data-copy-oauth": "closest('[data-copy-oauth]')",
     "data-copy-server-url": "closest('[data-copy-server-url]')",
     "data-copy-approval-token": "closest('[data-copy-approval-token]')",
+    "data-plugin-format": "closest('[data-plugin-format]')",
 }
 
 DYNAMIC_ACTION_HANDLERS = {

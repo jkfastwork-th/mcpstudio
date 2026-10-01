@@ -75,6 +75,7 @@ from .pixel_art_studio import (
     VisualAssetOrchestrator,
 )
 from .world_authoring import WorldAuthoringError, WorldAuthoringManager
+from .plugin_bundle import router as plugin_bundle_router
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -256,6 +257,7 @@ async def _novnc_no_cache(request: Request, call_next):
 
 
 app.include_router(make_gateway_router(settings, db, gateway_sessions))
+app.include_router(plugin_bundle_router)
 
 
 def _oauth_error_response(exc: OAuthError) -> JSONResponse:
