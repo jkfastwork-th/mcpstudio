@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import asyncio
 import hashlib
 import json
 import os
@@ -118,98 +119,133 @@ class GatewaySessionManager:
         self.integrations = integrations
         self.machine_router = machine_router
         self.machine_enrollment = machine_enrollment
-        self._peer_notification_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
-        self._peer_notification_seen: dict[str, set[str]] = {}
-
-    def _peer_notification_queue(self, gateway_session_id: str) -> asyncio.Queue[dict[str, Any]]:
-        queue = self._peer_notification_queues.get(gateway_session_id)
-        if queue is None:
-            queue = asyncio.Queue(maxsize=100)
-            self._peer_notification_queues[gateway_session_id] = queue
-        self._peer_notification_seen.setdefault(gateway_session_id, set())
-        return queue
+        # Live transports are process-local and only accelerate delivery. The
+        # durable peer inbox remains the source of truth.
+        self._peer_notify_transports: dict[
+            tuple[str, str], set[asyncio.Queue[dict[str, Any]]]
+        ] = {}
+        self._peer_notify_seen: dict[asyncio.Queue[dict[str, Any]], dict[str, None]] = {}
 
     @staticmethod
-    def _peer_notification_event(message: dict[str, Any]) -> bytes:
-        payload = {
+    def _peer_notification(message: dict[str, Any]) -> dict[str, Any]:
+        return {
             "jsonrpc": "2.0",
             "method": "notifications/message",
             "params": {
                 "level": "info",
                 "logger": "hirda.peer",
                 "data": {
-                    "schema": "hirda-peer-notification-v1",
-                    "message_id": message.get("message_id"),
-                    "thread_id": message.get("thread_id"),
-                    "correlation_id": message.get("correlation_id"),
-                    "sender_principal_id": message.get("sender_principal_id"),
-                    "recipient_principal_id": message.get("recipient_principal_id"),
-                    "reply_to": message.get("reply_to"),
-                    "text": message.get("text"),
-                    "created_at": message.get("created_at"),
+                    key: message.get("text") if key == "text" else message.get(key)
+                    for key in (
+                        "message_id", "sender_principal_id", "recipient_principal_id",
+                        "thread_id", "correlation_id", "text",
+                    )
                 },
             },
         }
-        return ("event: message\ndata: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8")
 
-    def _enqueue_peer_notification(self, gateway_session_id: str, message: dict[str, Any]) -> bool:
-        message_id = str(message.get("message_id") or "").strip()
-        if not message_id:
-            return False
-        seen = self._peer_notification_seen.setdefault(gateway_session_id, set())
-        if message_id in seen:
-            return False
-        queue = self._peer_notification_queue(gateway_session_id)
-        if queue.full():
+    async def _notify_peer_message(self, message: dict[str, Any]) -> None:
+        """Best-effort live notify; never changes the durable inbox record."""
+        principal = str(message.get("recipient_principal_id") or "").strip()
+        scope = str(message.get("peer_scope_id") or "").strip()
+        message_id = str(message.get("message_id") or "")
+        queues = tuple(self._peer_notify_transports.get((principal, scope), ()))
+        delivered = 0
+        notification = self._peer_notification(message)
+        for queue in queues:
+            seen = self._peer_notify_seen.setdefault(queue, {})
+            if message_id in seen:
+                continue
             try:
-                queue.get_nowait()
-            except asyncio.QueueEmpty:
+                queue.put_nowait(notification)
+                seen[message_id] = None
+                if len(seen) > 500:
+                    seen.pop(next(iter(seen)))
+                delivered += 1
+            except asyncio.QueueFull:
+                continue
+        try:
+            await self.db.add_event(
+                "peer.notify.delivered" if delivered else "peer.notify.fallback",
+                "Peer notification delivered to a live transport" if delivered else "Peer message remains available in inbox.",
+                data={"message_id": message_id, "recipient_principal_id": principal,
+                      "peer_scope_id": scope, "active_transports": delivered},
+                stream_id=f"peer:{message.get('thread_id') or ''}",
+                correlation_id=message.get("correlation_id"),
+            )
+        except Exception:
+            pass
+
+    async def _connect_peer_notify_transport(
+        self, principal_id: str, peer_scope_id: str
+    ) -> asyncio.Queue[dict[str, Any]]:
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
+        self._peer_notify_seen[queue] = {}
+        key = (principal_id, peer_scope_id)
+        self._peer_notify_transports.setdefault(key, set()).add(queue)
+        try:
+            pending = await self.db.list_peer_inbox(
+                principal_id, peer_scope_id=peer_scope_id, limit=50, unclaimed_only=True
+            )
+            seen = self._peer_notify_seen[queue]
+            for item in pending:
+                if item["message_id"] in seen:
+                    continue
+                queue.put_nowait(self._peer_notification(item))
+                seen[item["message_id"]] = None
+                if len(seen) > 500:
+                    seen.pop(next(iter(seen)))
+        except Exception as exc:
+            self._peer_notify_transports.get(key, set()).discard(queue)
+            try:
+                await self.db.add_event(
+                    "peer.notify.fallback",
+                    "Peer inbox notification drain failed; messages remain available in the inbox.",
+                    severity="warning",
+                    data={"recipient_principal_id": principal_id, "peer_scope_id": peer_scope_id, "error": str(exc)[:500]},
+                )
+            except Exception:
                 pass
-        queue.put_nowait(dict(message))
-        seen.add(message_id)
-        return True
+        return queue
 
-    async def _publish_peer_notification(self, message: dict[str, Any]) -> list[str]:
-        peer_scope_id = str(message.get("peer_scope_id") or "").strip()
-        recipient_principal_id = str(message.get("recipient_principal_id") or "").strip()
-        if not peer_scope_id or not recipient_principal_id:
-            return []
-        delivered_to: list[str] = []
-        for session in await self.db.list_gateway_sessions(limit=1000):
-            if str(session.get("status") or "") != "connected":
-                continue
-            raw_metadata = session.get("metadata")
-            metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
-            if str(metadata.get("connector_peer_scope_id") or "").strip() != peer_scope_id:
-                continue
-            if str(metadata.get("connector_principal_id") or "").strip() != recipient_principal_id:
-                continue
-            gateway_session_id = str(session.get("id") or "").strip()
-            if gateway_session_id and self._enqueue_peer_notification(gateway_session_id, message):
-                delivered_to.append(gateway_session_id)
-        return delivered_to
+    def _disconnect_peer_notify_transport(
+        self, principal_id: str, peer_scope_id: str, queue: asyncio.Queue[dict[str, Any]]
+    ) -> None:
+        key = (principal_id, peer_scope_id)
+        transports = self._peer_notify_transports.get(key)
+        if transports is not None:
+            transports.discard(queue)
+            if not transports:
+                self._peer_notify_transports.pop(key, None)
+        self._peer_notify_seen.pop(queue, None)
 
-    async def _seed_peer_notifications_for_gateway(
-        self,
-        gateway_session_id: str,
-        session: dict[str, Any],
-    ) -> int:
-        raw_metadata = session.get("metadata")
-        metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
-        principal_id = str(metadata.get("connector_principal_id") or "").strip()
-        peer_scope_id = str(metadata.get("connector_peer_scope_id") or "").strip()
-        if not principal_id or not peer_scope_id:
-            return 0
-        added = 0
-        for message in await self.db.list_peer_inbox(
-            principal_id,
-            peer_scope_id=peer_scope_id,
-            limit=100,
-            unclaimed_only=True,
-        ):
-            if self._enqueue_peer_notification(gateway_session_id, message):
-                added += 1
-        return added
+    async def _peer_notification_stream(
+        self, response: httpx.Response, queue: asyncio.Queue[dict[str, Any]]
+    ) -> AsyncIterator[bytes]:
+        source = response.aiter_raw().__aiter__()
+        source_task: asyncio.Task[bytes] | None = asyncio.create_task(source.__anext__())
+        notice_task: asyncio.Task[dict[str, Any]] | None = asyncio.create_task(queue.get())
+        try:
+            while source_task is not None or notice_task is not None:
+                pending = {task for task in (source_task, notice_task) if task is not None}
+                done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                if notice_task is not None and notice_task in done:
+                    yield ("data: " + json.dumps(notice_task.result(), ensure_ascii=False) + "\n\n").encode()
+                    notice_task = asyncio.create_task(queue.get())
+                if source_task is not None and source_task in done:
+                    try:
+                        chunk = source_task.result()
+                    except StopAsyncIteration:
+                        source_task = None
+                    else:
+                        yield chunk
+                        source_task = asyncio.create_task(source.__anext__())
+        finally:
+            for task in (source_task, notice_task):
+                if task is not None:
+                    task.cancel()
+            await asyncio.gather(*(t for t in (source_task, notice_task) if t is not None), return_exceptions=True)
+
 
     def authenticate(self, request: Request) -> tuple[str, str, str, str, str]:
         """Authenticate and derive a stable client identity.
@@ -1238,6 +1274,8 @@ class GatewaySessionManager:
             tools = {}
             capabilities["tools"] = tools
         tools["listChanged"] = True
+        if not isinstance(capabilities.get("logging"), dict):
+            capabilities["logging"] = {}
         return payload
 
     def _augment_initialize_content(self, content: bytes, content_type: str) -> bytes:
@@ -3235,15 +3273,8 @@ class GatewaySessionManager:
                         stream_id=f"peer:{message['thread_id']}",
                         correlation_id=message["correlation_id"],
                     )
-                    pushed = await self._publish_peer_notification(message)
-                    return {
-                        "message": message,
-                        "notification": {
-                            "schema": "hirda-peer-notification-delivery-v1",
-                            "queued_gateway_sessions": pushed,
-                            "online_delivery_count": len(pushed),
-                        },
-                    }
+                    await self._notify_peer_message(message)
+                    return {"message": message}
                 if name == "hirda_peer_inbox":
                     return {
                         "principal_id": principal_id,
@@ -3292,15 +3323,8 @@ class GatewaySessionManager:
                         stream_id=f"peer:{message['thread_id']}",
                         correlation_id=message["correlation_id"],
                     )
-                    pushed = await self._publish_peer_notification(message)
-                    return {
-                        "message": message,
-                        "notification": {
-                            "schema": "hirda-peer-notification-delivery-v1",
-                            "queued_gateway_sessions": pushed,
-                            "online_delivery_count": len(pushed),
-                        },
-                    }
+                    await self._notify_peer_message(message)
+                    return {"message": message}
                 if name == "hirda_peer_threads":
                     return {
                         "principal_id": principal_id,
@@ -5320,59 +5344,27 @@ class GatewaySessionManager:
                 media_type="text/event-stream",
             )
 
-        if request.method == "GET":
-            await self._seed_peer_notifications_for_gateway(
-                gateway_session_id,
-                session,
-            )
-            peer_queue = self._peer_notification_queue(gateway_session_id)
-            upstream_iter = response.aiter_raw()
-
-            async def peer_body_iter() -> AsyncIterator[bytes]:
-                upstream_task: asyncio.Task[bytes] | None = asyncio.create_task(anext(upstream_iter))
-                peer_task: asyncio.Task[dict[str, Any]] | None = asyncio.create_task(peer_queue.get())
-                try:
-                    while upstream_task is not None and peer_task is not None:
-                        done, _pending = await asyncio.wait(
-                            {upstream_task, peer_task},
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
-                        if upstream_task in done:
-                            try:
-                                chunk = upstream_task.result()
-                            except StopAsyncIteration:
-                                break
-                            yield chunk
-                            upstream_task = asyncio.create_task(anext(upstream_iter))
-                        if peer_task in done:
-                            yield self._peer_notification_event(peer_task.result())
-                            peer_task = asyncio.create_task(peer_queue.get())
-                finally:
-                    for task in (upstream_task, peer_task):
-                        if task is not None and not task.done():
-                            task.cancel()
-                    if upstream_task is not None:
-                        await asyncio.gather(upstream_task, return_exceptions=True)
-                    if peer_task is not None:
-                        await asyncio.gather(peer_task, return_exceptions=True)
-                    await response.aclose()
-                    await client.aclose()
-
-            return StreamingResponse(
-                peer_body_iter(),
-                status_code=response.status_code,
-                headers=response_headers,
-                media_type="text/event-stream",
-            )
-
         await record_reflex_outcome(response.status_code, "streaming")
 
         stream_status_code = int(response.status_code or 0)
+        peer_queue: asyncio.Queue[dict[str, Any]] | None = None
+        peer_identity: tuple[str, str] | None = None
+        if request.method == "GET":
+            principal = str((session.get("metadata") or {}).get("connector_principal_id") or "").strip()
+            scope = str((session.get("metadata") or {}).get("connector_peer_scope_id") or "").strip()
+            if principal and scope:
+                peer_identity = (principal, scope)
+                peer_queue = await self._connect_peer_notify_transport(principal, scope)
         async def body_iter() -> AsyncIterator[bytes]:
             collected = bytearray()
             completed = False
             try:
-                async for chunk in response.aiter_raw():
+                stream = (
+                    self._peer_notification_stream(response, peer_queue)
+                    if peer_queue is not None
+                    else response.aiter_raw()
+                )
+                async for chunk in stream:
                     if len(collected) < 2_000_000:
                         remaining = 2_000_000 - len(collected)
                         collected.extend(chunk[:remaining])
@@ -5413,6 +5405,8 @@ class GatewaySessionManager:
                         },
                     )
                 finally:
+                    if peer_identity is not None and peer_queue is not None:
+                        self._disconnect_peer_notify_transport(*peer_identity, peer_queue)
                     await response.aclose()
                     await client.aclose()
 

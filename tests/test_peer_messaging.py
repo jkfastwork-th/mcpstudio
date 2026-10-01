@@ -74,6 +74,80 @@ async def test_peer_db_round_trip_is_principal_scoped(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_live_peer_notification_targets_matching_scope_only(tmp_path):
+    db = Database(str(tmp_path / "peer-notify.sqlite3"))
+    await db.init()
+    gateway = GatewaySessionManager(cast(Any, SimpleNamespace()), db)
+    matching = await gateway._connect_peer_notify_transport("oauth-b", "scope-one")
+    wrong_scope = await gateway._connect_peer_notify_transport("oauth-b", "scope-two")
+    sent = await db.create_peer_message(
+        peer_scope_id="scope-one",
+        sender_principal_id="oauth-a",
+        recipient_principal_id="oauth-b",
+        text="live ping",
+        correlation_id="notify-live",
+    )
+
+    await gateway._notify_peer_message(sent)
+
+    notification = matching.get_nowait()
+    assert notification["method"] == "notifications/message"
+    assert notification["params"]["level"] == "info"
+    assert notification["params"]["logger"] == "hirda.peer"
+    assert notification["params"]["data"] == {
+        "message_id": sent["message_id"],
+        "sender_principal_id": "oauth-a",
+        "recipient_principal_id": "oauth-b",
+        "thread_id": sent["thread_id"],
+        "correlation_id": "notify-live",
+        "text": "live ping",
+    }
+    assert wrong_scope.empty()
+
+
+@pytest.mark.asyncio
+async def test_offline_peer_notify_falls_back_to_unclaimed_inbox(tmp_path):
+    db = Database(str(tmp_path / "peer-offline.sqlite3"))
+    await db.init()
+    gateway = GatewaySessionManager(cast(Any, SimpleNamespace()), db)
+    sent = await db.create_peer_message(
+        peer_scope_id="scope-one",
+        sender_principal_id="oauth-a",
+        recipient_principal_id="oauth-b",
+        text="offline ping",
+    )
+
+    await gateway._notify_peer_message(sent)
+
+    inbox = await db.list_peer_inbox("oauth-b", peer_scope_id="scope-one", unclaimed_only=True)
+    assert [item["message_id"] for item in inbox] == [sent["message_id"]]
+    assert inbox[0]["claimed_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_reconnect_transport_drains_pending_without_claiming_or_deleting(tmp_path):
+    db = Database(str(tmp_path / "peer-reconnect.sqlite3"))
+    await db.init()
+    gateway = GatewaySessionManager(cast(Any, SimpleNamespace()), db)
+    sent = await db.create_peer_message(
+        peer_scope_id="scope-one",
+        sender_principal_id="oauth-a",
+        recipient_principal_id="oauth-b",
+        text="reconnect ping",
+        correlation_id="notify-reconnect",
+    )
+
+    # A newly opened GET/SSE transport performs this same bounded, scoped drain.
+    queue = await gateway._connect_peer_notify_transport("oauth-b", "scope-one")
+    notification = queue.get_nowait()
+    assert notification["params"]["data"]["message_id"] == sent["message_id"]
+    inbox = await db.list_peer_inbox("oauth-b", peer_scope_id="scope-one", unclaimed_only=True)
+    assert len(inbox) == 1
+    assert inbox[0]["message_id"] == sent["message_id"]
+    assert inbox[0]["claimed_at"] is None
+
+
+@pytest.mark.asyncio
 async def test_peer_thread_cannot_be_hijacked_or_recorrelated(tmp_path):
     db = Database(str(tmp_path / "peer.sqlite3"))
     await db.init()

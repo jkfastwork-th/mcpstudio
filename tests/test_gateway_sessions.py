@@ -264,6 +264,16 @@ def test_tools_list_includes_hirda_backend_before_upstream(tmp_path: Path):
     }
     result = manager._augment_tools_payload(payload)
     names = [tool["name"] for tool in result["result"]["tools"]]
+    peer_tools = [
+        "hirda_peer_list",
+        "hirda_peer_send",
+        "hirda_peer_inbox",
+        "hirda_peer_claim",
+        "hirda_peer_reply",
+        "hirda_peer_threads",
+    ]
+    for tool_name in peer_tools:
+        assert tool_name in names
     assert "hirda__desktop_commander__read_file" in names
     assert "serena_tool" in names
     assert names.index("hirda__desktop_commander__read_file") < names.index("serena_tool")
