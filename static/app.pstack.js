@@ -52,12 +52,12 @@ function pstackFlowSteps(trace, events){
   const pstackDone=phases.has('handoff_ready');
   const pstackSeen=actors.has('pstack');
   const jevSeen=actors.has('jev')||[...phases].some(phase=>phase.includes('jev'));
-  const hirdaDone=phases.has('hirda_execution_started')
-    ||phases.has('hirda_execution_completed');
+  const hirdaDone=phases.has('hirda_execution_completed');
   const hirdaSeen=actors.has('hirda');
   const toolStarted=phases.has('tool_started');
   const toolDone=phases.has('tool_completed')||phases.has('hirda_execution_completed');
   const downstreamSeen=hirdaSeen||hirdaDone||toolStarted||toolDone;
+  const hirdaReached=hirdaSeen||hirdaDone||toolStarted||toolDone;
   const verifySeen=[...phases].some(phase=>
     phase.includes('verify')
     ||phase.includes('verification')
@@ -75,18 +75,27 @@ function pstackFlowSteps(trace, events){
         state:status==='passed'?'done':status==='failed'?'failed':status==='active'?'active':'waiting',
       };
     });
-    return [
+    const lifecycleFlow=[
       {label:'Task',state:trace?'done':'waiting'},
       {label:'Pstack',state:pstackDone?'done':(pstackSeen?'active':(downstreamSeen?'skipped':'waiting'))},
+      {label:'JEV',state:jevSeen?'done':(downstreamSeen?'skipped':'waiting')},
+      {label:'HIRDA',state:hirdaDone?'done':(hirdaReached?'active':'waiting')},
+      {label:'Runtime / Tools',state:toolDone?'done':(toolStarted?'active':'waiting')},
       ...lifecycleSteps,
     ];
+    if(failed){
+      const activeIndex=[...lifecycleFlow].reverse().findIndex(step=>step.state!=='waiting');
+      const index=activeIndex<0?0:lifecycleFlow.length-1-activeIndex;
+      lifecycleFlow[index]={...lifecycleFlow[index],state:'failed'};
+    }
+    return lifecycleFlow;
   }
 
   const steps=[
     {label:'Task',state:trace?'done':'waiting'},
     {label:'Pstack',state:pstackDone?'done':(pstackSeen?'active':(downstreamSeen?'skipped':'waiting'))},
     {label:'JEV',state:jevSeen?'done':(downstreamSeen?'skipped':'waiting')},
-    {label:'HIRDA',state:hirdaDone?'done':(hirdaSeen?'active':'waiting')},
+    {label:'HIRDA',state:hirdaDone?'done':(hirdaReached?'active':'waiting')},
     {label:'Runtime / Tools',state:toolDone?'done':(toolStarted?'active':'waiting')},
     {label:'Verify',state:verifySeen?'done':(completed?'done':'waiting')},
     {label:'Done',state:completed?'done':'waiting'},

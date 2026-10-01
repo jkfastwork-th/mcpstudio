@@ -77,6 +77,7 @@ async def test_coding_ingress_auto_applies_pstack_without_taking_runtime_authori
     name, arguments, context = manager.calls[0]
     assert name == "hirda__pstack__route_task"
     assert arguments["goal"] == "Fix the reconnect crash regression."
+    assert arguments["workflow_hint"] == "engineering_task"
     assert context["task_id"] == "COG-42"
     assert context["managed_session_id"] == "ms-42"
 

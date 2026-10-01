@@ -2431,7 +2431,7 @@ class GatewaySessionManager:
             task_id = f"TASK-{uuid4().hex[:12].upper()}"
             routed = await self.integrations.call_backend_tool(
                 "hirda__pstack__route_task",
-                {"goal": goal_text},
+                {"goal": goal_text, "workflow_hint": "engineering_task"},
                 context={
                     "task_id": task_id,
                     "managed_session_id": managed_session.get("id"),
@@ -2467,6 +2467,7 @@ class GatewaySessionManager:
                 "workflow": routed.get("workflow"),
                 "workspace_key": managed_session.get("workspace_key"),
                 "managed_session_id": managed_session.get("id"),
+                "gateway_session_id": gateway_session_id,
                 "status": "ready_for_hirda",
                 "workflow_directive": directive,
                 "lifecycle": lifecycle_for_workflow(routed.get("workflow")),
@@ -2550,7 +2551,8 @@ class GatewaySessionManager:
         trace_id = str(task.get("trace_id") or "").strip()
         if not trace_id:
             return
-        if status == "running" and str(task.get("status") or "").casefold() == "ready_for_hirda":
+        task_status = str(task.get("status") or "").casefold()
+        if status == "running" and task_status in {"ready_for_hirda", "failed"}:
             task = {**task, "status": "active"}
             studio_session_id = str(session.get("studio_session_id") or "").strip()
             if studio_session_id:
@@ -2579,6 +2581,12 @@ class GatewaySessionManager:
                 stream_id=f"pstack:{trace_id}",
                 correlation_id=trace_id,
             )
+        elif status == "failed" and task_status != "failed":
+            task = {**task, "status": "failed"}
+            await self._persist_active_pstack_task(
+                str(session.get("id") or "").strip(),
+                task,
+            )
         phase = "tool_started" if status == "running" else "tool_completed"
         title = (
             f"{tool_name} started"
@@ -2597,7 +2605,11 @@ class GatewaySessionManager:
                 "detail": detail,
                 "status": status,
                 "tool": tool_name,
-                "trace_status": "executing" if status == "running" else "active",
+                "trace_status": (
+                    "executing" if status == "running"
+                    else "failed" if status == "failed"
+                    else "active"
+                ),
                 "metadata": dict(metadata or {}),
             },
             stream_id=f"pstack:{trace_id}",

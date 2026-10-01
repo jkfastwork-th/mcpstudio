@@ -56,6 +56,29 @@ async def test_route_task_emits_bounded_trace_and_hirda_boundary():
     assert "preferred_runtime" not in request
 
 
+def test_review_named_workspace_does_not_select_review_workflow():
+    module = _load_module()
+    workflow = module.PstackIntegration._select_workflow(
+        "mcp-studio-social-hub-task-connector-review",
+    )
+    assert workflow == "feature"
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Review this diff for correctness.",
+        "Audit this code for security issues.",
+        "Interrogate the design assumptions.",
+        "Complete the PR review.",
+    ],
+)
+def test_explicit_review_intent_selects_review_workflow(goal):
+    module = _load_module()
+    workflow = module.PstackIntegration._select_workflow(goal)
+    assert workflow == "review"
+
+
 @pytest.mark.asyncio
 async def test_pstack_failure_is_visible_in_activity_trace():
     module = _load_module()

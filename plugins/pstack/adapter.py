@@ -69,6 +69,11 @@ _TOOL_CATALOG = {
                 "enum": ["bug-fix", "feature", "review", None],
                 "default": None,
             },
+            "workflow_hint": {
+                "type": ["string", "null"],
+                "enum": ["engineering_task", None],
+                "default": None,
+            },
         },
         ["goal"],
     ),
@@ -336,17 +341,29 @@ class PstackIntegration:
         }
 
     @staticmethod
-    def _select_workflow(goal: str, requested: str | None = None) -> str:
+    def _select_workflow(
+        goal: str,
+        requested: str | None = None,
+        workflow_hint: str | None = None,
+    ) -> str:
         explicit = str(requested or "").strip().casefold()
         if explicit:
             if explicit not in _WORKFLOW_SOURCES:
                 raise PstackAdapterError("pstack_workflow_invalid")
             return explicit
         lowered = goal.casefold()
-        if re.search(r"\b(review|interrogate|audit|diff|pull request|pr)\b", lowered):
+        review_intent = re.search(
+            r"\binterrogate\b|\b(?:review|audit)\s+(?:(?:this|the|my|our|these)\s+)?"
+            r"(?:diff|patch|code|changes?|implementation|pull request|pr|design|architecture)\b"
+            r"|\b(?:pull request|pr)\s+review\b",
+            lowered,
+        )
+        if review_intent:
             return "review"
         if re.search(r"\b(bug|fix|broken|regression|error|crash|defect)\b", lowered):
             return "bug-fix"
+        if str(workflow_hint or "").strip().casefold() == "engineering_task":
+            return "feature"
         return "feature"
 
     @staticmethod
@@ -586,6 +603,7 @@ class PstackIntegration:
                 workflow = self._select_workflow(
                     goal,
                     arguments.get("workflow"),
+                    arguments.get("workflow_hint"),
                 )
                 self._emit_activity(
                     trace_id,
