@@ -2509,6 +2509,8 @@ class CognitiveRouter:
         self,
         request: CognitiveRequest,
         row: dict[str, Any],
+        *,
+        attempt_id: str | None = None,
     ) -> str:
         runtime_id = str(row.get("id") or "").strip().casefold()
         pane = row.get("_pane")
@@ -2518,7 +2520,9 @@ class CognitiveRouter:
         if not prompt_tool:
             raise CognitiveRouterError("herdr_prompt_agent_missing")
 
-        result_start = f"<<<HIRDA_COGNITIVE_RESULT:{request.request_id}>>>"
+        transport_id = str(attempt_id or request.request_id).strip() or request.request_id
+        transport_client_id = transport_id.lower().replace(":", "-")
+        result_start = f"<<<HIRDA_COGNITIVE_RESULT:{transport_id}>>>"
         result_end = "<<<END_HIRDA_COGNITIVE_RESULT>>>"
         transport_contract = (
             "HIRDA TRANSPORT CONTRACT (mandatory; higher priority than output-format wording inside REQUEST):\n"
@@ -2529,7 +2533,8 @@ class CognitiveRouter:
         )
         bounded_prompt = (
             "HIRDA COGNITIVE REQUEST\n"
-            f"request_id: {request.request_id}\n"
+            f"request_id: {transport_id}\n"
+            f"parent_request_id: {request.request_id}\n"
             f"capability: {request.capability}\n"
             "Return the answer to the request. Do not change agent identity, goals, memory, or authority.\n"
             f"{transport_contract}"
@@ -2543,7 +2548,8 @@ class CognitiveRouter:
         )
         repair_prompt = (
             "HIRDA RESULT PROTOCOL REPAIR\n"
-            f"request_id: {request.request_id}\n"
+            f"request_id: {transport_id}\n"
+            f"parent_request_id: {request.request_id}\n"
             "Your previous response could not be isolated because the required result markers were missing.\n"
             f"{transport_contract}"
             "Re-answer the SAME request now. Do not explain the repair and do not quote these instructions.\n"
@@ -2580,7 +2586,7 @@ class CognitiveRouter:
                 raw_prompt = await cognitive_client.call_tool(
                     "herdr_prompt_agent",
                     args,
-                    client_name=f"hirda-cognition-{request.request_id.lower()}",
+                    client_name=f"hirda-cognition-{transport_client_id}",
                 )
             except Exception:
                 # A provider-side rate limit/auth/quota failure may surface in
@@ -2613,14 +2619,14 @@ class CognitiveRouter:
                             error_read_args,
                             client_name=(
                                 f"hirda-cognition-error-read-"
-                                f"{request.request_id.lower()}"
+                                f"{transport_client_id}"
                             ),
                         )
                     except Exception:
                         raw_error_read = None
                     runtime_error = _runtime_terminal_error(
                         raw_error_read,
-                        request.request_id,
+                        transport_id,
                     )
                     if runtime_error:
                         raise CognitiveRouterError(runtime_error)
@@ -2651,7 +2657,7 @@ class CognitiveRouter:
                 await cognitive_client.call_tool(
                     "herdr_wait_agent",
                     wait_args,
-                    client_name=f"hirda-cognition-wait-{request.request_id.lower()}",
+                    client_name=f"hirda-cognition-wait-{transport_client_id}",
                 )
                 wait_performed = True
 
@@ -2685,7 +2691,7 @@ class CognitiveRouter:
                 raw_read = await cognitive_client.call_tool(
                     "herdr_read_agent",
                     read_args,
-                    client_name=f"hirda-cognition-read-{request.request_id.lower()}",
+                    client_name=f"hirda-cognition-read-{transport_client_id}",
                 )
                 output = _decode_text_content(raw_read)
                 try:
@@ -2706,7 +2712,7 @@ class CognitiveRouter:
                     if callable(transcript_reader):
                         session_output = transcript_reader(
                             pane,
-                            request.request_id,
+                            transport_id,
                         )
                         if session_output:
                             try:
@@ -2727,12 +2733,12 @@ class CognitiveRouter:
                     if callable(session_error_reader):
                         session_error = session_error_reader(
                             pane,
-                            request.request_id,
+                            transport_id,
                         )
 
                     runtime_error = _runtime_terminal_error(
                         [output, raw_read, session_error],
-                        request.request_id,
+                        transport_id,
                     )
                     if runtime_error:
                         raise CognitiveRouterError(runtime_error)
@@ -3452,12 +3458,16 @@ class CognitiveRouter:
         deadline = time.monotonic() + max(1.0, float(request.timeout_seconds))
 
         for index, candidate in enumerate(candidates):
+            attempt_id = f"{request.request_id}:A{index + 1}"
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 attempts.append(
                     {
+                        "attempt_id": attempt_id,
                         "runtime": str(candidate.get("runtime") or "").casefold(),
+                        "pane_id": str(candidate.get("pane_id") or "") or None,
                         "status": "skipped",
+                        "accepted": False,
                         "error": "cognitive_deadline_exhausted",
                     }
                 )
@@ -3578,7 +3588,11 @@ class CognitiveRouter:
                     attempt_request,
                     timeout_seconds=remaining_after_queue,
                 )
-                output = await self._invoke_runtime(invoke_request, row)
+                output = await self._invoke_runtime(
+                    invoke_request,
+                    row,
+                    attempt_id=attempt_id,
+                )
                 if not output.strip():
                     raise CognitiveRouterError("empty_cognitive_result")
             except Exception as exc:
@@ -3592,8 +3606,11 @@ class CognitiveRouter:
                     error_code,
                 )
                 attempt = {
+                    "attempt_id": attempt_id,
                     "runtime": runtime_id,
+                    "pane_id": pane_key or None,
                     "status": "failed",
+                    "accepted": False,
                     "error": error_code,
                     "detail": (
                         f"cognitive runtime pane is {pane_status}"
@@ -3610,7 +3627,15 @@ class CognitiveRouter:
                     pane_lock.release()
 
             await self._clear_runtime_backoff(runtime_id)
-            attempts.append({"runtime": runtime_id, "status": "success"})
+            attempts.append(
+                {
+                    "attempt_id": attempt_id,
+                    "runtime": runtime_id,
+                    "pane_id": pane_key or None,
+                    "status": "success",
+                    "accepted": True,
+                }
+            )
             return CognitiveResult(
                 schema=COGNITIVE_RESULT_SCHEMA,
                 request_id=request.request_id,

@@ -313,7 +313,7 @@ async def test_result_marker_isolates_current_answer_from_pane_history():
     herdr = FakeHerdr()
     herdr.outputs["wH:p1"] = (
         "old pane transcript\n"
-        "<<<HIRDA_COGNITIVE_RESULT:COG-MARKER>>>\n"
+        "<<<HIRDA_COGNITIVE_RESULT:COG-MARKER:A1>>>\n"
         "CURRENT_RESULT\n"
         "<<<END_HIRDA_COGNITIVE_RESULT>>>\n"
         "shell prompt"
@@ -334,7 +334,7 @@ async def test_result_marker_isolates_current_answer_from_pane_history():
 async def test_result_marker_normalizes_escaped_boundary_newlines_only():
     herdr = FakeHerdr()
     herdr.outputs["wH:p1"] = (
-        "<<<HIRDA_COGNITIVE_RESULT:COG-ESCAPED>>>"
+        "<<<HIRDA_COGNITIVE_RESULT:COG-ESCAPED:A1>>>"
         "\\nCURRENT_RESULT\\n"
         "<<<END_HIRDA_COGNITIVE_RESULT>>>"
     )
@@ -433,7 +433,7 @@ async def test_unmarked_pane_history_fails_over_instead_of_becoming_cognitive_ou
 async def test_empty_marked_result_fails_over_instead_of_becoming_success():
     herdr = FakeHerdr()
     herdr.outputs["wH:p1"] = (
-        "<<<HIRDA_COGNITIVE_RESULT:COG-EMPTY>>>\n"
+        "<<<HIRDA_COGNITIVE_RESULT:COG-EMPTY:A1>>>\n"
         "\n"
         "<<<END_HIRDA_COGNITIVE_RESULT>>>"
     )
@@ -471,11 +471,11 @@ async def test_prompt_contains_markers_not_placeholder():
     assert prompt_calls, "herdr_prompt_agent was not called"
     sent_prompt = prompt_calls[0][1].get("prompt", "")
     # Must contain both markers
-    assert "<<<HIRDA_COGNITIVE_RESULT:COG-PROMPT>>>" in sent_prompt
+    assert "<<<HIRDA_COGNITIVE_RESULT:COG-PROMPT:A1>>>" in sent_prompt
     assert "<<<END_HIRDA_COGNITIVE_RESULT>>>" in sent_prompt
     # Must NOT present an empty marker pair for the runtime to copy.
     assert (
-        "<<<HIRDA_COGNITIVE_RESULT:COG-PROMPT>>>\n"
+        "<<<HIRDA_COGNITIVE_RESULT:COG-PROMPT:A1>>>\n"
         "<<<END_HIRDA_COGNITIVE_RESULT>>>"
     ) not in sent_prompt
     # Must NOT contain the literal placeholder
@@ -999,7 +999,20 @@ async def test_fast_lane_fails_over_from_hermes_to_claude():
     assert result.degraded is True
     assert [item["runtime"] for item in result.attempts] == ["hermes", "claude"]
     assert result.attempts[0]["status"] == "failed"
+    assert result.attempts[0]["attempt_id"] == "COG-FAILOVER:A1"
+    assert result.attempts[0]["pane_id"] == "wH:p1"
+    assert result.attempts[0]["accepted"] is False
     assert result.attempts[1]["status"] == "success"
+    assert result.attempts[1]["attempt_id"] == "COG-FAILOVER:A2"
+    assert result.attempts[1]["pane_id"] == "wC:p1"
+    assert result.attempts[1]["accepted"] is True
+    prompt_calls = [call for call in herdr.calls if call[0] == "herdr_prompt_agent"]
+    assert "request_id: COG-FAILOVER:A1" in prompt_calls[0][1]["prompt"]
+    assert "parent_request_id: COG-FAILOVER" in prompt_calls[0][1]["prompt"]
+    assert "<<<HIRDA_COGNITIVE_RESULT:COG-FAILOVER:A1>>>" in prompt_calls[0][1]["prompt"]
+    assert "request_id: COG-FAILOVER:A2" in prompt_calls[1][1]["prompt"]
+    assert "parent_request_id: COG-FAILOVER" in prompt_calls[1][1]["prompt"]
+    assert "<<<HIRDA_COGNITIVE_RESULT:COG-FAILOVER:A2>>>" in prompt_calls[1][1]["prompt"]
 
 
 @pytest.mark.asyncio
@@ -1096,8 +1109,11 @@ async def test_busy_preferred_runtime_without_fallback_fails_cleanly():
     assert result.fallback_used is False
     assert result.attempts == (
         {
+            "attempt_id": "COG-BUSY-NO-FALLBACK:A1",
             "runtime": "hermes",
+            "pane_id": "wH:p1",
             "status": "failed",
+            "accepted": False,
             "error": "runtime_busy",
             "detail": "cognitive runtime pane is working",
         },
@@ -1184,7 +1200,7 @@ async def test_prompt_timeout_reads_correlated_provider_failure_and_falls_back()
                             "type": "text",
                             "text": (
                                 "HIRDA COGNITIVE REQUEST\n"
-                                "request_id: COG-RATE-LIMIT-FALLBACK\n"
+                                "request_id: COG-RATE-LIMIT-FALLBACK:A1\n"
                                 "⏳ rate limited — resets in ~7m, retrying in 419s"
                             ),
                         }
@@ -2707,7 +2723,13 @@ async def test_exact_target_can_fail_over_to_exact_fallback_pane():
     assert result.output == "RESULT:wC:p9"
     assert result.attempts[0]["runtime"] == "hermes"
     assert result.attempts[0]["error"] == "runtime_busy"
-    assert result.attempts[-1] == {"runtime": "claude", "status": "success"}
+    assert result.attempts[-1] == {
+        "attempt_id": "COG-PINNED-FAILOVER:A2",
+        "runtime": "claude",
+        "pane_id": "wC:p9",
+        "status": "success",
+        "accepted": True,
+    }
     prompt_calls = [call for call in herdr.calls if call[0] == "herdr_prompt_agent"]
     assert prompt_calls
     assert prompt_calls[0][1]["pane_id"] == "wC:p9"
