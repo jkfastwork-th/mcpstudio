@@ -1,0 +1,31 @@
+schema: hirda-plugin-v1
+id: social-hub-task
+name: Social Hub Task Connector
+version: 0.1.0
+adapter:
+  runtime: python
+  entry: adapter.py
+  class: SocialHubTaskIntegration
+capabilities:
+  - social_hub_task
+  - social_media_scheduling
+tools:
+  - social_task_create
+  - social_task_attach_asset
+  - social_task_status
+permissions:
+  social_task_create: write
+  social_task_attach_asset: write
+  social_task_status: read
+health:
+  type: adapter_probe
+routing:
+  mode: communication-backend
+  preferred_lanes: [claude, codex, hermes]
+metadata:
+  backend_capability: true
+  executor_identity: fern
+  owner_social_accounts: true
+  runtime_authority: hirda
+  governance_authority: false
+  external_action_authority: false
