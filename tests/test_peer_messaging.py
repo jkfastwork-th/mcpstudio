@@ -413,11 +413,16 @@ async def test_peer_notification_push_targets_matching_online_gateway(tmp_path):
         text="push me",
         correlation_id="notify-cert",
     )
-    delivered = await gateway._publish_peer_notification(message)
+    matching = await gateway._connect_peer_notify_transport("oauth-somchai", "scope-main")
+    other_scope = await gateway._connect_peer_notify_transport("oauth-somchai", "scope-other")
+    await gateway._notify_peer_message(message)
 
-    assert delivered == [somchai["id"]]
-    queued = gateway._peer_notification_queue(somchai["id"]).get_nowait()
-    assert queued["message_id"] == message["message_id"]
+    assert matching.qsize() == 1
+    queued = matching.get_nowait()
+    assert queued["params"]["data"]["message_id"] == message["message_id"]
+    assert other_scope.empty()
+    gateway._disconnect_peer_notify_transport("oauth-somchai", "scope-main", matching)
+    gateway._disconnect_peer_notify_transport("oauth-somchai", "scope-other", other_scope)
 
 
 @pytest.mark.asyncio
@@ -453,12 +458,14 @@ async def test_peer_notification_replays_unclaimed_inbox_on_reconnect(tmp_path):
         },
     )
 
-    assert await gateway._seed_peer_notifications_for_gateway(session["id"], session) == 1
-    assert await gateway._seed_peer_notifications_for_gateway(session["id"], session) == 0
-
-    queued = gateway._peer_notification_queue(session["id"]).get_nowait()
-    event = gateway._peer_notification_event(queued).decode("utf-8")
-    assert queued["message_id"] == message["message_id"]
-    assert '"method": "notifications/message"' in event
-    assert '"logger": "hirda.peer"' in event
-    assert "offline replay" in event
+    queue = await gateway._connect_peer_notify_transport("oauth-somchai", "scope-main")
+    assert queue.qsize() == 1
+    notification = queue.get_nowait()
+    data = notification["params"]["data"]
+    assert data["message_id"] == message["message_id"]
+    assert notification["method"] == "notifications/message"
+    assert notification["params"]["logger"] == "hirda.peer"
+    assert data["text"] == "offline replay"
+    inbox = await db.list_peer_inbox("oauth-somchai", peer_scope_id="scope-main", unclaimed_only=True)
+    assert [item["message_id"] for item in inbox] == [message["message_id"]]
+    gateway._disconnect_peer_notify_transport("oauth-somchai", "scope-main", queue)
