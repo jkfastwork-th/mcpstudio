@@ -2432,6 +2432,128 @@ async def test_pane_routing_enforce_rejects_explicit_unowned_target():
 
 
 @pytest.mark.asyncio
+async def test_anonymous_routing_does_not_select_principal_owned_pane_in_enforce_mode():
+    herdr = FakeHerdr()
+    herdr.snapshot["panes"]["panes"].append(
+        {
+            "pane_id": "wH:p0",
+            "agent": "hermes",
+            "agent_status": "idle",
+            "agent_name": "hirda-nova-hermes",
+        }
+    )
+    cfg = studio()
+    cfg.cognitive_pane_routing_mode = "enforce"
+    cfg.cognitive_runtime_bindings = {
+        "hermes": {
+            "machine_id": "openclaw",
+            "backend_id": "hermes-runtime",
+            "pane_ids": ["wH:p1"],
+            "principal_pane_name_prefixes": {
+                "fern": ["hirda-fern-hermes"],
+                "nova": ["hirda-nova-hermes"],
+            },
+        }
+    }
+    router = CognitiveRouter(cfg, herdr, FakeRuntimes())
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-ANON-GENERIC",
+            "prompt": "Return exactly GENERIC.",
+            "capability": "fast_utility",
+            "preferred_runtime": "hermes",
+            "allow_fallback": False,
+        }
+    )
+
+    assert len(plan["candidates"]) == 1
+    assert plan["candidates"][0]["pane_id"] == "wH:p1"
+
+
+@pytest.mark.asyncio
+async def test_anonymous_routing_rejects_explicit_principal_owned_target():
+    herdr = FakeHerdr()
+    herdr.snapshot["panes"]["panes"].append(
+        {
+            "pane_id": "wH:pNova",
+            "agent": "hermes",
+            "agent_status": "idle",
+            "agent_name": "hirda-nova-hermes",
+        }
+    )
+    cfg = studio()
+    cfg.cognitive_pane_routing_mode = "enforce"
+    cfg.cognitive_runtime_bindings = {
+        "hermes": {
+            "machine_id": "openclaw",
+            "backend_id": "hermes-runtime",
+            "principal_pane_name_prefixes": {
+                "nova": ["hirda-nova-hermes"],
+            },
+        }
+    }
+    router = CognitiveRouter(cfg, herdr, FakeRuntimes())
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-ANON-EXPLICIT-NOVA",
+            "prompt": "Return exactly NO.",
+            "capability": "fast_utility",
+            "preferred_runtime": "hermes",
+            "target_pane_id": "wH:pNova",
+            "allow_fallback": False,
+        }
+    )
+
+    assert plan["candidates"] == []
+
+
+@pytest.mark.asyncio
+async def test_anonymous_routing_omits_principal_owned_fallback_target():
+    herdr = FakeHerdr()
+    herdr.snapshot["panes"]["panes"].append(
+        {
+            "pane_id": "wC:pNova",
+            "agent": "claude",
+            "agent_status": "idle",
+            "agent_name": "hirda-nova-claude",
+        }
+    )
+    cfg = studio()
+    cfg.cognitive_pane_routing_mode = "enforce"
+    cfg.cognitive_runtime_bindings = {
+        "hermes": {
+            "machine_id": "openclaw",
+            "backend_id": "hermes-runtime",
+            "pane_ids": ["wH:p1"],
+        },
+        "claude": {
+            "machine_id": "openclaw",
+            "backend_id": "claude-runtime",
+            "principal_pane_name_prefixes": {
+                "nova": ["hirda-nova-claude"],
+            },
+        },
+    }
+    router = CognitiveRouter(cfg, herdr, FakeRuntimes())
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-ANON-FALLBACK-NOVA",
+            "prompt": "Return exactly GENERIC.",
+            "capability": "fast_utility",
+            "target_pane_id": "wH:p1",
+            "fallback_target_pane_id": "wC:pNova",
+            "allow_fallback": True,
+        }
+    )
+
+    assert len(plan["candidates"]) == 1
+    assert plan["candidates"][0]["pane_id"] == "wH:p1"
+
+
+@pytest.mark.asyncio
 async def test_principal_routing_selects_distinct_hermes_panes_in_same_workspace():
     herdr = FakeHerdr()
     herdr.snapshot["panes"]["panes"].extend(

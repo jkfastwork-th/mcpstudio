@@ -1396,6 +1396,33 @@ class CognitiveRouter:
             )
         return ()
 
+    def _pane_claimed_by_any_principal(
+        self,
+        pane: dict[str, Any],
+        runtime_id: str,
+    ) -> bool:
+        raw_bindings = getattr(self.studio, "cognitive_runtime_bindings", {})
+        selected: Any = None
+        if isinstance(raw_bindings, dict):
+            for key, value in raw_bindings.items():
+                if str(key or "").strip().casefold() == runtime_id.casefold():
+                    selected = value
+                    break
+        if not isinstance(selected, dict):
+            return False
+        raw_map = selected.get("principal_pane_name_prefixes")
+        if not isinstance(raw_map, dict):
+            return False
+        return any(
+            self._pane_owned_by_principal(
+                pane,
+                runtime_id,
+                str(principal_id or "").strip(),
+            )
+            for principal_id in raw_map
+            if str(principal_id or "").strip()
+        )
+
     def _pane_owned_by_principal(
         self,
         pane: dict[str, Any],
@@ -1568,6 +1595,15 @@ class CognitiveRouter:
                 candidates = principal_candidates
             elif mode == "enforce":
                 return None
+        elif mode == "enforce":
+            candidates = [
+                pane
+                for pane in candidates
+                if not self._pane_claimed_by_any_principal(
+                    pane,
+                    runtime_id,
+                )
+            ]
 
         if not candidates:
             return None
@@ -2272,16 +2308,19 @@ class CognitiveRouter:
             ):
                 return []
             principal_id = self._request_principal_id(request)
-            if (
-                self._pane_routing_mode() == "enforce"
-                and principal_id
-                and not self._pane_owned_by_principal(
+            if self._pane_routing_mode() == "enforce":
+                if principal_id:
+                    if not self._pane_owned_by_principal(
+                        pane,
+                        runtime_id,
+                        principal_id,
+                    ):
+                        return []
+                elif self._pane_claimed_by_any_principal(
                     pane,
                     runtime_id,
-                    principal_id,
-                )
-            ):
-                return []
+                ):
+                    return []
             primary = dict(row)
             primary["_pane"] = dict(pane)
             selected = [primary]
@@ -2299,11 +2338,15 @@ class CognitiveRouter:
                         )
                     )
                     fallback_principal_owned = (
-                        not principal_id
-                        or self._pane_owned_by_principal(
+                        self._pane_owned_by_principal(
                             fallback_pane,
                             fallback_runtime_id,
                             principal_id,
+                        )
+                        if principal_id
+                        else not self._pane_claimed_by_any_principal(
+                            fallback_pane,
+                            fallback_runtime_id,
                         )
                     )
                     if (
@@ -2992,18 +3035,23 @@ class CognitiveRouter:
             await self.herdr.refresh()
             current = self.herdr.find_pane(pane_id=pane_key) or pane
             principal_id = self._request_principal_id(request)
-            if (
-                self._pane_routing_mode() == "enforce"
-                and principal_id
-                and not self._pane_owned_by_principal(
+            if self._pane_routing_mode() == "enforce":
+                if principal_id:
+                    if not self._pane_owned_by_principal(
+                        current,
+                        runtime_id,
+                        principal_id,
+                    ):
+                        raise CognitiveRouterError(
+                            "cognitive_principal_pane_mismatch"
+                        )
+                elif self._pane_claimed_by_any_principal(
                     current,
                     runtime_id,
-                    principal_id,
-                )
-            ):
-                raise CognitiveRouterError(
-                    "cognitive_principal_pane_mismatch"
-                )
+                ):
+                    raise CognitiveRouterError(
+                        "cognitive_principal_required_for_owned_pane"
+                    )
             status = str(
                 current.get("agent_status") or "unknown"
             ).casefold()
@@ -3531,19 +3579,23 @@ class CognitiveRouter:
                         ).casefold()
 
                 principal_id = self._request_principal_id(request)
-                if (
-                    self._pane_routing_mode() == "enforce"
-                    and principal_id
-                    and pane is not None
-                    and not self._pane_owned_by_principal(
+                if self._pane_routing_mode() == "enforce" and pane is not None:
+                    if principal_id:
+                        if not self._pane_owned_by_principal(
+                            pane,
+                            runtime_id,
+                            principal_id,
+                        ):
+                            raise CognitiveRouterError(
+                                "cognitive_principal_pane_mismatch"
+                            )
+                    elif self._pane_claimed_by_any_principal(
                         pane,
                         runtime_id,
-                        principal_id,
-                    )
-                ):
-                    raise CognitiveRouterError(
-                        "cognitive_principal_pane_mismatch"
-                    )
+                    ):
+                        raise CognitiveRouterError(
+                            "cognitive_principal_required_for_owned_pane"
+                        )
 
                 remaining_after_queue = min(
                     max(0.0, attempt_timeout - (time.monotonic() - attempt_started)),
