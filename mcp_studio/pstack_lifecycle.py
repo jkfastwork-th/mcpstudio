@@ -86,6 +86,14 @@ def workflow_gate(
 ) -> dict[str, Any]:
     current = str(lifecycle.get("current_phase") or "")
     workflow = str(lifecycle.get("workflow") or "feature")
+    if tool_class not in {"read", "write", "execute", "destructive"}:
+        return {
+            "allowed": False,
+            "code": "PSTACK_TOOL_CLASS_UNKNOWN",
+            "message": (
+                "Pstack cannot verify this tool's effect class; classify it before dispatch."
+            ),
+        }
     if lifecycle.get("status") == "completed":
         if tool_class == "read":
             return {"allowed": True}

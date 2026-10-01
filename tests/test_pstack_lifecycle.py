@@ -131,6 +131,13 @@ def test_feature_lifecycle_enforces_plan_before_writes_and_verify_before_done():
     assert workflow_gate(lifecycle, tool_class="write")["code"] == "PSTACK_WORKFLOW_COMPLETED"
 
 
+def test_unknown_tool_class_is_fail_closed_by_pstack_gate():
+    lifecycle = lifecycle_for_workflow("feature")
+    gate = workflow_gate(lifecycle, tool_class="unknown")
+    assert gate["allowed"] is False
+    assert gate["code"] == "PSTACK_TOOL_CLASS_UNKNOWN"
+
+
 def test_checkpoint_order_is_fail_closed():
     lifecycle = lifecycle_for_workflow("bug-fix")
     with pytest.raises(PstackLifecycleError) as exc:

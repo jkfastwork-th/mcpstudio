@@ -833,7 +833,50 @@ class GatewaySessionManager:
         return self.integrations.backend_tools()
 
     def _all_local_tools(self) -> list[dict[str, Any]]:
-        return self._ordered_management_tools() + self._ordered_backend_tools()
+        management = self._ordered_management_tools()
+        backends = self._ordered_backend_tools()
+
+        # Keep only the three workspace-selection controls ahead of the native
+        # provider. Some MCP clients prioritize or truncate the beginning of a
+        # large tools/list response. Native Computer must therefore be surfaced
+        # before the rest of the control/backend catalog so Desktop Commander
+        # does not become the only visible computer provider by accident.
+        selection_names = set(CONTROL_TOOL_NAMES[:3])
+        pstack_gate_names = {
+            "mcpstudio_pstack_status",
+            "mcpstudio_pstack_checkpoint",
+        }
+        selection = [
+            tool for tool in management
+            if str(tool.get("name") or "") in selection_names
+        ]
+        pstack_gate = [
+            tool for tool in management
+            if str(tool.get("name") or "") in pstack_gate_names
+        ]
+        remaining_management = [
+            tool for tool in management
+            if str(tool.get("name") or "") not in selection_names | pstack_gate_names
+        ]
+        native_backend = [
+            tool for tool in backends
+            if str(tool.get("name") or "").startswith(
+                "hirda__hirda_native_computer__"
+            )
+        ]
+        remaining_backend = [
+            tool for tool in backends
+            if not str(tool.get("name") or "").startswith(
+                "hirda__hirda_native_computer__"
+            )
+        ]
+        return (
+            selection
+            + pstack_gate
+            + native_backend
+            + remaining_management
+            + remaining_backend
+        )
 
     def _tool_catalog_hash(self) -> str:
         """Stable fingerprint for the locally injected HIRDA tool catalog."""
