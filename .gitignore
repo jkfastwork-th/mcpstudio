@@ -46,3 +46,6 @@ graft/.cache/
 /scripts/test-webgpu-tier-off.cjs
 .hirda-cache/
 hirda-machine-certification.txt
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
