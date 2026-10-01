@@ -116,8 +116,8 @@ studio:
   #integration_plugin_runtime_enabled: false
   #integration_plugin_trusted_fingerprints: []
 
-  # HIRDA machine-control backend. The raw Desktop Commander MCP is not
-  # exposed to lanes; backend tools remain under HIRDA permission/scope gates.
+  # HIRDA Native Computer is the primary workspace-scoped filesystem/process provider.
+  # Desktop Commander remains an optional compatibility/fallback adapter.
   #desktop_commander_backend_enabled: false
   #desktop_commander_backend_binary: desktop-commander
   #desktop_commander_backend_timeout_seconds: 15.0
@@ -138,7 +138,7 @@ studio:
   #      destructive: false
   #      fail_closed_unknown: true
   #    providers:
-  #      desktop_commander: {mode: local}
+  #      hirda_native: {mode: local}
   #      computer_use: {mode: local}
   #  - id: windows-dev
   #    name: Windows Dev
@@ -155,6 +155,7 @@ studio:
   #        mode: agent
   #        endpoint: http://100.64.0.10:8765
   #        token_file: ~/.config/hirda/windows-dev.token
+  #        fallback: true
   #    workspace_map:
   #      example: C:\Users\me\HIRDA\workspaces\example
 
@@ -204,6 +205,7 @@ studio:
   #device_pairing_secret_path: data/device-pairing.key
   #device_pairing_base_url: https://hirda.example/pair
   #device_pairing_ttl_seconds: 300
+  #device_pairing_owner_approval_ttl_seconds: 3600
   #device_pairing_max_attempts: 5
   #device_broker_enabled: false
   #device_broker_challenge_ttl_seconds: 30

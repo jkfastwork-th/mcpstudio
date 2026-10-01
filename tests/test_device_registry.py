@@ -42,7 +42,7 @@ def _trusted_device(tmp_path: Path):
         platform="windows",
         architecture="x86_64",
         public_key=public_key,
-        capabilities=["filesystem", "process", "computer_use"],
+        capabilities=["filesystem", "process", "computer_use", "hirda_native"],
         runtime_version="1.0.0",
     )
     nonce = started["pairing_url"].split("?nonce=", 1)[1]
@@ -56,6 +56,45 @@ def _trusted_device(tmp_path: Path):
         device_broker=broker,
     )
     return studio, pairing, broker, registry, private, device
+
+
+def test_configured_local_machine_adds_native_provider_without_losing_existing_providers(tmp_path):
+    studio = _studio(tmp_path)
+    studio.machine_registry = [{
+        "id": "openclaw",
+        "local": True,
+        "providers": {
+            "desktop_commander": {"mode": "local"},
+            "computer_use": {"mode": "local"},
+        },
+    }]
+
+    machine = MachineRegistry(studio, base_dir=tmp_path).get("openclaw")
+
+    assert machine.providers == {
+        "desktop_commander": {"mode": "local"},
+        "computer_use": {"mode": "local"},
+        "hirda_native": {"mode": "local"},
+    }
+
+
+def test_configured_native_provider_is_not_overwritten(tmp_path):
+    studio = _studio(tmp_path)
+    studio.machine_registry = [{
+        "id": "openclaw",
+        "local": True,
+        "providers": {
+            "desktop_commander": {"mode": "local"},
+            "computer_use": {"mode": "local"},
+            "hirda_native": {"mode": "custom", "setting": "keep"},
+        },
+    }]
+
+    machine = MachineRegistry(studio, base_dir=tmp_path).get("openclaw")
+
+    assert machine.providers["hirda_native"] == {"mode": "custom", "setting": "keep"}
+    assert machine.providers["desktop_commander"] == {"mode": "local"}
+    assert machine.providers["computer_use"] == {"mode": "local"}
 
 
 class FakeDB:
@@ -96,16 +135,21 @@ class FakeSocket:
 
 class FakeIntegrations:
     def backend_tools(self):
-        return [{"name": "hirda__desktop_commander__read_file", "inputSchema": {"type": "object"}}]
+        return [
+            {"name": "hirda__desktop_commander__read_file", "inputSchema": {"type": "object"}},
+            {"name": "hirda__hirda_native_computer__read_file", "inputSchema": {"type": "object"}},
+        ]
 
     def backend_permission(self, name):
         return "read"
 
     def is_backend_tool(self, name):
-        return name == "hirda__desktop_commander__read_file"
+        return name in {"hirda__desktop_commander__read_file", "hirda__hirda_native_computer__read_file"}
 
     def backend_route(self, name):
-        if self.is_backend_tool(name):
+        if name == "hirda__hirda_native_computer__read_file":
+            return ("hirda-native-computer", "read_file")
+        if name == "hirda__desktop_commander__read_file":
             return ("desktop-commander", "read_file")
         return None
 
@@ -123,6 +167,7 @@ def test_trusted_device_materializes_as_dynamic_machine_with_safe_policy(tmp_pat
     assert machine.address is None
     assert machine.os_name == "windows"
     assert machine.providers["device_broker"]["mode"] == "broker"
+    assert machine.providers["hirda_native"]["mode"] == "broker"
     assert machine.providers["desktop_commander"]["mode"] == "broker"
     assert machine.metadata["registry_source"] == "device_pairing"
     assert machine.metadata["dynamic"] is True
@@ -184,7 +229,7 @@ async def test_desktop_commander_routes_over_authenticated_broker_rpc(tmp_path):
     async def respond(message):
         if message.get("type") != "rpc_request":
             return
-        assert message["method"] == "desktop_commander.call"
+        assert message["method"] == "hirda_native.call"
         assert message["payload"]["workspace_key"] == "mcp-studio"
         assert "workspace_root" not in message["payload"]
         await broker.resolve_rpc_response(

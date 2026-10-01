@@ -136,6 +136,12 @@ def _segment_class(segment: str) -> ToolClass:
     if not tokens:
         return "read"
     command = Path(tokens[0]).name
+    if command.lower() in {"cmd", "cmd.exe"}:
+        args = tokens[1:]
+        if len(args) < 2 or args[0].lower() not in {"/c", "/k"}:
+            return "unknown"
+        nested = " ".join(shlex.quote(part) for part in args[1:])
+        return classify_shell_command(nested)
     if command == "cd":
         return "read"
     if command == "git":
@@ -296,7 +302,10 @@ def classify_tool(
     if name in _READ_TOOLS or name.startswith("think_about_"):
         return "read"
     if name in _SHELL_TOOLS:
-        return classify_shell_command(str(args.get("command") or ""))
+        category = classify_shell_command(str(args.get("command") or ""))
+        if name == "start_process" and category == "read":
+            return "execute"
+        return category
     if declared_category in {"read", "write", "execute", "destructive"}:
         return cast(ToolClass, declared_category)
     return "unknown"
@@ -412,8 +421,11 @@ def _shell_scope_violation(
             tokens = shlex.split(segment)
             if not tokens:
                 continue
+            command_name = PureWindowsPath(tokens[0]).name.lower()
             for token in tokens[1:]:
                 cleaned = token.strip("'\"(),")
+                if command_name in {"cmd", "cmd.exe"} and re.fullmatch(r"/(?:c|k|d|s|q|a|u)", cleaned, re.IGNORECASE):
+                    continue
                 if "=" in cleaned and not cleaned.startswith(("/", "../", "./")):
                     _, cleaned = cleaned.split("=", 1)
                 if cleaned.startswith("~"):

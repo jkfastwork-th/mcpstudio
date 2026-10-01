@@ -246,6 +246,23 @@ integration_plugin_runtime_enabled: false
 integration_plugin_trusted_fingerprints: []
 ```
 
+## Native Computer and Desktop Commander compatibility
+
+HIRDA Native Computer is the built-in primary filesystem/process provider. It
+exposes `read_file`, `read_multiple_files`, `write_file`, `create_directory`,
+`list_directory`, `move_file`, `get_file_info`, `start_process`,
+`read_process_output`, `interact_with_process`, and `force_terminate` through
+the `hirda__hirda_native_computer__` namespace. File paths resolve inside the
+managed workspace, and process handles belong to the session that started them.
+Device Runtime calls use `hirda_native.call`; older `desktop_commander.call`
+messages remain accepted.
+
+The optional Desktop Commander adapter remains available for older clients and
+legacy-only primitives. Legacy calls that overlap the native tool set use the
+native provider first. Unsupported legacy primitives may use Desktop Commander;
+an error after a native write or process operation is never replayed because
+the first operation may already have taken effect.
+
 ## Desktop Commander backend capability
 
 Desktop Commander is integrated as a built-in HIRDA machine-control backend rather

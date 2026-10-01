@@ -173,9 +173,8 @@ class StudioConfig:
     integration_plugin_runtime_enabled: bool = False
     integration_plugin_trusted_fingerprints: list[str] = field(default_factory=list)
 
-    # Desktop Commander is a HIRDA-gated machine-control backend. Its raw MCP
-    # server is never exposed directly to lanes; tools flow through session
-    # permission, Reflex, JEV evidence, workspace scope, and backend ownership.
+    # Desktop Commander is an optional HIRDA-gated compatibility/fallback
+    # backend. Native filesystem/process support is built in and always primary.
     desktop_commander_backend_enabled: bool = False
     desktop_commander_backend_binary: str = "desktop-commander"
     desktop_commander_backend_timeout_seconds: float = 15.0
@@ -214,6 +213,7 @@ class StudioConfig:
     device_pairing_secret_path: str = "data/device-pairing.key"
     device_pairing_base_url: str = "https://localhost/pair"
     device_pairing_ttl_seconds: int = 300
+    device_pairing_owner_approval_ttl_seconds: int = 3600
     device_pairing_max_attempts: int = 5
 
     # P2 outbound Device Broker. Trusted devices initiate the connection; HIRDA

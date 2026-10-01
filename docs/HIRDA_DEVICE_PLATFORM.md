@@ -180,15 +180,18 @@ over broker RPC. The cross-platform Device Runtime resolves that key to its own
 local path and must fail closed when the workspace is unknown. Host absolute
 paths are not leaked across machines.
 
-Desktop Commander calls use the authenticated broker channel:
+New runtimes advertise native support when pairing. Previously paired runtimes
+without that capability marker continue to use the legacy Desktop Commander RPC.
+
+Native filesystem/process calls use the authenticated broker channel:
 
 ```text
 Managed Session
    -> Machine Capability Router
    -> Dynamic Machine Registry
-   -> Device Broker RPC: desktop_commander.call
+   -> Device Broker RPC: hirda_native.call (desktop_commander.call remains accepted)
    -> HIRDA Device Runtime
-   -> local Desktop Commander
+   -> HIRDA Native Computer (optional Desktop Commander fallback)
 ```
 
 Broker RPC requests carry a unique request ID and are matched to the exact
@@ -259,8 +262,8 @@ before the separate owner-approval step.
 
 `run` keeps an outbound broker connection alive, signs each fresh server
 challenge, reconnects with bounded exponential backoff, sends heartbeat traffic,
-and handles `desktop_commander.call` requests without blocking the network event
-loop.
+and handles native filesystem/process calls without blocking the network event
+loop. It continues to accept `desktop_commander.call` for older clients.
 
 An example device config lives at `examples/hirda-device.yaml`.
 

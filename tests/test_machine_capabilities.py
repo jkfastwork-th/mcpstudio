@@ -7,6 +7,7 @@ import pytest
 
 from mcp_studio.machine_registry import MachineRegistry, MachineRegistryError
 from mcp_studio.machine_router import MachineCapabilityRouter
+from mcp_studio.hirda_native_computer import NativeComputerError
 
 
 class FakeDB:
@@ -30,22 +31,71 @@ class FakeIntegrations:
         self.local_calls = []
 
     def backend_tools(self):
-        return [{"name": "hirda__desktop_commander__read_file", "inputSchema": {"type": "object"}}]
+        return [
+            {"name": "hirda__desktop_commander__read_file", "inputSchema": {"type": "object"}},
+            {"name": "hirda__hirda_native_computer__read_file", "inputSchema": {"type": "object"}},
+        ]
 
     def backend_permission(self, name):
         return "read"
 
     def is_backend_tool(self, name):
-        return name == "hirda__desktop_commander__read_file"
+        return name in {"hirda__desktop_commander__read_file", "hirda__hirda_native_computer__read_file"}
 
     def backend_route(self, name):
-        if self.is_backend_tool(name):
+        if name == "hirda__hirda_native_computer__read_file":
+            return ("hirda-native-computer", "read_file")
+        if name == "hirda__desktop_commander__read_file":
             return ("desktop-commander", "read_file")
         return None
 
     async def call_backend_tool(self, name, arguments, *, context):
         self.local_calls.append((name, arguments, context))
         return {"content": [{"type": "text", "text": "LOCAL"}]}
+
+
+class NativePreferredIntegrations(FakeIntegrations):
+    def __init__(self, *, fail_native=False, unsupported_native=False):
+        super().__init__()
+        self.fail_native = fail_native
+        self.unsupported_native = unsupported_native
+
+    def backend_tools(self):
+        return [
+            {"name": "hirda__desktop_commander__read_file", "inputSchema": {"type": "object"}},
+            {"name": "hirda__hirda_native_computer__read_file", "inputSchema": {"type": "object"}},
+        ]
+
+    def is_backend_tool(self, name):
+        return name in {"hirda__desktop_commander__read_file", "hirda__hirda_native_computer__read_file"}
+
+    def backend_route(self, name):
+        if name == "hirda__hirda_native_computer__read_file":
+            return ("hirda-native-computer", "read_file")
+        if name == "hirda__desktop_commander__read_file":
+            return ("desktop-commander", "read_file")
+        return None
+
+    async def call_backend_tool(self, name, arguments, *, context):
+        self.local_calls.append((name, arguments, context))
+        if self.unsupported_native and name.startswith("hirda__hirda_native_computer__"):
+            raise NativeComputerError("native_tool_not_supported:read_file")
+        if self.fail_native and name.startswith("hirda__hirda_native_computer__"):
+            raise RuntimeError("native operation failed")
+        return {"content": [{"type": "text", "text": name}]}
+
+
+class DesktopCommanderOnlyIntegrations(FakeIntegrations):
+    def backend_tools(self):
+        return [{"name": "hirda__desktop_commander__read_file", "inputSchema": {"type": "object"}}]
+
+    def is_backend_tool(self, name):
+        return name == "hirda__desktop_commander__read_file"
+
+    def backend_route(self, name):
+        if name == "hirda__desktop_commander__read_file":
+            return ("desktop-commander", "read_file")
+        return None
 
 
 class FakeComputer:
@@ -218,6 +268,66 @@ async def test_router_uses_remote_agent_for_remote_machine(tmp_path: Path, monke
     assert calls[0][0] == "JKFASTDEV"
     assert calls[0][1]["tool_name"] == "read_file"
     assert integrations.local_calls == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_desktop_namespace_prefers_native_for_overlapping_tool(tmp_path: Path):
+    config = machine_config()
+    config[0]["providers"]["hirda_native"] = {"mode": "local"}
+    integrations = NativePreferredIntegrations()
+    router = MachineCapabilityRouter(MachineRegistry(studio(config), base_dir=tmp_path), integrations, FakeComputer())
+    await router.call_backend_tool(
+        "hirda__desktop_commander__read_file",
+        {"path": "README.md"},
+        context={"machine_id": "openclaw", "managed_session_id": "ms-1", "workspace_key": "mcp-studio", "project_path": str(tmp_path), "policy": {"scope": "workspace"}},
+    )
+    assert integrations.local_calls[0][0] == "hirda__hirda_native_computer__read_file"
+
+
+@pytest.mark.asyncio
+async def test_legacy_desktop_namespace_stays_on_dc_when_native_tool_is_not_registered(tmp_path: Path):
+    config = machine_config()
+    integrations = DesktopCommanderOnlyIntegrations()
+    router = MachineCapabilityRouter(MachineRegistry(studio(config), base_dir=tmp_path), integrations, FakeComputer())
+    await router.call_backend_tool(
+        "hirda__desktop_commander__read_file",
+        {"path": "README.md"},
+        context={"machine_id": "openclaw", "managed_session_id": "ms-1", "workspace_key": "mcp-studio", "project_path": str(tmp_path), "policy": {"scope": "workspace"}},
+    )
+    assert integrations.local_calls[0][0] == "hirda__desktop_commander__read_file"
+
+
+@pytest.mark.asyncio
+async def test_native_operation_error_is_not_replayed_to_desktop_commander(tmp_path: Path):
+    config = machine_config()
+    config[0]["providers"]["hirda_native"] = {"mode": "local"}
+    integrations = NativePreferredIntegrations(fail_native=True)
+    router = MachineCapabilityRouter(MachineRegistry(studio(config), base_dir=tmp_path), integrations, FakeComputer())
+    with pytest.raises(RuntimeError, match="native operation failed"):
+        await router.call_backend_tool(
+            "hirda__desktop_commander__read_file",
+            {"path": "README.md"},
+            context={"machine_id": "openclaw", "managed_session_id": "ms-1", "workspace_key": "mcp-studio", "project_path": str(tmp_path), "policy": {"scope": "workspace"}},
+        )
+    assert len(integrations.local_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_unsupported_native_tool_falls_back_to_desktop_commander_once(tmp_path: Path):
+    config = machine_config()
+    config[0]["providers"]["hirda_native"] = {"mode": "local"}
+    integrations = NativePreferredIntegrations(unsupported_native=True)
+    router = MachineCapabilityRouter(MachineRegistry(studio(config), base_dir=tmp_path), integrations, FakeComputer())
+    result = await router.call_backend_tool(
+        "hirda__desktop_commander__read_file",
+        {"path": "README.md"},
+        context={"machine_id": "openclaw", "managed_session_id": "ms-1", "workspace_key": "mcp-studio", "project_path": str(tmp_path), "policy": {"scope": "workspace"}},
+    )
+    assert result["content"][0]["text"] == "hirda__desktop_commander__read_file"
+    assert [call[0] for call in integrations.local_calls] == [
+        "hirda__hirda_native_computer__read_file",
+        "hirda__desktop_commander__read_file",
+    ]
 
 
 @pytest.mark.asyncio

@@ -26,7 +26,9 @@ def render_pairing_page(
     architecture = html.escape(str(session.get("architecture") or "unknown"))
     state = str(session.get("state") or "unknown")
     requested_capabilities = {str(item) for item in (session.get("capabilities") or [])}
-    capabilities = ", ".join(html.escape(item) for item in requested_capabilities) or "none"
+    capabilities = ", ".join(
+        html.escape(item) for item in requested_capabilities
+    ) or "none"
     read_checked = " checked"
     execute_checked = " checked" if "process" in requested_capabilities else ""
     error_html = (
@@ -56,10 +58,22 @@ def render_pairing_page(
         <form method="post" action="/pair/{session_id}/approve">
           <div class="permissions">
             <p class="section-title">Device permissions</p>
-            <label class="permission"><input type="checkbox" name="policy_read" value="1"{read_checked}><span><strong>Read</strong><small>Inspect files and workspace state.</small></span></label>
-            <label class="permission"><input type="checkbox" name="policy_write" value="1"><span><strong>Write</strong><small>Create or modify workspace files.</small></span></label>
-            <label class="permission"><input type="checkbox" name="policy_execute" value="1"{execute_checked}><span><strong>Execute</strong><small>Run non-write processes. Preselected when process capability is requested.</small></span></label>
-            <label class="permission danger"><input type="checkbox" name="policy_destructive" value="1"><span><strong>Destructive</strong><small>Allow destructive operations. Leave off unless explicitly needed.</small></span></label>
+            <label class="permission">
+              <input type="checkbox" name="policy_read" value="1"{read_checked}>
+              <span><strong>Read</strong><small>Inspect files and workspace state.</small></span>
+            </label>
+            <label class="permission">
+              <input type="checkbox" name="policy_write" value="1">
+              <span><strong>Write</strong><small>Create or modify workspace files.</small></span>
+            </label>
+            <label class="permission">
+              <input type="checkbox" name="policy_execute" value="1"{execute_checked}>
+              <span><strong>Execute</strong><small>Run non-write processes. Preselected when process capability is requested.</small></span>
+            </label>
+            <label class="permission danger">
+              <input type="checkbox" name="policy_destructive" value="1">
+              <span><strong>Destructive</strong><small>Allow destructive operations. Leave off unless explicitly needed.</small></span>
+            </label>
           </div>
           {owner_field}
           <button type="submit">Approve device</button>

@@ -40,8 +40,19 @@ def test_pending_owner_page_does_not_expose_owner_token_field_when_session_valid
 
 
 def test_pairing_policy_from_form_returns_explicit_booleans():
-    policy = pairing_policy_from_form({"policy_read": ["1"], "policy_execute": ["1"], "policy_write": ["0"]})
-    assert policy == {"read": True, "write": False, "execute": True, "destructive": False}
+    policy = pairing_policy_from_form(
+        {
+            "policy_read": ["1"],
+            "policy_execute": ["1"],
+            "policy_write": ["0"],
+        }
+    )
+    assert policy == {
+        "read": True,
+        "write": False,
+        "execute": True,
+        "destructive": False,
+    }
 
 
 def test_pairing_page_escapes_device_metadata():

@@ -10,9 +10,11 @@ capabilities:
   - filesystem
   - process
 
-# Local Desktop Commander backend. Nothing here listens on the network.
-desktop_commander_command:
-  - desktop-commander
+# HIRDA Native Computer is the primary local filesystem/process provider.
+# Desktop Commander is optional and used only for legacy tools the native
+# provider does not expose; it is never retried after an ambiguous failure.
+#desktop_commander_command:
+#  - desktop-commander
 desktop_commander_timeout_seconds: 15
 
 # N3 vendor-neutral runtime/backend probes. Adapters may add provider-specific

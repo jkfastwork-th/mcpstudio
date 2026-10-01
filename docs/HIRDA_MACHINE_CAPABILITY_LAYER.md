@@ -11,8 +11,10 @@ The configured `machine_local_id` is the default for existing sessions that pred
 
 Provider modes currently supported:
 
-- `desktop_commander.mode: local` — use HIRDA's local Desktop Commander backend.
-- `desktop_commander.mode: agent` — use the bounded HIRDA machine agent over a private network.
+- `hirda_native.mode: local` — use HIRDA Native Computer on the local machine.
+- broker-paired devices with filesystem/process support use `hirda_native` automatically.
+- `desktop_commander.mode: local` — make Desktop Commander available as an optional fallback for native tools it explicitly does not support.
+- `desktop_commander.mode: agent` — retain the bounded legacy Desktop Commander agent adapter as an optional compatibility path.
 - `computer_use.mode: local` — use HIRDA's existing session-isolated VNC/Chrome runtime.
 - `computer_use.mode: agent` — ask the bound HIRDA Machine Agent for a session-specific remote WebSocket target; HIRDA keeps that target private and proxies it through the existing `/api/computer/vnc/ws/{session_id}` route.
 
@@ -23,21 +25,26 @@ readiness comes from `ComputerUseManager.status()`.
 ## Capability router
 
 `MachineCapabilityRouter` sits between HIRDA's permission/session gates and the physical backend. Tool names do
-not change when a session moves machines. For example `hirda__desktop_commander__read_file` is resolved using the
-managed session's `metadata.machine_id`:
+not change when a session moves machines. Native tools use
+`hirda__hirda_native_computer__read_file`; legacy
+`hirda__desktop_commander__read_file` calls are routed to native when available.
+The selected machine comes from the managed session's `metadata.machine_id`:
 
 ```text
 lane / MCP client
   -> HIRDA gateway
   -> managed-session permission + Reflex/JEV gates
   -> MachineCapabilityRouter
-       -> openclaw: local Desktop Commander
-       -> JKFASTDEV: HIRDA machine agent -> Desktop Commander
+       -> openclaw: local HIRDA Native Computer
+       -> JKFASTDEV: HIRDA machine agent -> Native Computer
 ```
 
-The remote machine agent exposes only the same bounded 13 Desktop Commander file/process tools already approved by
-HIRDA. It independently enforces workspace path confinement and per-session process ownership. This gives defense in
-depth: a request must pass both HIRDA policy and the target machine agent's scope checks.
+Local and broker-materialized machines use the bounded HIRDA Native Computer primitives as their primary
+filesystem/process provider. The remote machine agent exposes these native operations and independently enforces
+workspace path confinement and per-session process ownership. Desktop Commander remains an optional fallback only
+when Native Computer explicitly reports `native_tool_not_supported:<tool>`; operation failures are returned without
+replaying them through Desktop Commander. This gives defense in depth: a request must pass both HIRDA policy and the
+target machine agent's scope checks.
 
 ## Session machine binding
 

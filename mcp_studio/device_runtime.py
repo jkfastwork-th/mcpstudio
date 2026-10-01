@@ -16,6 +16,7 @@ import yaml
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from .desktop_commander_relay import AgentError, DesktopCommanderRelay
+from .hirda_native_computer import NativeComputerBackend, NativeComputerError
 from .node_backends import normalize_backend_probe_specs, probe_configured_backends
 from .node_hardware import probe_hardware_resources
 from .node_models import probe_configured_models
@@ -114,7 +115,7 @@ class DeviceRuntimeConfig:
         control_plane_url: str,
         name: str,
         identity_path: str,
-        desktop_commander_command: list[str],
+        desktop_commander_command: list[str] | None,
         workspaces: dict[str, str],
         capabilities: list[str],
         platform: str,
@@ -160,11 +161,11 @@ class DeviceRuntimeConfig:
         identity_path = identity_path.resolve(strict=False)
 
         command = raw.get("desktop_commander_command")
-        if not isinstance(command, list) or not command:
-            raise DeviceRuntimeError("desktop_commander_command_required")
-        normalized_command = [str(part).strip() for part in command]
+        if command is not None and (not isinstance(command, list) or not command):
+            raise DeviceRuntimeError("desktop_commander_command_invalid")
+        normalized_command = [str(part).strip() for part in command or []]
         if not all(normalized_command):
-            raise DeviceRuntimeError("desktop_commander_command_required")
+            raise DeviceRuntimeError("desktop_commander_command_invalid")
 
         workspaces: dict[str, str] = {}
         workspace_raw = raw.get("workspaces")
@@ -196,7 +197,7 @@ class DeviceRuntimeConfig:
             control_plane_url=control_plane_url,
             name=str(raw.get("name") or socket.gethostname() or "hirda-device").strip(),
             identity_path=str(identity_path),
-            desktop_commander_command=normalized_command,
+            desktop_commander_command=normalized_command or None,
             workspaces=workspaces,
             capabilities=capabilities,
             platform=_platform_name(str(raw.get("platform") or "") or None),
@@ -307,7 +308,10 @@ class DevicePairingClient:
                 "platform": self.config.platform,
                 "architecture": self.config.architecture,
                 "public_key": self.identity.public_key,
-                "capabilities": list(self.config.capabilities),
+                "capabilities": sorted({
+                    *self.config.capabilities,
+                    *( ["hirda_native"] if any(item in {"filesystem", "process"} for item in self.config.capabilities) else [] ),
+                }),
                 "runtime_version": self.config.runtime_version,
             },
         )
@@ -374,13 +378,17 @@ class DeviceRuntime:
         self.config = config
         self.identity = identity or DeviceIdentityStore(config.identity_path).load_or_create()
         resolver = WorkspaceResolver(config.workspaces)
+        self._provided_backend = backend is not None
+        self._fallback_backend: DesktopCommanderBackend | None = None
         if backend is None:
-            relay = DesktopCommanderRelay(
-                config.desktop_commander_command,
-                self.identity.device_id,
-                timeout_seconds=config.desktop_commander_timeout_seconds,
-            )
-            backend = DesktopCommanderBackend(relay, resolver)
+            backend = NativeComputerBackend(config.workspaces)
+            if config.desktop_commander_command:
+                relay = DesktopCommanderRelay(
+                    config.desktop_commander_command,
+                    self.identity.device_id,
+                    timeout_seconds=config.desktop_commander_timeout_seconds,
+                )
+                self._fallback_backend = DesktopCommanderBackend(relay, resolver)
         self.backend = backend
         self._pairing = DevicePairingClient(config, self.identity)
         self._stopping = asyncio.Event()
@@ -422,7 +430,7 @@ class DeviceRuntime:
         try:
             if not request_id:
                 raise DeviceRuntimeError("rpc_request_id_required")
-            if method != "desktop_commander.call":
+            if method not in {"hirda_native.call", "desktop_commander.call"}:
                 raise DeviceRuntimeError(f"unsupported_rpc_method:{method}")
             payload = message.get("payload")
             if not isinstance(payload, dict):
@@ -434,12 +442,22 @@ class DeviceRuntime:
             session_id = str(payload.get("session_id") or "")
             if not session_id:
                 raise DeviceRuntimeError("managed_session_id_required")
-            result = await self.backend.call(
-                name=str(payload.get("name") or ""),
-                arguments=arguments,
-                workspace_key=workspace_key,
-                session_id=session_id,
-            )
+            tool_name = str(payload.get("name") or "")
+            call = {
+                "name": tool_name,
+                "arguments": arguments,
+                "workspace_key": workspace_key,
+                "session_id": session_id,
+            }
+            try:
+                result = await self.backend.call(**call)
+            except NativeComputerError as exc:
+                # Only a positively identified unsupported primitive is safe to
+                # delegate; ambiguous filesystem/process failures are never replayed.
+                unsupported_error = f"native_tool_not_supported:{tool_name}"
+                if self._provided_backend or str(exc) != unsupported_error or self._fallback_backend is None:
+                    raise
+                result = await self._fallback_backend.call(**call)
             return {
                 "type": "rpc_response",
                 "request_id": request_id,
@@ -591,8 +609,9 @@ class DeviceRuntime:
             except Exception:
                 pass
         await self._pairing.close()
-        close = getattr(self.backend, "close", None)
-        if close is not None:
-            result = close()
-            if asyncio.iscoroutine(result):
-                await result
+        for backend in (self.backend, self._fallback_backend):
+            close = getattr(backend, "close", None)
+            if close is not None:
+                result = close()
+                if asyncio.iscoroutine(result):
+                    await result

@@ -84,6 +84,16 @@ class DevicePairingManager:
         self.ttl_seconds = max(
             60, min(900, int(getattr(studio, "device_pairing_ttl_seconds", 300) or 300))
         )
+        self.owner_approval_ttl_seconds = max(
+            300,
+            min(
+                86400,
+                int(
+                    getattr(studio, "device_pairing_owner_approval_ttl_seconds", 3600)
+                    or 3600
+                ),
+            ),
+        )
         self.max_attempts = max(
             1, min(10, int(getattr(studio, "device_pairing_max_attempts", 5) or 5))
         )
@@ -297,8 +307,12 @@ class DevicePairingManager:
                 item["locked_at"] = _iso(_utcnow())
             self._save_state()
             raise DevicePairingError("pairing_verification_failed")
+        verified_at = _utcnow()
         item["state"] = "pending_owner"
-        item["verified_at"] = _iso(_utcnow())
+        item["verified_at"] = _iso(verified_at)
+        item["expires_at"] = _iso(
+            verified_at + timedelta(seconds=self.owner_approval_ttl_seconds)
+        )
         self._save_state()
         return self._public_session(item)
 

@@ -22,6 +22,7 @@ def _studio(tmp_path: Path, **overrides):
         "device_pairing_secret_path": str(tmp_path / "pairing.key"),
         "device_pairing_base_url": "https://hirda.example/pair",
         "device_pairing_ttl_seconds": 300,
+        "device_pairing_owner_approval_ttl_seconds": 3600,
         "device_pairing_max_attempts": 5,
     }
     values.update(overrides)
@@ -92,6 +93,7 @@ def test_verify_requires_both_qr_nonce_and_8_digit_code(tmp_path):
     )
     assert verified["state"] == "pending_owner"
     assert "display_code" not in verified
+    assert verified["expires_at"] > started["expires_at"]
 
 
 def test_pairing_locks_after_bounded_failed_attempts(tmp_path):

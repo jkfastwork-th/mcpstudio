@@ -358,6 +358,14 @@ class MachineEnrollmentManager:
         capabilities = [str(x) for x in candidate.get("capabilities", []) if str(x) in _ALLOWED_CAPABILITIES]
         providers: dict[str, dict[str, Any]] = {}
         advertised = candidate.get("providers") if isinstance(candidate.get("providers"), dict) else {}
+        native = advertised.get("hirda_native") if isinstance(advertised.get("hirda_native"), dict) else {}
+        if native.get("available"):
+            providers["hirda_native"] = {
+                "mode": "agent",
+                "endpoint": str(candidate["endpoint"]),
+                "auth_mode": "tailnet_ip",
+                "timeout_seconds": 20.0,
+            }
         dc = advertised.get("desktop_commander") if isinstance(advertised.get("desktop_commander"), dict) else {}
         if dc.get("available"):
             providers["desktop_commander"] = {
@@ -365,6 +373,7 @@ class MachineEnrollmentManager:
                 "endpoint": str(candidate["endpoint"]),
                 "auth_mode": "tailnet_ip",
                 "timeout_seconds": 20.0,
+                "fallback": True,
             }
         cu = advertised.get("computer_use") if isinstance(advertised.get("computer_use"), dict) else {}
         if cu.get("available"):

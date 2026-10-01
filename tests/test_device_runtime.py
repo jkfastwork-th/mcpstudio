@@ -16,6 +16,7 @@ from mcp_studio.device_runtime import (
     DeviceRuntimeError,
     WorkspaceResolver,
 )
+from mcp_studio.hirda_native_computer import NativeComputerError
 
 
 class FakeBackend:
@@ -78,6 +79,15 @@ def test_runtime_config_resolves_device_local_paths(tmp_path):
     assert config.control_plane_url == "https://hirda.example"
 
 
+def test_runtime_config_does_not_require_desktop_commander(tmp_path):
+    config = DeviceRuntimeConfig.from_dict(
+        {"control_plane_url": "https://hirda.example", "identity_path": ".hirda/key", "workspaces": {"demo": "./demo"}},
+        base_dir=tmp_path,
+    )
+    assert config.desktop_commander_command is None
+    assert config.workspaces["demo"] == str((tmp_path / "demo").resolve())
+
+
 def test_workspace_resolver_fails_closed_for_unknown_key(tmp_path):
     resolver = WorkspaceResolver({"known": str(tmp_path / "known")})
     assert resolver.resolve("known") == str((tmp_path / "known").resolve())
@@ -97,7 +107,7 @@ async def test_pairing_client_uses_same_cross_platform_contract(tmp_path):
             body = __import__("json").loads(request.content)
             assert body["name"] == "JKFASTDEV"
             assert body["public_key"] == identity.public_key
-            assert body["capabilities"] == ["filesystem", "process"]
+            assert body["capabilities"] == ["filesystem", "hirda_native", "process"]
             return httpx.Response(
                 200,
                 json={
@@ -192,6 +202,76 @@ async def test_runtime_dispatches_broker_rpc_to_local_backend(tmp_path):
             "session_id": "ms-1",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_accepts_native_rpc_method(tmp_path):
+    config = _config(tmp_path)
+    backend = FakeBackend()
+    runtime = DeviceRuntime(config, identity=DeviceIdentityStore(config.identity_path).load_or_create(), backend=backend)
+    result = await runtime.dispatch_rpc({
+        "request_id": "rpc-native",
+        "method": "hirda_native.call",
+        "payload": {"name": "read_file", "arguments": {"path": "README.md"}, "workspace_key": "mcp-studio", "session_id": "ms-1"},
+    })
+    assert result["ok"] is True
+    assert backend.calls[0]["name"] == "read_file"
+
+
+@pytest.mark.asyncio
+async def test_runtime_does_not_replay_native_operation_errors(tmp_path):
+    config = _config(tmp_path)
+    runtime = DeviceRuntime(config, identity=DeviceIdentityStore(config.identity_path).load_or_create())
+    calls = []
+
+    class FailedNative:
+        async def call(self, **kwargs):
+            calls.append("native")
+            raise DeviceRuntimeError("native write outcome unknown")
+
+    class Fallback:
+        async def call(self, **kwargs):
+            calls.append("fallback")
+            return {"content": []}
+
+    runtime.backend = FailedNative()
+    runtime._fallback_backend = Fallback()
+    result = await runtime.dispatch_rpc({
+        "request_id": "rpc-no-replay",
+        "method": "hirda_native.call",
+        "payload": {"name": "write_file", "arguments": {"path": "a", "content": "x"}, "workspace_key": "mcp-studio", "session_id": "ms-1"},
+    })
+    assert result["ok"] is False
+    assert calls == ["native"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_falls_back_once_for_explicitly_unsupported_native_tool(tmp_path):
+    config = _config(tmp_path)
+    runtime = DeviceRuntime(config, identity=DeviceIdentityStore(config.identity_path).load_or_create())
+    calls = []
+
+    class UnsupportedNative:
+        async def call(self, **kwargs):
+            calls.append("native")
+            raise NativeComputerError("native_tool_not_supported:legacy_search")
+
+    class Fallback:
+        async def call(self, **kwargs):
+            calls.append("fallback")
+            return {"content": [{"type": "text", "text": "LEGACY"}]}
+
+    runtime.backend = UnsupportedNative()
+    runtime._fallback_backend = Fallback()
+    result = await runtime.dispatch_rpc({
+        "request_id": "rpc-explicit-unsupported",
+        "method": "hirda_native.call",
+        "payload": {"name": "legacy_search", "arguments": {}, "workspace_key": "mcp-studio", "session_id": "ms-1"},
+    })
+
+    assert result["ok"] is True
+    assert result["result"]["content"][0]["text"] == "LEGACY"
+    assert calls == ["native", "fallback"]
 
 
 @pytest.mark.asyncio
