@@ -329,6 +329,7 @@ async def test_explicit_unsupported_native_tool_falls_back_to_desktop_commander_
         "hirda__desktop_commander__read_file",
     ]
 
+@pytest.mark.asyncio
 async def test_remote_windows_start_process_defaults_to_cmd_shell(tmp_path: Path, monkeypatch):
     registry = MachineRegistry(studio(machine_config()), base_dir=tmp_path)
     integrations = FakeIntegrations()

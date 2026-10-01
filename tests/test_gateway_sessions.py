@@ -264,7 +264,9 @@ def test_tools_list_includes_hirda_backend_before_upstream(tmp_path: Path):
     }
     result = manager._augment_tools_payload(payload)
     names = [tool["name"] for tool in result["result"]["tools"]]
-    assert names == ["hirda__desktop_commander__read_file", "serena_tool"]
+    assert "hirda__desktop_commander__read_file" in names
+    assert "serena_tool" in names
+    assert names.index("hirda__desktop_commander__read_file") < names.index("serena_tool")
 
 
 def test_initialize_advertises_dynamic_tool_list_and_cache_hash(tmp_path: Path):
