@@ -1694,7 +1694,7 @@ async def video_forge_profile_approval_api(
     ):
         raise HTTPException(status_code=400, detail="invalid_profile")
 
-    pool_id = str(payload.get("pool_id") or "nova-motion").strip()
+    pool_id = str(payload.get("pool_id") or "video-motion").strip()
     if not pool_id or len(pool_id) > 96:
         raise HTTPException(status_code=400, detail="invalid_pool_id")
 

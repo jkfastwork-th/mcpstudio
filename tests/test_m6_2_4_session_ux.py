@@ -29,8 +29,8 @@ async def test_schema_v7_adds_managed_session_activity_columns(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite3"))
     await db.init()
     status = await db.schema_status()
-    assert status["current_version"] == 12
-    assert status["expected_version"] == 12
+    assert status["current_version"] == 13
+    assert status["expected_version"] == 13
 
     def inspect():
         with db._connect() as conn:
