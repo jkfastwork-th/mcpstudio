@@ -8,6 +8,8 @@ import json
 import os
 import time
 from typing import Any
+from datetime import datetime, timezone
+from uuid import uuid4
 
 import websockets
 from urllib.parse import parse_qs
@@ -758,15 +760,34 @@ async def _pstack_activity_snapshot(
     )
     traces: dict[str, dict[str, Any]] = {}
     persistent_events: list[dict[str, Any]] = []
-    persistent_trace_ids: set[str] = set()
+    seen_event_keys: set[tuple[Any, ...]] = set()
+
+    def event_key(event: dict[str, Any]) -> tuple[Any, ...]:
+        trace_key = str(event.get("trace_id") or "").strip()
+        event_metadata = event.get("metadata")
+        event_metadata = event_metadata if isinstance(event_metadata, dict) else {}
+        event_id = str(
+            event.get("activity_event_id")
+            or event_metadata.get("activity_event_id")
+            or ""
+        ).strip()
+        if event_id:
+            return trace_key, event_id
+        return (
+            trace_key,
+            str(event.get("actor") or ""),
+            str(event.get("phase") or ""),
+            str(event.get("title") or ""),
+            str(event.get("detail") or ""),
+            str(event.get("status") or ""),
+        )
 
     for row in rows:
         data = dict(row.get("data") or {})
         trace_id = str(data.get("trace_id") or "").strip()
         if not trace_id:
             continue
-        persistent_trace_ids.add(trace_id)
-        timestamp = str(row.get("created_at") or "")
+        timestamp = str(data.get("activity_timestamp") or row.get("created_at") or "")
         event = {
             "schema": "hirda-pstack-activity-event-v1",
             "sequence": 0,
@@ -782,8 +803,10 @@ async def _pstack_activity_snapshot(
             "tool": data.get("tool"),
             "runtime_authority": "hirda",
             "metadata": dict(data.get("metadata") or {}),
+            "activity_event_id": data.get("activity_event_id"),
         }
         persistent_events.append(event)
+        seen_event_keys.add(event_key(event))
 
         trace = traces.setdefault(
             trace_id,
@@ -815,8 +838,6 @@ async def _pstack_activity_snapshot(
                 },
             },
         )
-        if data.get("task_id"):
-            trace["task_id"] = data.get("task_id")
         if data.get("goal"):
             trace["goal"] = str(data.get("goal"))
         if data.get("workflow"):
@@ -827,6 +848,19 @@ async def _pstack_activity_snapshot(
             trace["tool"] = data.get("tool")
         if isinstance(data.get("lifecycle"), dict):
             trace["lifecycle"] = dict(data.get("lifecycle") or {})
+        identity_fields = {
+            key: data.get(key)
+            for key in (
+                "task_id",
+                "request_id",
+                "workspace_key",
+                "managed_session_id",
+                "gateway_session_id",
+            )
+            if data.get(key)
+        }
+        if identity_fields:
+            trace["identity"] = {**dict(trace.get("identity") or {}), **identity_fields}
         trace["updated_at"] = timestamp
         trace["current_step"] = {
             "phase": event["phase"],
@@ -850,15 +884,50 @@ async def _pstack_activity_snapshot(
 
     for trace in memory.get("traces") or []:
         trace_id = str(trace.get("trace_id") or "").strip()
-        if not trace_id or trace_id in persistent_trace_ids:
+        if not trace_id:
             continue
-        traces[trace_id] = dict(trace)
+        current = traces.get(trace_id)
+        if current is None:
+            traces[trace_id] = dict(trace)
+            continue
+        memory_updated = str(trace.get("updated_at") or trace.get("started_at") or "")
+        current_updated = str(current.get("updated_at") or current.get("started_at") or "")
+        if memory_updated > current_updated:
+            current.update({
+                key: trace[key]
+                for key in ("status", "current_step", "updated_at", "lifecycle")
+                if key in trace
+            })
 
     for event in memory.get("events") or []:
         trace_id = str(event.get("trace_id") or "").strip()
-        if not trace_id or trace_id in persistent_trace_ids:
+        if not trace_id:
             continue
-        persistent_events.append(dict(event))
+        memory_event = dict(event)
+        key = event_key(memory_event)
+        if key not in seen_event_keys:
+            persistent_events.append(memory_event)
+            seen_event_keys.add(key)
+        trace = traces.get(trace_id)
+        if trace is not None:
+            phase = str(memory_event.get("phase") or "").casefold()
+            event_status = str(memory_event.get("status") or "").casefold()
+            memory_timestamp = str(memory_event.get("timestamp") or "")
+            current_timestamp = str(trace.get("updated_at") or trace.get("started_at") or "")
+            if not current_timestamp or memory_timestamp > current_timestamp:
+                if phase == "hirda_execution_started" or phase == "tool_started":
+                    trace["status"] = "executing"
+                elif phase == "hirda_execution_completed":
+                    trace["status"] = "completed"
+                elif phase == "hirda_execution_failed" or event_status == "failed":
+                    trace["status"] = "failed"
+                trace["updated_at"] = memory_timestamp or current_timestamp
+                trace["current_step"] = {
+                    "phase": memory_event.get("phase"),
+                    "title": memory_event.get("title"),
+                    "status": memory_event.get("status"),
+                    "actor": memory_event.get("actor"),
+                }
 
     persistent_events.sort(
         key=lambda item: (
@@ -962,6 +1031,13 @@ async def _prepare_pstack_cognitive_payload(
             "workflow": context.get("workflow"),
             "source": context.get("pstack_source"),
             "reused": True,
+            "context": {
+                "task_id": prepared.get("request_id"),
+                "workspace_key": context.get("workspace_key"),
+                "managed_session_id": context.get("managed_session_id"),
+                "gateway_session_id": context.get("gateway_session_id"),
+                "goal": str(prepared.get("prompt") or ""),
+            },
         }
     if capability != "coding" and workflow_provider != "pstack":
         return prepared, None
@@ -974,7 +1050,7 @@ async def _prepare_pstack_cognitive_payload(
         registration = integration_manager.get("pstack")
         if registration.stage != "ready":
             await integration_manager.reconcile("pstack")
-        arguments: dict[str, Any] = {"goal": goal}
+        arguments: dict[str, Any] = {"goal": goal, "workflow_hint": "engineering_task"}
         requested_workflow = str(context.get("workflow") or "").strip().casefold()
         if requested_workflow in {"bug-fix", "feature", "review"}:
             arguments["workflow"] = requested_workflow
@@ -984,6 +1060,8 @@ async def _prepare_pstack_cognitive_payload(
             "managed_session_id": context.get("managed_session_id"),
             "capsule_id": context.get("capsule_id"),
             "turn_id": context.get("turn_id"),
+            "workspace_key": context.get("workspace_key"),
+            "gateway_session_id": context.get("gateway_session_id"),
         }
         call_context = {key: value for key, value in call_context.items() if value}
 
@@ -1030,10 +1108,17 @@ async def _prepare_pstack_cognitive_payload(
         "runtime_authority": "hirda",
         "model_selection": "deferred_to_hirda",
         "reused": False,
+        "context": {
+            "task_id": prepared.get("request_id"),
+            "workspace_key": context.get("workspace_key"),
+            "managed_session_id": context.get("managed_session_id"),
+            "gateway_session_id": context.get("gateway_session_id"),
+            "goal": goal,
+        },
     }
 
 
-def _record_pstack_hirda_event(
+async def _record_pstack_hirda_event(
     pstack: dict[str, Any] | None,
     *,
     phase: str,
@@ -1046,11 +1131,14 @@ def _record_pstack_hirda_event(
     trace_id = str((pstack or {}).get("trace_id") or "").strip()
     if not trace_id:
         return
+    event_id = uuid4().hex
+    event_metadata = {**dict(metadata or {}), "activity_event_id": event_id}
+    event_timestamp = datetime.now(timezone.utc).isoformat()
     try:
         adapter = _pstack_activity_adapter()
         recorder = getattr(adapter, "record_external_event", None)
         if callable(recorder):
-            recorder(
+            activity_event = recorder(
                 trace_id,
                 actor="hirda",
                 phase=phase,
@@ -1058,10 +1146,80 @@ def _record_pstack_hirda_event(
                 detail=detail,
                 status=status,
                 trace_status=trace_status,
-                metadata=metadata,
+                metadata=event_metadata,
             )
+            if isinstance(activity_event, dict) and activity_event.get("timestamp"):
+                event_timestamp = str(activity_event["timestamp"])
     except Exception:
-        return
+        pass
+    context = dict((pstack or {}).get("context") or {})
+    event_data = {
+        "trace_id": trace_id,
+        "request_id": context.get("task_id"),
+        "workspace_key": context.get("workspace_key"),
+        "managed_session_id": context.get("managed_session_id"),
+        "gateway_session_id": context.get("gateway_session_id"),
+        "goal": context.get("goal"),
+        "workflow": (pstack or {}).get("workflow"),
+        "actor": "hirda",
+        "phase": phase,
+        "title": title,
+        "detail": detail,
+        "status": status,
+        "trace_status": trace_status,
+        "metadata": event_metadata,
+        "activity_event_id": event_id,
+        "activity_timestamp": event_timestamp,
+    }
+    await db.add_event(
+        f"pstack.{phase}",
+        title,
+        severity="warning" if status == "failed" else "info",
+        data=event_data,
+        stream_id=f"pstack:{trace_id}",
+        correlation_id=trace_id,
+    )
+    task_status = {
+        "executing": "active",
+        "completed": "completed",
+        "failed": "failed",
+        "blocked": "blocked",
+    }.get(str(trace_status or "").casefold())
+    if task_status:
+        gateway_session_id = str(context.get("gateway_session_id") or "").strip()
+        if not gateway_session_id:
+            try:
+                opened = await db.list_events(
+                    kind_prefix="pstack.task.opened",
+                    correlation_id=trace_id,
+                    limit=1,
+                    ascending=False,
+                )
+                if opened:
+                    gateway_session_id = str(
+                        (opened[0].get("data") or {}).get("gateway_session_id") or ""
+                    ).strip()
+            except Exception:
+                gateway_session_id = ""
+        if gateway_session_id:
+            try:
+                gateway = await db.get_gateway_session(gateway_session_id)
+                task = dict((gateway.get("metadata") or {}).get("active_pstack_task") or {})
+                if str(task.get("trace_id") or "").strip() == trace_id:
+                    task["status"] = task_status
+                    await db.update_gateway_session_metadata(
+                        gateway_session_id,
+                        {"active_pstack_task": task},
+                    )
+                    studio_session_id = str(gateway.get("studio_session_id") or "").strip()
+                    if studio_session_id:
+                        await db.heartbeat_session(
+                            studio_session_id,
+                            {"metadata": {"active_pstack_task": task}},
+                        )
+            except Exception:
+                # The durable trace event remains authoritative if metadata is unavailable.
+                pass
 
 
 @app.get("/api/action-adapter/registry")
@@ -1216,7 +1374,7 @@ async def cognitive_router_plan(payload: dict[str, Any]):
         if pstack and pstack.get("applied"):
             candidates = list(plan.get("candidates") or [])
             selected = candidates[0] if candidates else {}
-            _record_pstack_hirda_event(
+            await _record_pstack_hirda_event(
                 pstack,
                 phase="hirda_plan_ready",
                 title="HIRDA plan ready",
@@ -1244,7 +1402,7 @@ async def cognitive_router_plan(payload: dict[str, Any]):
         )
         return plan
     except CognitiveRouterError as exc:
-        _record_pstack_hirda_event(
+        await _record_pstack_hirda_event(
             pstack,
             phase="hirda_plan_failed",
             title="HIRDA planning failed",
@@ -1260,7 +1418,7 @@ async def cognitive_router_plan(payload: dict[str, Any]):
         )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        _record_pstack_hirda_event(
+        await _record_pstack_hirda_event(
             pstack,
             phase="hirda_plan_failed",
             title="HIRDA planning failed",
@@ -1314,7 +1472,7 @@ async def _execute_cognitive_request_once(
     started = time.perf_counter()
     prepared_payload, pstack = await _prepare_pstack_cognitive_payload(payload)
     if pstack and pstack.get("applied"):
-        _record_pstack_hirda_event(
+        await _record_pstack_hirda_event(
             pstack,
             phase="hirda_execution_started",
             title="HIRDA execution started",
@@ -1329,7 +1487,7 @@ async def _execute_cognitive_request_once(
         result = (await cognitive_router.execute(prepared_payload)).as_dict()
         if pstack and pstack.get("applied"):
             result["pstack_methodology"] = dict(pstack)
-            _record_pstack_hirda_event(
+            await _record_pstack_hirda_event(
                 pstack,
                 phase="hirda_execution_completed",
                 title="HIRDA execution completed",
@@ -1365,7 +1523,7 @@ async def _execute_cognitive_request_once(
         )
         return result
     except CognitiveRouterError as exc:
-        _record_pstack_hirda_event(
+        await _record_pstack_hirda_event(
             pstack,
             phase="hirda_execution_failed",
             title="HIRDA execution failed",
@@ -1381,7 +1539,7 @@ async def _execute_cognitive_request_once(
         )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        _record_pstack_hirda_event(
+        await _record_pstack_hirda_event(
             pstack,
             phase="hirda_execution_failed",
             title="HIRDA execution failed",

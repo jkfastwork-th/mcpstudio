@@ -91,6 +91,73 @@ class _SnapshotDb:
         ]
 
 
+class _WritableSnapshotDb:
+    def __init__(self):
+        self.rows = []
+        self.gateway_metadata = {"active_pstack_task": {
+            "trace_id": "TRACE-COGNITIVE",
+            "status": "ready_for_hirda",
+        }}
+        self.logical_metadata = {}
+
+    async def add_event(self, kind, message, **kwargs):
+        data = dict(kwargs.get("data") or {})
+        self.rows.append({
+            "created_at": data.get("activity_timestamp") or "2026-09-28T12:00:00+00:00",
+            "kind": kind,
+            "message": message,
+            "data": data,
+            "correlation_id": kwargs.get("correlation_id"),
+        })
+
+    async def list_events(self, **_kwargs):
+        rows = list(self.rows)
+        if _kwargs.get("kind_prefix"):
+            rows = [row for row in rows if row["kind"].startswith(_kwargs["kind_prefix"])]
+        if _kwargs.get("correlation_id"):
+            rows = [row for row in rows if row.get("correlation_id") == _kwargs["correlation_id"]]
+        return rows if _kwargs.get("ascending", True) else list(reversed(rows))
+
+    async def get_gateway_session(self, _gateway_id):
+        return {
+            "id": "gws-cognitive",
+            "studio_session_id": "studio-cognitive",
+            "metadata": dict(self.gateway_metadata),
+        }
+
+    async def update_gateway_session_metadata(self, _gateway_id, patch):
+        self.gateway_metadata.update(dict(patch))
+
+    async def heartbeat_session(self, _session_id, patch):
+        self.logical_metadata.update(dict(patch.get("metadata") or {}))
+
+
+class _RecordingActivityAdapter:
+    def __init__(self):
+        self.events = []
+        self.trace = {
+            "trace_id": "TRACE-COGNITIVE",
+            "status": "ready_for_hirda",
+            "updated_at": "2026-09-28T11:59:00+00:00",
+        }
+
+    def record_external_event(self, trace_id, **event):
+        assert trace_id == self.trace["trace_id"]
+        recorded = {
+            "trace_id": trace_id,
+            "timestamp": f"2026-09-28T12:00:0{len(self.events)}+00:00",
+            "sequence": len(self.events) + 1,
+            **event,
+        }
+        self.events.append(recorded)
+        self.trace["status"] = event.get("trace_status") or self.trace["status"]
+        self.trace["updated_at"] = recorded["timestamp"]
+        return recorded
+
+    def activity_snapshot(self, *, since=0, limit=250):
+        return {"traces": [dict(self.trace)], "events": list(self.events)}
+
+
 @pytest.mark.asyncio
 async def test_pstack_activity_snapshot_reconstructs_multiple_persistent_tasks(
     monkeypatch,
@@ -110,6 +177,103 @@ async def test_pstack_activity_snapshot_reconstructs_multiple_persistent_tasks(
     assert snapshot["traces"][0]["goal"] == "Add activity timeline"
     assert snapshot["traces"][0]["lifecycle"]["current_phase"] == "analyze"
     assert snapshot["traces"][1]["identity"]["workspace_key"] == "alpha"
+
+
+@pytest.mark.asyncio
+async def test_pstack_snapshot_merges_memory_events_for_persisted_trace(monkeypatch):
+    class _MemoryWithExistingTrace:
+        def activity_snapshot(self, *, since=0, limit=250):
+            return {
+                "traces": [{
+                    "trace_id": "TRACE-1",
+                    "status": "executing",
+                    "updated_at": "2026-09-28T12:00:00+00:00",
+                }],
+                "events": [{
+                    "trace_id": "TRACE-1",
+                    "timestamp": "2026-09-28T12:00:00+00:00",
+                    "actor": "hirda",
+                    "phase": "memory_only_hirda_event",
+                    "title": "HIRDA event",
+                    "detail": "Still visible while trace is in DB.",
+                    "status": "running",
+                }],
+            }
+
+    monkeypatch.setattr(main, "db", _SnapshotDb())
+    monkeypatch.setattr(main, "_pstack_activity_adapter", lambda: _MemoryWithExistingTrace())
+    snapshot = await main._pstack_activity_snapshot(limit=100)
+    trace = next(item for item in snapshot["traces"] if item["trace_id"] == "TRACE-1")
+    assert trace["status"] == "executing"
+    assert any(event["phase"] == "memory_only_hirda_event" for event in snapshot["events"])
+
+
+@pytest.mark.asyncio
+async def test_hirda_start_and_completion_persist_across_adapter_restart(monkeypatch):
+    database = _WritableSnapshotDb()
+    adapter = _RecordingActivityAdapter()
+    monkeypatch.setattr(main, "db", database)
+    monkeypatch.setattr(main, "_pstack_activity_adapter", lambda: adapter)
+    pstack = {
+        "trace_id": "TRACE-COGNITIVE",
+        "workflow": "feature",
+        "context": {
+            "task_id": "COG-1",
+            "managed_session_id": "MS-1",
+            "workspace_key": "ws",
+        },
+    }
+    database.rows.append({
+        "created_at": "2026-09-28T11:59:00+00:00",
+        "kind": "pstack.task.opened",
+        "message": "Task opened",
+        "data": {"trace_id": "TRACE-COGNITIVE", "gateway_session_id": "gws-cognitive"},
+        "correlation_id": "TRACE-COGNITIVE",
+    })
+    await main._record_pstack_hirda_event(
+        pstack,
+        phase="hirda_execution_started",
+        title="HIRDA execution started",
+        detail="Runtime started.",
+        status="running",
+        trace_status="executing",
+    )
+    assert database.gateway_metadata["active_pstack_task"]["status"] == "active"
+    assert database.logical_metadata["active_pstack_task"]["status"] == "active"
+    await main._record_pstack_hirda_event(
+        pstack,
+        phase="hirda_execution_completed",
+        title="HIRDA execution completed",
+        detail="Execution completed.",
+        status="passed",
+        trace_status="completed",
+    )
+    assert database.gateway_metadata["active_pstack_task"]["status"] == "completed"
+    assert database.logical_metadata["active_pstack_task"]["status"] == "completed"
+
+    hirda_rows = [row for row in database.rows if row["kind"].startswith("pstack.hirda_")]
+    assert [row["correlation_id"] for row in hirda_rows] == [
+        "TRACE-COGNITIVE", "TRACE-COGNITIVE",
+    ]
+    monkeypatch.setattr(main, "_pstack_activity_adapter", lambda: _MemorylessAdapter())
+    snapshot = await main._pstack_activity_snapshot(limit=100)
+    trace = next(item for item in snapshot["traces"] if item["trace_id"] == "TRACE-COGNITIVE")
+    phases = [event["phase"] for event in snapshot["events"] if event["trace_id"] == "TRACE-COGNITIVE" and event["phase"].startswith("hirda_")]
+    assert trace["status"] == "completed"
+    assert phases == ["hirda_execution_started", "hirda_execution_completed"]
+    assert trace["identity"]["managed_session_id"] == "MS-1"
+    database.gateway_metadata["active_pstack_task"]["status"] = "active"
+    database.logical_metadata["active_pstack_task"]["status"] = "active"
+    await main._record_pstack_hirda_event(
+        pstack,
+        phase="hirda_execution_failed",
+        title="HIRDA execution failed",
+        detail="Runtime failed.",
+        status="failed",
+        trace_status="failed",
+    )
+    assert database.gateway_metadata["active_pstack_task"]["status"] == "failed"
+    assert database.logical_metadata["active_pstack_task"]["status"] == "failed"
 
 
 class _GatewayDb:
@@ -242,6 +406,9 @@ async def test_gateway_task_envelope_persists_trace_and_tool_activity():
     assert task["lifecycle"]["status"] == "active"
     assert task["workflow_directive"]["capability"] == "coding"
     assert task["workflow_directive"]["context"]["workflow_provider"] == "pstack"
+    assert gateway.integrations.calls[0][1]["workflow_hint"] == "engineering_task"
+    assert "HIRDA PSTACK LIFECYCLE CONTROL" in task["workflow_directive"]["prompt"]
+    assert "mcpstudio_pstack_checkpoint" in task["workflow_directive"]["prompt"]
     assert "PSTACK METHODOLOGY" in task["workflow_directive"]["prompt"]
     assert gateway.db.metadata["active_pstack_task"]["task_id"] == task["task_id"]
     assert gateway.db.logical_metadata["active_pstack_task"]["trace_id"] == "TRACE-GW"
@@ -250,6 +417,7 @@ async def test_gateway_task_envelope_persists_trace_and_tool_activity():
     assert "pstack.task.opened" in kinds
 
     session = {
+        "id": "gws-1",
         "studio_session_id": "studio-1",
         "metadata": {},
     }
@@ -274,6 +442,49 @@ async def test_gateway_task_envelope_persists_trace_and_tool_activity():
     assert len(tool_events) == 2
     assert tool_events[0][2]["data"]["trace_id"] == "TRACE-GW"
     assert tool_events[1][2]["data"]["status"] == "passed"
+    hirda_events = [
+        item for item in gateway.db.events
+        if item[0] == "pstack.hirda_execution_started"
+    ]
+    assert len(hirda_events) == 1
+    assert hirda_events[0][2]["data"]["trace_status"] == "executing"
+    assert gateway.db.logical_metadata["active_pstack_task"]["status"] == "active"
+    assert gateway.db.metadata["active_pstack_task"]["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_gateway_pstack_failed_tool_persists_terminal_status():
+    gateway = object.__new__(GatewaySessionManager)
+    gateway.db = _GatewayDb()
+    gateway.integrations = _GatewayIntegrations()
+    task = await gateway._open_pstack_gateway_task(
+        "gws-1",
+        managed_session={"id": "ms-1", "workspace_key": "mcp-studio"},
+        goal="Persist failed Pstack execution state",
+    )
+    assert task["status"] == "ready_for_hirda"
+    session = {
+        "id": "gws-1",
+        "studio_session_id": "studio-1",
+        "metadata": {"active_pstack_task": task},
+    }
+    await gateway._record_active_pstack_tool(
+        session,
+        tool_name="run_tests",
+        status="running",
+        detail="HIRDA dispatched tests.",
+    )
+    assert gateway.db.metadata["active_pstack_task"]["status"] == "active"
+    await gateway._record_active_pstack_tool(
+        session,
+        tool_name="run_tests",
+        status="failed",
+        detail="Tests failed.",
+    )
+    assert gateway.db.metadata["active_pstack_task"]["status"] == "failed"
+    assert gateway.db.logical_metadata["active_pstack_task"]["status"] == "failed"
+    terminal = [item for item in gateway.db.events if item[0] == "pstack.tool_completed"][-1]
+    assert terminal[2]["data"]["trace_status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -500,6 +711,8 @@ def test_pstack_ui_exposes_multi_task_ledger():
     for label in ("Task", "Pstack", "JEV", "HIRDA", "Runtime / Tools", "Verify", "Done"):
         assert label in app
     assert "downstreamSeen?'skipped':'waiting'" in app
+    assert "const hirdaReached=hirdaSeen||hirdaDone||toolStarted||toolDone" in app
+    assert "hirdaDone?'done':(hirdaReached?'active':'waiting')" in app
     assert "lifecycleStages" in app
     assert "stage&&stage.phase" in app
     assert "BLOCKED" in app
