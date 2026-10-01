@@ -27,9 +27,9 @@ STATIC_DIRECT_HANDLERS = {
     "fontIncreaseBtn": "fontIncreaseBtn').addEventListener('click'",
     "refreshBtn": "refreshBtn').addEventListener('click'",
     "reflexRefreshBtn": "reflexRefreshBtn')?.addEventListener('click'",
+    "pstackRefreshBtn": "pstackRefreshBtn')?.addEventListener('click'",
     "actionLoadBtn": "actionLoadBtn')?.addEventListener('click'",
     "actionEvaluateBtn": "actionEvaluateBtn')?.addEventListener('click'",
-    "pstackRefreshBtn": "pstackRefreshBtn')?.addEventListener('click'",
     "managedHistoryToggle": "managedHistoryToggle').addEventListener('click'",
     "newManagedSessionBtn": "newManagedSessionBtn').addEventListener('click'",
     "cancelManagedSessionBtn": "cancelManagedSessionBtn').addEventListener('click'",
@@ -42,6 +42,9 @@ STATIC_DIRECT_HANDLERS = {
     "computerDisconnectBtn": "target.id==='computerDisconnectBtn'",
     "computerFullscreenBtn": "target.id==='computerFullscreenBtn'",
     "machineDiscoverBtn": "closest('#machineDiscoverBtn')",
+    "oauthRefreshBtn": "oauthRefreshBtn')?.addEventListener('click'",
+    "oauthCopySetupBtn": "oauthCopySetupBtn')?.addEventListener('click'",
+    "oauthGenerateApprovalBtn": "oauthGenerateApprovalBtn')?.addEventListener('click'",
 }
 
 STATIC_DATA_HANDLERS = {
@@ -50,14 +53,17 @@ STATIC_DATA_HANDLERS = {
     "data-copy-command": "closest('[data-copy-command],[data-copy-source]')",
     "data-proxy-click": "closest('[data-proxy-click]')",
     "data-color-scheme": "closest('button[data-color-scheme]')",
+    "data-copy-oauth": "closest('[data-copy-oauth]')",
+    "data-copy-server-url": "closest('[data-copy-server-url]')",
+    "data-copy-approval-token": "closest('[data-copy-approval-token]')",
 }
 
 DYNAMIC_ACTION_HANDLERS = {
     "data-lane-state-apply": "closest('[data-lane-state-apply]')",
     "data-agent-check": "closest('[data-agent-check]')",
     "data-agent-details": "closest('[data-agent-details]')",
-    "data-go-view": "closest('[data-go-view]')",
     "data-pstack-trace": "closest('[data-pstack-trace]')",
+    "data-go-view": "closest('[data-go-view]')",
     "data-managed-resume": "closest('[data-managed-resume]')",
     "data-managed-restart": "closest('[data-managed-restart]')",
     "data-managed-stop": "closest('[data-managed-stop]')",
@@ -210,6 +216,8 @@ def test_button_backend_routes_exist():
         ("POST", "/api/herdr/refresh"),
         ("GET", "/api/computer/status"),
         ("GET", "/api/computer/descriptor/{managed_session_id}"),
+        ("GET", "/api/computer/monitors/{managed_session_id}"),
+        ("POST", "/api/computer/monitor/{managed_session_id}"),
         ("GET", "/api/computer/re-pair-targets/{managed_session_id}"),
         ("POST", "/api/computer/re-pair/{managed_session_id}"),
     }

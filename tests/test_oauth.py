@@ -35,7 +35,20 @@ def make_settings(tmp_path: Path) -> Settings:
     )
 
 
-def request_with_bearer(token: str) -> Request:
+def request_with_bearer(
+    token: str,
+    *,
+    subject: str | None = None,
+    openai_session: str | None = None,
+) -> Request:
+    headers = [
+        (b"authorization", f"Bearer {token}".encode()),
+        (b"user-agent", b"ChatGPT-MCP/1.0"),
+    ]
+    if subject:
+        headers.append((b"x-openai-subject", subject.encode()))
+    if openai_session:
+        headers.append((b"x-openai-session", openai_session.encode()))
     return Request({
         "type": "http",
         "http_version": "1.1",
@@ -44,10 +57,7 @@ def request_with_bearer(token: str) -> Request:
         "path": "/mcp/serena-8001",
         "raw_path": b"/mcp/serena-8001",
         "query_string": b"",
-        "headers": [
-            (b"authorization", f"Bearer {token}".encode()),
-            (b"user-agent", b"ChatGPT-MCP/1.0"),
-        ],
+        "headers": headers,
         "client": ("127.0.0.1", 1),
         "server": ("serena.example.test", 443),
     })
@@ -155,6 +165,29 @@ async def test_owner_approval_and_pkce_are_required(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_generated_owner_approval_token_is_short_lived_and_one_time(tmp_path: Path):
+    os.environ["MCP_STUDIO_TEST_OAUTH_SIGNING"] = "signing-secret-for-tests"
+    os.environ["MCP_STUDIO_TEST_OAUTH_OWNER"] = "owner-secret"
+    st = make_settings(tmp_path)
+    db = Database(st.studio.database)
+    await db.init()
+    oauth = OAuthManager(st, db)
+
+    generated = await oauth.create_owner_approval_token(
+        lifetime_seconds=600,
+        purpose="owner_approval",
+    )
+    assert generated["token"].startswith("HIRDA-APPROVE-")
+    assert generated["max_uses"] == 1
+    assert await oauth.consume_owner_approval_token(
+        generated["token"], purpose="owner_approval"
+    )
+    assert not await oauth.consume_owner_approval_token(
+        generated["token"], purpose="owner_approval"
+    )
+
+
+@pytest.mark.asyncio
 async def test_gateway_accepts_oauth_access_token_with_connector_identity(tmp_path: Path):
     os.environ["MCP_STUDIO_TEST_OAUTH_SIGNING"] = "signing-secret-for-tests"
     os.environ["MCP_STUDIO_TEST_OAUTH_OWNER"] = "owner-secret"
@@ -171,12 +204,67 @@ async def test_gateway_accepts_oauth_access_token_with_connector_identity(tmp_pa
         client_id=client["client_id"], scope="mcp:serena offline_access", resource=oauth.resource
     )
     manager = GatewaySessionManager(st, db, oauth)
-    supplied, client_identity, client_type, scope, source = manager.authenticate(request_with_bearer(token))
+    request = request_with_bearer(token)
+    supplied, client_identity, client_type, scope, source = manager.authenticate(request)
     assert supplied == token
+    assert request.state.connector_principal_id == (
+        "oauth-" + hashlib.sha256(client["client_id"].encode("utf-8")).hexdigest()[:24]
+    )
+    assert request.state.connector_peer_scope_id == (
+        "oauth-scope-" + hashlib.sha256(client["client_id"].encode("utf-8")).hexdigest()[:24]
+    )
     assert client_identity.startswith("oauth-")
     assert client_type == "mcp-http"
     assert scope == "connector"
     assert source == "oauth-client-id"
+
+
+@pytest.mark.asyncio
+async def test_gateway_scopes_oauth_identity_to_openai_subject(tmp_path: Path):
+    os.environ["MCP_STUDIO_TEST_OAUTH_SIGNING"] = "signing-secret-for-tests"
+    os.environ["MCP_STUDIO_TEST_OAUTH_OWNER"] = "owner-secret"
+    os.environ["MCP_STUDIO_TEST_GATEWAY_TOKEN"] = "static-admin-token"
+    st = make_settings(tmp_path)
+    db = Database(st.studio.database)
+    await db.init()
+    oauth = OAuthManager(st, db)
+    client = await oauth.create_client(
+        redirect_uris=["https://chatgpt.com/connector/oauth/test"],
+        token_endpoint_auth_method="none",
+    )
+    token, _ = oauth._issue_access_token(
+        client_id=client["client_id"], scope="mcp:serena offline_access", resource=oauth.resource
+    )
+    manager = GatewaySessionManager(st, db, oauth)
+
+    fern = request_with_bearer(token, subject="chatgpt-account-fern")
+    somchai = request_with_bearer(token, subject="chatgpt-account-somchai")
+    _, fern_client, _, fern_scope, fern_source = manager.authenticate(fern)
+    _, somchai_client, _, somchai_scope, somchai_source = manager.authenticate(somchai)
+
+    assert fern.state.connector_principal_id != somchai.state.connector_principal_id
+    assert fern.state.connector_peer_scope_id == somchai.state.connector_peer_scope_id
+    assert fern.state.connector_peer_scope_id.startswith("oauth-scope-")
+    assert fern_client != somchai_client
+    assert fern_scope == somchai_scope == "connector"
+    assert fern_source == somchai_source == "oauth-client-id+x-openai-subject"
+    assert "chatgpt-account-fern" not in fern.state.connector_principal_id
+    assert "chatgpt-account-somchai" not in somchai.state.connector_principal_id
+
+    fern_chat = request_with_bearer(
+        token, subject="chatgpt-account-fern", openai_session="same-conversation-id"
+    )
+    somchai_chat = request_with_bearer(
+        token, subject="chatgpt-account-somchai", openai_session="same-conversation-id"
+    )
+    _, fern_chat_id, _, fern_chat_scope, fern_chat_source = manager.authenticate(fern_chat)
+    _, somchai_chat_id, _, somchai_chat_scope, somchai_chat_source = manager.authenticate(somchai_chat)
+
+    assert fern_chat_id != somchai_chat_id
+    assert fern_chat.state.connector_principal_id == fern.state.connector_principal_id
+    assert somchai_chat.state.connector_principal_id == somchai.state.connector_principal_id
+    assert fern_chat_scope == somchai_chat_scope == "conversation"
+    assert fern_chat_source == somchai_chat_source == "x-openai-session-fingerprint"
 
 
 def test_invalid_bearer_has_protected_resource_challenge(tmp_path: Path):

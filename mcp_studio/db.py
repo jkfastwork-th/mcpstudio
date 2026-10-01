@@ -227,6 +227,7 @@ class Database:
                         name TEXT NOT NULL,
                         project_path TEXT NOT NULL UNIQUE,
                         enabled INTEGER NOT NULL DEFAULT 1,
+                        principal_id TEXT,
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
                         metadata_json TEXT NOT NULL DEFAULT '{}'
@@ -245,6 +246,7 @@ class Database:
                         generation INTEGER NOT NULL DEFAULT 0,
                         error TEXT,
                         log_path TEXT,
+                        principal_id TEXT,
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
                         last_started_at TEXT,
@@ -407,6 +409,26 @@ class Database:
                         used_at TEXT,
                         revoked_at TEXT,
                         rotated_from TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS oauth_owner_approval_tokens (
+                        token_hash TEXT PRIMARY KEY,
+                        purpose TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        used_at TEXT,
+                        revoked_at TEXT,
+                        metadata_json TEXT NOT NULL DEFAULT '{}'
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_oauth_owner_approval_tokens_expiry
+                        ON oauth_owner_approval_tokens(expires_at, used_at, revoked_at);
+                    CREATE TABLE IF NOT EXISTS video_profile_approvals (
+                        profile TEXT PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        pool_id TEXT NOT NULL,
+                        allowed_models_json TEXT NOT NULL DEFAULT '[]',
+                        approved_by TEXT NOT NULL,
+                        approved_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
                     );
                     CREATE TABLE IF NOT EXISTS schema_migrations (
                         version INTEGER PRIMARY KEY,
@@ -702,6 +724,58 @@ class Database:
                         "INSERT OR IGNORE INTO schema_migrations(version, name, applied_at) VALUES(10, 'hirda-canonical-event-ledger', ?)",
                         (now,),
                     )
+
+                db.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version, name, applied_at) VALUES(11, 'hirda-owner-approval-token-bootstrap', ?)",
+                    (now,),
+                )
+
+                workspace_columns = {row[1] for row in db.execute("PRAGMA table_info(managed_workspaces)").fetchall()}
+                if "principal_id" not in workspace_columns:
+                    db.execute("ALTER TABLE managed_workspaces ADD COLUMN principal_id TEXT")
+                managed_columns = {row[1] for row in db.execute("PRAGMA table_info(managed_sessions)").fetchall()}
+                if "principal_id" not in managed_columns:
+                    db.execute("ALTER TABLE managed_sessions ADD COLUMN principal_id TEXT")
+                db.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_managed_workspaces_principal ON managed_workspaces(principal_id, enabled, name)"
+                )
+                db.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_managed_sessions_principal ON managed_sessions(principal_id, project_path, updated_at)"
+                )
+                db.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version, name, applied_at) VALUES(12, 'hirda-connector-principal-isolation', ?)",
+                    (now,),
+                )
+
+                db.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS peer_messages (
+                        id TEXT PRIMARY KEY,
+                        peer_scope_id TEXT NOT NULL,
+                        thread_id TEXT NOT NULL,
+                        correlation_id TEXT NOT NULL,
+                        sender_principal_id TEXT NOT NULL,
+                        recipient_principal_id TEXT NOT NULL,
+                        reply_to TEXT,
+                        body TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        claimed_at TEXT,
+                        claimed_by_principal_id TEXT,
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        FOREIGN KEY(reply_to) REFERENCES peer_messages(id)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_peer_messages_recipient
+                        ON peer_messages(recipient_principal_id, claimed_at, created_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_peer_messages_thread
+                        ON peer_messages(thread_id, created_at ASC);
+                    CREATE INDEX IF NOT EXISTS idx_peer_messages_correlation
+                        ON peer_messages(correlation_id, created_at ASC);
+                    """
+                )
+                db.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version, name, applied_at) VALUES(13, 'hirda-peer-messaging-v1', ?)",
+                    (now,),
+                )
 
                 db.executescript(
                     """
@@ -1006,6 +1080,73 @@ class Database:
                 return out
         return await self._run(op)
 
+    async def approve_video_profile(
+        self,
+        profile: str,
+        *,
+        pool_id: str,
+        allowed_models: list[str],
+        approved_by: str,
+    ) -> dict[str, Any]:
+        now = _now()
+
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                db.execute(
+                    """INSERT INTO video_profile_approvals
+                       (profile, status, pool_id, allowed_models_json, approved_by, approved_at, updated_at)
+                       VALUES(?,?,?,?,?,?,?)
+                       ON CONFLICT(profile) DO UPDATE SET
+                         status='approved',
+                         pool_id=excluded.pool_id,
+                         allowed_models_json=excluded.allowed_models_json,
+                         approved_by=excluded.approved_by,
+                         approved_at=excluded.approved_at,
+                         updated_at=excluded.updated_at""",
+                    (
+                        profile,
+                        "approved",
+                        pool_id,
+                        json.dumps(allowed_models, ensure_ascii=False),
+                        approved_by,
+                        now,
+                        now,
+                    ),
+                )
+                row = db.execute(
+                    "SELECT * FROM video_profile_approvals WHERE profile=?",
+                    (profile,),
+                ).fetchone()
+                item = dict(row)
+                item["allowed_models"] = json.loads(
+                    item.pop("allowed_models_json") or "[]"
+                )
+                item["approved"] = item.get("status") == "approved"
+                return item
+
+        return await self._run(op)
+
+    async def get_video_profile_approval(
+        self,
+        profile: str,
+    ) -> dict[str, Any] | None:
+        def op() -> dict[str, Any] | None:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT * FROM video_profile_approvals WHERE profile=?",
+                    (profile,),
+                ).fetchone()
+                if row is None:
+                    return None
+                item = dict(row)
+                item["allowed_models"] = json.loads(
+                    item.pop("allowed_models_json") or "[]"
+                )
+                item["approved"] = item.get("status") == "approved"
+                return item
+
+        return await self._run(op)
+
     async def open_alert(
         self, dedupe_key: str, kind: str, message: str, *, severity: str = "warning",
         data: dict[str, Any] | None = None,
@@ -1085,7 +1226,7 @@ class Database:
                 integrity = db.execute("PRAGMA quick_check").fetchone()[0]
                 return {
                     "current_version": int(rows[-1]["version"]) if rows else 0,
-                    "expected_version": 10,
+                    "expected_version": 13,
                     "integrity": integrity,
                     "migrations": [dict(r) for r in rows],
                 }
@@ -1255,6 +1396,373 @@ class Database:
                         (tunnel_id, limit),
                     ).fetchall()
                 return [self._gateway_session_item(row) for row in rows]
+        return await self._run(op)
+
+    @staticmethod
+    def _peer_message_item(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "message_id": str(row["id"]),
+            "peer_scope_id": str(row["peer_scope_id"]),
+            "thread_id": str(row["thread_id"]),
+            "correlation_id": str(row["correlation_id"]),
+            "sender_principal_id": str(row["sender_principal_id"]),
+            "recipient_principal_id": str(row["recipient_principal_id"]),
+            "reply_to": row["reply_to"],
+            "text": str(row["body"]),
+            "created_at": str(row["created_at"]),
+            "claimed_at": row["claimed_at"],
+            "claimed_by_principal_id": row["claimed_by_principal_id"],
+            "metadata": json.loads(row["metadata_json"] or "{}"),
+        }
+
+    async def list_peer_principals(
+        self,
+        *,
+        current_principal_id: str | None = None,
+        peer_scope_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        sessions = await self.list_gateway_sessions(limit=1000)
+        peers: dict[str, dict[str, Any]] = {}
+        for session in sessions:
+            raw_metadata = session.get("metadata")
+            metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+            principal_id = str(metadata.get("connector_principal_id") or "").strip()
+            session_peer_scope = str(metadata.get("connector_peer_scope_id") or "").strip()
+            if not principal_id:
+                continue
+            if peer_scope_id and session_peer_scope != peer_scope_id:
+                continue
+            item = peers.setdefault(
+                principal_id,
+                {
+                    "principal_id": principal_id,
+                    "online": False,
+                    "last_seen_at": session.get("last_seen_at"),
+                    "client_types": set(),
+                    "conversation_ids": set(),
+                },
+            )
+            if str(session.get("status") or "") == "connected":
+                item["online"] = True
+            if str(session.get("last_seen_at") or "") > str(item.get("last_seen_at") or ""):
+                item["last_seen_at"] = session.get("last_seen_at")
+            client_type = str(session.get("client_type") or "").strip()
+            if client_type:
+                item["client_types"].add(client_type)
+            client_id = str(session.get("client_id") or "").strip()
+            if client_id:
+                item["conversation_ids"].add(client_id)
+
+        ordered = sorted(
+            peers.values(),
+            key=lambda item: (bool(item["online"]), str(item.get("last_seen_at") or "")),
+            reverse=True,
+        )[: max(1, min(int(limit or 100), 100))]
+        return [
+            {
+                "principal_id": item["principal_id"],
+                "online": bool(item["online"]),
+                "last_seen_at": item.get("last_seen_at"),
+                "client_types": sorted(item["client_types"]),
+                "conversation_count": len(item["conversation_ids"]),
+                "self": bool(current_principal_id and item["principal_id"] == current_principal_id),
+            }
+            for item in ordered
+        ]
+
+    async def create_peer_message(
+        self,
+        *,
+        peer_scope_id: str,
+        sender_principal_id: str,
+        recipient_principal_id: str,
+        text: str,
+        thread_id: str | None = None,
+        correlation_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        peer_scope = str(peer_scope_id or "").strip()
+        sender = str(sender_principal_id or "").strip()
+        recipient = str(recipient_principal_id or "").strip()
+        body = str(text or "").strip()
+        if not peer_scope:
+            raise ValueError("peer scope is required")
+        if not sender or not recipient:
+            raise ValueError("peer sender and recipient principals are required")
+        if sender == recipient:
+            raise ValueError("peer sender and recipient principals must differ")
+        if not body:
+            raise ValueError("peer message text is required")
+        if len(body) > 8000:
+            raise ValueError("peer message text exceeds 8000 characters")
+
+        message_id = f"pm-{uuid.uuid4().hex[:20]}"
+        requested_thread = str(thread_id or "").strip()
+        requested_correlation = str(correlation_id or "").strip()
+        stamp = _now()
+        safe_metadata = dict(metadata or {})
+
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                resolved_thread = requested_thread
+                resolved_correlation = requested_correlation
+
+                if resolved_thread:
+                    existing = db.execute(
+                        """SELECT * FROM peer_messages
+                           WHERE thread_id=?
+                           ORDER BY created_at ASC, id ASC
+                           LIMIT 1""",
+                        (resolved_thread,),
+                    ).fetchone()
+                    if existing is not None:
+                        if str(existing["peer_scope_id"]) != peer_scope:
+                            raise PermissionError(
+                                "peer thread belongs to a different peer scope"
+                            )
+                        participants = {
+                            str(existing["sender_principal_id"]),
+                            str(existing["recipient_principal_id"]),
+                        }
+                        if participants != {sender, recipient}:
+                            raise PermissionError(
+                                "peer thread belongs to different principals"
+                            )
+                        existing_correlation = str(existing["correlation_id"])
+                        if (
+                            resolved_correlation
+                            and resolved_correlation != existing_correlation
+                        ):
+                            raise ValueError(
+                                "peer thread correlation_id cannot change"
+                            )
+                        resolved_correlation = existing_correlation
+
+                if not resolved_thread:
+                    resolved_thread = f"pt-{uuid.uuid4().hex[:20]}"
+                if not resolved_correlation:
+                    resolved_correlation = f"pc-{uuid.uuid4().hex[:20]}"
+
+                db.execute(
+                    """INSERT INTO peer_messages(
+                           id, peer_scope_id, thread_id, correlation_id,
+                           sender_principal_id, recipient_principal_id,
+                           reply_to, body, created_at,
+                           claimed_at, claimed_by_principal_id, metadata_json
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        message_id,
+                        peer_scope,
+                        resolved_thread,
+                        resolved_correlation,
+                        sender,
+                        recipient,
+                        None,
+                        body,
+                        stamp,
+                        None,
+                        None,
+                        json.dumps(safe_metadata, ensure_ascii=False),
+                    ),
+                )
+                row = db.execute(
+                    "SELECT * FROM peer_messages WHERE id=?",
+                    (message_id,),
+                ).fetchone()
+                return self._peer_message_item(row)
+
+        return await self._run(op)
+
+    async def list_peer_inbox(
+        self,
+        principal_id: str,
+        *,
+        peer_scope_id: str,
+        limit: int = 20,
+        unclaimed_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        principal = str(principal_id or "").strip()
+        peer_scope = str(peer_scope_id or "").strip()
+        if not principal or not peer_scope:
+            raise ValueError("peer principal and scope are required")
+        limit = max(1, min(int(limit or 20), 100))
+
+        def op() -> list[dict[str, Any]]:
+            with self._connect() as db:
+                sql = (
+                    "SELECT * FROM peer_messages "
+                    "WHERE peer_scope_id=? AND recipient_principal_id=?"
+                )
+                params: list[Any] = [peer_scope, principal]
+                if unclaimed_only:
+                    sql += " AND claimed_at IS NULL"
+                sql += " ORDER BY created_at ASC, id ASC LIMIT ?"
+                params.append(limit)
+                rows = db.execute(sql, tuple(params)).fetchall()
+                return [self._peer_message_item(row) for row in rows]
+
+        return await self._run(op)
+
+    async def claim_peer_message(
+        self,
+        message_id: str,
+        *,
+        principal_id: str,
+        peer_scope_id: str,
+    ) -> dict[str, Any]:
+        message = str(message_id or "").strip()
+        principal = str(principal_id or "").strip()
+        peer_scope = str(peer_scope_id or "").strip()
+        if not message or not principal or not peer_scope:
+            raise ValueError("peer message_id, principal, and scope are required")
+        stamp = _now()
+
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT * FROM peer_messages WHERE id=?",
+                    (message,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(message)
+                if str(row["peer_scope_id"]) != peer_scope:
+                    raise PermissionError("peer message belongs to a different peer scope")
+                if str(row["recipient_principal_id"]) != principal:
+                    raise PermissionError(
+                        "peer message is not addressed to this principal"
+                    )
+                if row["claimed_at"] is None:
+                    db.execute(
+                        """UPDATE peer_messages
+                           SET claimed_at=?, claimed_by_principal_id=?
+                           WHERE id=? AND claimed_at IS NULL""",
+                        (stamp, principal, message),
+                    )
+                elif str(row["claimed_by_principal_id"] or "") != principal:
+                    raise PermissionError(
+                        "peer message was claimed by another principal"
+                    )
+                claimed = db.execute(
+                    "SELECT * FROM peer_messages WHERE id=?",
+                    (message,),
+                ).fetchone()
+                return self._peer_message_item(claimed)
+
+        return await self._run(op)
+
+    async def reply_peer_message(
+        self,
+        message_id: str,
+        *,
+        sender_principal_id: str,
+        peer_scope_id: str,
+        text: str,
+    ) -> dict[str, Any]:
+        parent_id = str(message_id or "").strip()
+        sender = str(sender_principal_id or "").strip()
+        peer_scope = str(peer_scope_id or "").strip()
+        body = str(text or "").strip()
+        if not parent_id or not sender or not peer_scope or not body:
+            raise ValueError("peer reply requires message_id, sender principal, scope, and text")
+        if len(body) > 8000:
+            raise ValueError("peer reply text exceeds 8000 characters")
+        new_id = f"pm-{uuid.uuid4().hex[:20]}"
+        stamp = _now()
+
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                parent = db.execute(
+                    "SELECT * FROM peer_messages WHERE id=?", (parent_id,)
+                ).fetchone()
+                if parent is None:
+                    raise KeyError(parent_id)
+                if str(parent["peer_scope_id"]) != peer_scope:
+                    raise PermissionError("peer message belongs to a different peer scope")
+                if str(parent["recipient_principal_id"]) != sender:
+                    raise PermissionError("peer reply principal mismatch")
+                db.execute(
+                    """INSERT INTO peer_messages(
+                        id, peer_scope_id, thread_id, correlation_id,
+                        sender_principal_id, recipient_principal_id, reply_to,
+                        body, created_at, claimed_at,
+                        claimed_by_principal_id, metadata_json
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        new_id, peer_scope, parent["thread_id"],
+                        parent["correlation_id"], sender,
+                        parent["sender_principal_id"], parent_id, body,
+                        stamp, None, None, "{}",
+                    ),
+                )
+                row = db.execute(
+                    "SELECT * FROM peer_messages WHERE id=?", (new_id,)
+                ).fetchone()
+                return self._peer_message_item(row)
+
+        return await self._run(op)
+
+    async def list_peer_threads(
+        self,
+        principal_id: str,
+        *,
+        peer_scope_id: str,
+        thread_id: str | None = None,
+        correlation_id: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        principal = str(principal_id or "").strip()
+        peer_scope = str(peer_scope_id or "").strip()
+        if not principal or not peer_scope:
+            raise ValueError("peer principal and scope are required")
+        thread_filter = str(thread_id or "").strip()
+        correlation_filter = str(correlation_id or "").strip()
+        thread_limit = max(1, min(int(limit or 20), 100))
+
+        def op() -> list[dict[str, Any]]:
+            with self._connect() as db:
+                where = ["(sender_principal_id=? OR recipient_principal_id=?)"]
+                params: list[Any] = [peer_scope, principal, principal]
+                if thread_filter:
+                    where.append("thread_id=?")
+                    params.append(thread_filter)
+                if correlation_filter:
+                    where.append("correlation_id=?")
+                    params.append(correlation_filter)
+                params.append(thread_limit * 20)
+                rows = db.execute(
+                    f"SELECT * FROM peer_messages WHERE peer_scope_id=? AND {' AND '.join(where)} "
+                    "ORDER BY created_at DESC, id DESC LIMIT ?",
+                    tuple(params),
+                ).fetchall()
+
+            grouped: dict[str, dict[str, Any]] = {}
+            order: list[str] = []
+            for row in rows:
+                message = self._peer_message_item(row)
+                tid = message["thread_id"]
+                if tid not in grouped:
+                    peer = (
+                        message["recipient_principal_id"]
+                        if message["sender_principal_id"] == principal
+                        else message["sender_principal_id"]
+                    )
+                    grouped[tid] = {
+                        "thread_id": tid,
+                        "correlation_id": message["correlation_id"],
+                        "peer_principal_id": peer,
+                        "last_message_at": message["created_at"],
+                        "messages": [],
+                    }
+                    order.append(tid)
+                grouped[tid]["messages"].append(message)
+
+            result = []
+            for tid in order[:thread_limit]:
+                grouped[tid]["messages"].reverse()
+                result.append(grouped[tid])
+            return result
+
         return await self._run(op)
 
     async def find_reusable_gateway_session(
@@ -2268,6 +2776,53 @@ class Database:
                 return [self._oauth_client_item(row) for row in rows]
         return await self._run(op)
 
+
+    async def create_owner_approval_token(
+        self, *, token_hash: str, purpose: str, lifetime_seconds: int,
+        metadata: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        now_dt = datetime.now(timezone.utc)
+        expires_at = (now_dt + timedelta(seconds=lifetime_seconds)).isoformat()
+        created_at = now_dt.isoformat()
+        payload = json.dumps(metadata or {})
+        def op() -> None:
+            with self._connect() as db:
+                db.execute(
+                    """INSERT INTO oauth_owner_approval_tokens
+                       (token_hash, purpose, created_at, expires_at, metadata_json)
+                       VALUES(?,?,?,?,?)""",
+                    (token_hash, purpose, created_at, expires_at, payload),
+                )
+        await self._run(op)
+        return {
+            "purpose": purpose,
+            "created_at": created_at,
+            "expires_at": expires_at,
+            "metadata": metadata or {},
+        }
+
+    async def consume_owner_approval_token(self, token_hash: str, purpose: str) -> dict[str, Any]:
+        now = _now()
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                row = db.execute(
+                    """SELECT * FROM oauth_owner_approval_tokens
+                       WHERE token_hash=? AND purpose=?
+                         AND used_at IS NULL AND revoked_at IS NULL
+                         AND expires_at > ?""",
+                    (token_hash, purpose, now),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(token_hash)
+                db.execute(
+                    "UPDATE oauth_owner_approval_tokens SET used_at=? WHERE token_hash=?",
+                    (now, token_hash),
+                )
+                item = dict(row)
+                item["metadata"] = json.loads(item.pop("metadata_json") or "{}")
+                return item
+        return await self._run(op)
+
     async def create_oauth_authorization_code(
         self, *, code_hash: str, client_id: str, redirect_uri: str, scope: str,
         code_challenge: str, code_challenge_method: str, resource: str, lifetime_seconds: int
@@ -2920,17 +3475,27 @@ class Database:
         return item
 
     async def upsert_managed_workspace(
-        self, *, key: str, name: str, project_path: str, metadata: dict[str, Any] | None = None
+        self, *, key: str, name: str, project_path: str,
+        metadata: dict[str, Any] | None = None, principal_id: str | None = None,
     ) -> dict[str, Any]:
         now = _now()
         def op() -> None:
             with self._connect() as db:
                 db.execute(
-                    """INSERT INTO managed_workspaces(key, name, project_path, enabled, created_at, updated_at, metadata_json)
-                       VALUES(?,?,?,1,?,?,?)
-                       ON CONFLICT(key) DO UPDATE SET name=excluded.name, project_path=excluded.project_path,
-                         enabled=1, updated_at=excluded.updated_at, metadata_json=excluded.metadata_json""",
-                    (key, name, project_path, now, now, json.dumps(metadata or {}, ensure_ascii=False)),
+                    """INSERT INTO managed_workspaces
+                       (key, name, project_path, enabled, principal_id, created_at, updated_at, metadata_json)
+                       VALUES(?,?,?,1,?,?,?,?)
+                       ON CONFLICT(key) DO UPDATE SET
+                         name=excluded.name,
+                         project_path=excluded.project_path,
+                         enabled=1,
+                         principal_id=COALESCE(managed_workspaces.principal_id, excluded.principal_id),
+                         updated_at=excluded.updated_at,
+                         metadata_json=excluded.metadata_json""",
+                    (
+                        key, name, project_path, principal_id, now, now,
+                        json.dumps(metadata or {}, ensure_ascii=False),
+                    ),
                 )
         await self._run(op)
         return await self.get_managed_workspace(key)
@@ -2944,10 +3509,20 @@ class Database:
                 return self._managed_workspace_item(row)
         return await self._run(op)
 
-    async def list_managed_workspaces(self) -> list[dict[str, Any]]:
+    async def list_managed_workspaces(self, principal_id: str | None = None) -> list[dict[str, Any]]:
         def op() -> list[dict[str, Any]]:
             with self._connect() as db:
-                rows = db.execute("SELECT * FROM managed_workspaces WHERE enabled=1 ORDER BY name, key").fetchall()
+                if principal_id is None:
+                    rows = db.execute(
+                        "SELECT * FROM managed_workspaces WHERE enabled=1 ORDER BY name, key"
+                    ).fetchall()
+                else:
+                    rows = db.execute(
+                        """SELECT * FROM managed_workspaces
+                           WHERE enabled=1 AND principal_id=?
+                           ORDER BY name, key""",
+                        (principal_id,),
+                    ).fetchall()
                 return [self._managed_workspace_item(row) for row in rows]
         return await self._run(op)
 
@@ -2976,9 +3551,219 @@ class Database:
                 return self._managed_workspace_item(row) if row is not None else None
         return await self._run(op)
 
+
+    async def claim_managed_workspace(self, workspace_key: str, principal_id: str) -> dict[str, Any]:
+        now = _now()
+        def op() -> None:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT principal_id FROM managed_workspaces WHERE key=? AND enabled=1",
+                    (workspace_key,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(workspace_key)
+                current = str(row["principal_id"] or "")
+                if current and current != principal_id:
+                    raise PermissionError("workspace is owned by another connector principal")
+                db.execute(
+                    """UPDATE managed_workspaces
+                       SET principal_id=COALESCE(principal_id, ?), updated_at=?
+                       WHERE key=?""",
+                    (principal_id, now, workspace_key),
+                )
+        await self._run(op)
+        return await self.get_managed_workspace(workspace_key)
+
+
+    async def claim_legacy_workspace_for_principal(
+        self, workspace_key: str, principal_id: str
+    ) -> dict[str, Any]:
+        """Claim an unowned pre-isolation workspace only with historical connector evidence."""
+        now = _now()
+
+        def op() -> None:
+            with self._connect() as db:
+                workspace = db.execute(
+                    "SELECT * FROM managed_workspaces WHERE key=? AND enabled=1",
+                    (workspace_key,),
+                ).fetchone()
+                if workspace is None:
+                    raise KeyError(workspace_key)
+                current = str(workspace["principal_id"] or "")
+                if current:
+                    if current != principal_id:
+                        raise PermissionError("workspace is owned by another connector principal")
+                    return
+
+                managed_rows = db.execute(
+                    "SELECT id FROM managed_sessions WHERE workspace_key=?",
+                    (workspace_key,),
+                ).fetchall()
+                if not managed_rows:
+                    raise PermissionError("legacy workspace has no ownership evidence")
+
+                observed: set[str] = set()
+                for managed_row in managed_rows:
+                    managed_id = str(managed_row["id"])
+                    evidence_rows = db.execute(
+                        """SELECT metadata_json FROM sessions
+                           WHERE managed_session_id=?
+                           UNION ALL
+                           SELECT metadata_json FROM gateway_sessions
+                           WHERE managed_session_id=?""",
+                        (managed_id, managed_id),
+                    ).fetchall()
+                    for evidence in evidence_rows:
+                        try:
+                            metadata = json.loads(evidence["metadata_json"] or "{}")
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            continue
+                        value = str(metadata.get("connector_principal_id") or "").strip()
+                        if value:
+                            observed.add(value)
+
+                if observed != {principal_id}:
+                    raise PermissionError("legacy workspace ownership cannot be proven for this connector")
+
+                db.execute(
+                    """UPDATE managed_workspaces
+                       SET principal_id=?, updated_at=?
+                       WHERE key=? AND principal_id IS NULL""",
+                    (principal_id, now, workspace_key),
+                )
+                db.execute(
+                    """UPDATE managed_sessions
+                       SET principal_id=?, updated_at=?
+                       WHERE workspace_key=? AND principal_id IS NULL""",
+                    (principal_id, now, workspace_key),
+                )
+
+        await self._run(op)
+        return await self.get_managed_workspace(workspace_key)
+
+    async def claim_reclaimed_managed_session_for_principal(
+        self,
+        studio_session_id: str,
+        managed_session_id: str,
+        principal_id: str,
+    ) -> dict[str, Any] | None:
+        """Adopt a pre-isolation managed pin using durable logical-session continuity.
+
+        This is intentionally narrower than generic legacy workspace claiming. The
+        requesting principal must already be recorded on the reclaimed logical
+        Studio session, that logical session must still point at the exact managed
+        session, and no workspace/session ownership or historical connector evidence
+        may conflict. A missing managed session returns None so callers can clear a
+        genuinely stale logical pin without weakening isolation.
+        """
+        principal_id = str(principal_id or "").strip()
+        if not principal_id:
+            raise ValueError("connector principal is required")
+        now = _now()
+
+        def op() -> str | None:
+            with self._connect() as db:
+                logical = db.execute(
+                    "SELECT managed_session_id, metadata_json FROM sessions WHERE id=?",
+                    (studio_session_id,),
+                ).fetchone()
+                if logical is None:
+                    raise KeyError(studio_session_id)
+                if str(logical["managed_session_id"] or "") != managed_session_id:
+                    raise PermissionError("logical session is not pinned to the requested managed session")
+                try:
+                    logical_metadata = json.loads(logical["metadata_json"] or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    logical_metadata = {}
+                logical_principal = str(
+                    logical_metadata.get("connector_principal_id") or ""
+                ).strip()
+                if logical_principal != principal_id:
+                    raise PermissionError("logical session belongs to another connector principal")
+
+                managed = db.execute(
+                    "SELECT workspace_key, principal_id FROM managed_sessions WHERE id=?",
+                    (managed_session_id,),
+                ).fetchone()
+                if managed is None:
+                    return None
+                workspace_key = str(managed["workspace_key"] or "")
+                workspace = db.execute(
+                    "SELECT principal_id FROM managed_workspaces WHERE key=? AND enabled=1",
+                    (workspace_key,),
+                ).fetchone()
+                if workspace is None:
+                    raise KeyError(workspace_key)
+
+                workspace_owner = str(workspace["principal_id"] or "")
+                managed_owner = str(managed["principal_id"] or "")
+                if workspace_owner and workspace_owner != principal_id:
+                    raise PermissionError("workspace is owned by another connector principal")
+                if managed_owner and managed_owner != principal_id:
+                    raise PermissionError("managed session is owned by another connector principal")
+
+                conflicting_owner = db.execute(
+                    """SELECT id FROM managed_sessions
+                       WHERE workspace_key=? AND principal_id IS NOT NULL
+                         AND principal_id<>?
+                       LIMIT 1""",
+                    (workspace_key, principal_id),
+                ).fetchone()
+                if conflicting_owner is not None:
+                    raise PermissionError("workspace has a managed session owned by another connector principal")
+
+                evidence_rows = db.execute(
+                    """SELECT s.metadata_json AS metadata_json
+                       FROM sessions s
+                       JOIN managed_sessions m ON m.id=s.managed_session_id
+                       WHERE m.workspace_key=?
+                       UNION ALL
+                       SELECT g.metadata_json AS metadata_json
+                       FROM gateway_sessions g
+                       JOIN managed_sessions m ON m.id=g.managed_session_id
+                       WHERE m.workspace_key=?""",
+                    (workspace_key, workspace_key),
+                ).fetchall()
+                observed: set[str] = set()
+                for evidence in evidence_rows:
+                    try:
+                        metadata = json.loads(evidence["metadata_json"] or "{}")
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                    value = str(metadata.get("connector_principal_id") or "").strip()
+                    if value:
+                        observed.add(value)
+                if any(value != principal_id for value in observed):
+                    raise PermissionError("legacy workspace has conflicting connector ownership evidence")
+                if principal_id not in observed:
+                    raise PermissionError("legacy workspace ownership cannot be proven for this connector")
+
+                db.execute(
+                    """UPDATE managed_workspaces
+                       SET principal_id=COALESCE(principal_id, ?), updated_at=?
+                       WHERE key=?""",
+                    (principal_id, now, workspace_key),
+                )
+                db.execute(
+                    """UPDATE managed_sessions
+                       SET principal_id=COALESCE(principal_id, ?), updated_at=?
+                       WHERE id=?""",
+                    (principal_id, now, managed_session_id),
+                )
+                return workspace_key
+
+        workspace_key = await self._run(op)
+        if workspace_key is None:
+            return None
+        return {
+            "workspace": await self.get_managed_workspace(workspace_key),
+            "managed_session": await self.get_managed_session(managed_session_id),
+        }
+
     async def create_managed_session(
         self, *, name: str, workspace_key: str, project_path: str, server_id: str, port: int,
         desired_state: str = "running", metadata: dict[str, Any] | None = None,
+        principal_id: str | None = None,
     ) -> dict[str, Any]:
         session_id = f"ms-{uuid.uuid4().hex[:16]}"
         now = _now()
@@ -2987,10 +3772,13 @@ class Database:
                 db.execute(
                     """INSERT INTO managed_sessions
                        (id, name, workspace_key, project_path, server_id, port, status, desired_state,
-                        generation, created_at, updated_at, metadata_json)
-                       VALUES(?,?,?,?,?,?, 'stopped', ?, 0, ?, ?, ?)""",
-                    (session_id, name, workspace_key, project_path, server_id, int(port), desired_state,
-                     now, now, json.dumps(metadata or {}, ensure_ascii=False)),
+                        generation, principal_id, created_at, updated_at, metadata_json)
+                       VALUES(?,?,?,?,?,?, 'stopped', ?, 0, ?, ?, ?, ?)""",
+                    (
+                        session_id, name, workspace_key, project_path, server_id, int(port),
+                        desired_state, principal_id, now, now,
+                        json.dumps(metadata or {}, ensure_ascii=False),
+                    ),
                 )
         await self._run(op)
         return await self.get_managed_session(session_id)
@@ -3004,13 +3792,23 @@ class Database:
                 return self._managed_session_item(row)
         return await self._run(op)
 
-    async def list_managed_sessions(self, limit: int = 500) -> list[dict[str, Any]]:
+    async def list_managed_sessions(
+        self, limit: int = 500, principal_id: str | None = None
+    ) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 1000))
         def op() -> list[dict[str, Any]]:
             with self._connect() as db:
-                rows = db.execute(
-                    "SELECT * FROM managed_sessions ORDER BY updated_at DESC LIMIT ?", (limit,)
-                ).fetchall()
+                if principal_id is None:
+                    rows = db.execute(
+                        "SELECT * FROM managed_sessions ORDER BY updated_at DESC LIMIT ?", (limit,)
+                    ).fetchall()
+                else:
+                    rows = db.execute(
+                        """SELECT * FROM managed_sessions
+                           WHERE principal_id=?
+                           ORDER BY updated_at DESC LIMIT ?""",
+                        (principal_id, limit),
+                    ).fetchall()
                 return [self._managed_session_item(row) for row in rows]
         return await self._run(op)
 
@@ -3025,16 +3823,53 @@ class Database:
                 return self._managed_session_item(row) if row is not None else None
         return await self._run(op)
 
-    async def find_managed_session_by_project(self, project_path: str) -> dict[str, Any] | None:
+    async def find_managed_session_by_project(
+        self, project_path: str, principal_id: str | None = None
+    ) -> dict[str, Any] | None:
         def op() -> dict[str, Any] | None:
             with self._connect() as db:
-                row = db.execute(
-                    """SELECT * FROM managed_sessions WHERE project_path=?
-                       ORDER BY CASE WHEN desired_state='running' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1""",
-                    (project_path,),
-                ).fetchone()
+                if principal_id is None:
+                    row = db.execute(
+                        """SELECT * FROM managed_sessions WHERE project_path=?
+                           ORDER BY CASE WHEN desired_state='running' THEN 0 ELSE 1 END,
+                                    updated_at DESC LIMIT 1""",
+                        (project_path,),
+                    ).fetchone()
+                else:
+                    row = db.execute(
+                        """SELECT * FROM managed_sessions
+                           WHERE project_path=? AND principal_id=?
+                           ORDER BY CASE WHEN desired_state='running' THEN 0 ELSE 1 END,
+                                    updated_at DESC LIMIT 1""",
+                        (project_path, principal_id),
+                    ).fetchone()
                 return self._managed_session_item(row) if row is not None else None
         return await self._run(op)
+
+
+    async def claim_unowned_managed_session_by_project(
+        self, project_path: str, principal_id: str
+    ) -> dict[str, Any] | None:
+        now = _now()
+        def op() -> str | None:
+            with self._connect() as db:
+                row = db.execute(
+                    """SELECT id FROM managed_sessions
+                       WHERE project_path=? AND principal_id IS NULL
+                       ORDER BY CASE WHEN desired_state='running' THEN 0 ELSE 1 END,
+                                updated_at DESC LIMIT 1""",
+                    (project_path,),
+                ).fetchone()
+                if row is None:
+                    return None
+                cur = db.execute(
+                    """UPDATE managed_sessions SET principal_id=?, updated_at=?
+                       WHERE id=? AND principal_id IS NULL""",
+                    (principal_id, now, row["id"]),
+                )
+                return str(row["id"]) if cur.rowcount else None
+        session_id = await self._run(op)
+        return await self.get_managed_session(session_id) if session_id else None
 
     async def set_managed_session_desired_state(self, session_id: str, desired_state: str) -> dict[str, Any]:
         if desired_state not in {"running", "stopped"}:
@@ -3657,8 +4492,10 @@ class Database:
 
         return await self._run(op)
 
-    async def managed_session_overview(self, limit: int = 500) -> list[dict[str, Any]]:
-        sessions = await self.list_managed_sessions(limit=limit)
+    async def managed_session_overview(
+        self, limit: int = 500, principal_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        sessions = await self.list_managed_sessions(limit=limit, principal_id=principal_id)
         gateways = await self.list_gateway_sessions(1000)
         by_managed: dict[str, list[dict[str, Any]]] = {}
         for gateway in gateways:
@@ -3710,7 +4547,11 @@ class Database:
                 "context_usage": context_usage,
                 "context_readings": context_readings,
             })
-        out.sort(key=lambda x: (0 if x.get("lifecycle_state") == "active" else 1 if x.get("lifecycle_state") == "idle" else 2, x.get("name") or ""))
+        out.sort(key=lambda x: (
+            0 if x.get("lifecycle_state") == "active"
+            else 1 if x.get("lifecycle_state") == "idle" else 2,
+            x.get("name") or "",
+        ))
         return out
 
     async def managed_session_history(self, session_id: str, limit: int = 100) -> dict[str, Any]:
@@ -3777,4 +4618,37 @@ class Database:
                     (managed_session_id,),
                 ).fetchall()
                 return [self._gateway_session_item(row) for row in rows]
+        return await self._run(op)
+
+    async def drain_gateway_bindings_for_managed_session(
+        self,
+        managed_session_id: str,
+        *,
+        reason: str,
+    ) -> list[str]:
+        """Detach ephemeral gateway bindings while preserving durable logical pins."""
+        now = _now()
+
+        def op() -> list[str]:
+            with self._connect() as db:
+                rows = db.execute(
+                    """SELECT id FROM gateway_sessions
+                       WHERE managed_session_id=? AND status='connected'""",
+                    (managed_session_id,),
+                ).fetchall()
+                ids = [str(row["id"]) for row in rows]
+                if not ids:
+                    return []
+                db.execute(
+                    """UPDATE gateway_sessions
+                       SET managed_session_id=NULL,
+                           upstream_session_id=NULL,
+                           generation=generation+1,
+                           last_seen_at=?,
+                           error=?
+                       WHERE managed_session_id=? AND status='connected'""",
+                    (now, str(reason or "")[:1000], managed_session_id),
+                )
+                return ids
+
         return await self._run(op)

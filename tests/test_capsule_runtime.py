@@ -311,6 +311,9 @@ def test_runtime_inventory_detects_three_lanes_and_nous_free(monkeypatch):
     assert by_id["hermes"]["limit_health"]["status"] == "interactive_only"
     assert by_id["codex"]["auth_health"]["status"] == "unknown"
     assert by_id["codex"]["limit_health"]["status"] == "interactive_only"
+    assert by_id["claude"]["capability_profile"]["schema"] == "hirda-runtime-capability-profile-v1"
+    assert by_id["codex"]["capability_profile"]["skills"]["coding"] > by_id["claude"]["capability_profile"]["skills"]["coding"]
+    assert by_id["hermes"]["capability_profile"]["latency"] > by_id["claude"]["capability_profile"]["latency"]
     assert data["summary"]["installed"] == 3
     assert data["summary"]["free_active"] == 1
     assert data["summary"]["auth_healthy"] == 0

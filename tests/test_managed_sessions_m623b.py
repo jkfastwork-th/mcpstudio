@@ -7,8 +7,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-
-import mcp_studio.managed_sessions as managed_sessions_module
+from fastapi import HTTPException
 
 import mcp_studio.managed_sessions as managed_sessions_module
 from starlette.requests import Request
@@ -74,20 +73,24 @@ async def test_schema_v6_managed_session_tables_and_gateway_columns(tmp_path: Pa
     db = Database(str(tmp_path / "db.sqlite3"))
     await db.init()
     status = await db.schema_status()
-    assert status["current_version"] == 10
-    assert status["expected_version"] == 10
+    assert status["current_version"] == 12
+    assert status["expected_version"] == 12
 
     def inspect():
         with db._connect() as conn:
             tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             gateway = {r[1] for r in conn.execute("PRAGMA table_info(gateway_sessions)")}
             studio = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
-            return tables, gateway, studio
+            managed = {r[1] for r in conn.execute("PRAGMA table_info(managed_sessions)")}
+            workspaces = {r[1] for r in conn.execute("PRAGMA table_info(managed_workspaces)")}
+            return tables, gateway, studio, managed, workspaces
 
-    tables, gateway, studio = await db._run(inspect)
+    tables, gateway, studio, managed, workspaces = await db._run(inspect)
     assert {"managed_sessions", "managed_workspaces"} <= tables
     assert {"managed_session_id", "upstream_url"} <= gateway
     assert "managed_session_id" in studio
+    assert "principal_id" in managed
+    assert "principal_id" in workspaces
 
 
 @pytest.mark.asyncio
@@ -194,6 +197,58 @@ async def test_use_workspace_selector_accepts_new_absolute_path_and_persists_reg
     assert second["port"] == first["port"]
     assert len(await db.list_managed_workspaces()) == 1
     assert len(await db.list_managed_sessions()) == 1
+
+
+@pytest.mark.asyncio
+async def test_connector_principal_isolates_workspace_and_managed_session(tmp_path: Path, monkeypatch):
+    settings = settings_for(tmp_path)
+    db = Database(settings.studio.database)
+    await db.init()
+    manager = ManagedSessionManager(settings, db)
+    project = tmp_path / "projects" / "private-project"
+    project.mkdir()
+
+    async def fake_ensure(session_id):
+        item = await db.get_managed_session(session_id)
+        return await db.update_managed_session_runtime(
+            session_id,
+            status="ready",
+            pid=123,
+            endpoint=f"http://127.0.0.1:{item['port']}/mcp",
+        )
+
+    monkeypatch.setattr(manager, "ensure_running", fake_ensure)
+
+    principal_a = "oauth-principal-a"
+    principal_b = "oauth-principal-b"
+
+    session_a = await manager.ensure_workspace_selector_session(
+        workspace=str(project),
+        actor="chatgpt/mcp",
+        principal_id=principal_a,
+    )
+    workspace = await db.get_managed_workspace(session_a["workspace_key"])
+    assert workspace["principal_id"] == principal_a
+    assert session_a["principal_id"] == principal_a
+
+    assert [item["key"] for item in await manager.list_workspaces(principal_id=principal_a)] == [
+        session_a["workspace_key"]
+    ]
+    assert await manager.list_workspaces(principal_id=principal_b) == []
+    assert [item["id"] for item in await manager.list_sessions(principal_id=principal_a)] == [
+        session_a["id"]
+    ]
+    assert await manager.list_sessions(principal_id=principal_b) == []
+
+    with pytest.raises(WorkspaceNotAllowed, match="assigned to another connector"):
+        await manager.ensure_workspace_selector_session(
+            workspace=str(project),
+            actor="chatgpt/mcp",
+            principal_id=principal_b,
+        )
+
+    with pytest.raises(KeyError):
+        await manager.get_session(session_a["id"], principal_id=principal_b)
 
 
 @pytest.mark.asyncio
@@ -490,6 +545,134 @@ async def test_binding_routes_gateway_to_dedicated_managed_instance(tmp_path: Pa
     assert result["managed_session"]["workspace_key"] == "alpha"
 
 
+@pytest.mark.asyncio
+async def test_binding_retires_only_same_logical_session_siblings(tmp_path: Path, monkeypatch):
+    settings = settings_for(tmp_path)
+    db = Database(settings.studio.database)
+    await db.init()
+
+    studio = await db.create_session({
+        "client_id": "conversation-a",
+        "client_type": "openai-chatgpt",
+        "server_id": "serena-8001",
+    })
+    other_studio = await db.create_session({
+        "client_id": "conversation-b",
+        "client_type": "openai-chatgpt",
+        "server_id": "serena-8001",
+    })
+
+    current = await db.create_gateway_session(
+        studio_session_id=studio["id"],
+        client_id="conversation-a",
+        client_type="openai-chatgpt",
+        server_id="serena-8001",
+        upstream_session_id="base-up",
+        protocol_version="2025-06-18",
+        init_payload={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+    )
+    stale_sibling = await db.create_gateway_session(
+        studio_session_id=studio["id"],
+        client_id="conversation-a",
+        client_type="openai-chatgpt",
+        server_id="serena-8001",
+        upstream_session_id="stale-managed-up",
+        protocol_version="2025-06-18",
+        init_payload={"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {}},
+    )
+    other_conversation = await db.create_gateway_session(
+        studio_session_id=other_studio["id"],
+        client_id="conversation-b",
+        client_type="openai-chatgpt",
+        server_id="serena-8001",
+        upstream_session_id="other-managed-up",
+        protocol_version="2025-06-18",
+        init_payload={"jsonrpc": "2.0", "id": 3, "method": "initialize", "params": {}},
+    )
+    endpoint = "http://127.0.0.1:43110/mcp"
+    await db.bind_gateway_managed_session(
+        stale_sibling["id"],
+        managed_session_id="ms-alpha",
+        upstream_url=endpoint,
+        upstream_session_id="stale-managed-up",
+    )
+    await db.bind_gateway_managed_session(
+        other_conversation["id"],
+        managed_session_id="ms-alpha",
+        upstream_url=endpoint,
+        upstream_session_id="other-managed-up",
+    )
+
+    manager = GatewaySessionManager(settings, db, managed_sessions=FakeManagedPool())
+    closed = []
+
+    async def fake_open(session, url):
+        return "fresh-managed-up"
+
+    async def fake_close(url, upstream):
+        closed.append((url, upstream))
+        return True
+
+    monkeypatch.setattr(manager, "_open_upstream_session", fake_open)
+    monkeypatch.setattr(manager, "_close_upstream_session", fake_close)
+
+    await manager.bind_managed_session(current["id"], "ms-alpha")
+
+    current_after = await db.get_gateway_session(current["id"])
+    stale_after = await db.get_gateway_session(stale_sibling["id"])
+    other_after = await db.get_gateway_session(other_conversation["id"])
+
+    assert current_after["status"] == "connected"
+    assert current_after["managed_session_id"] == "ms-alpha"
+    assert stale_after["status"] == "closed"
+    assert "superseded by gateway" in (stale_after["error"] or "")
+    assert other_after["status"] == "connected"
+    assert other_after["managed_session_id"] == "ms-alpha"
+    assert await db.count_connected_gateways_for_managed_session("ms-alpha") == 2
+    assert (endpoint, "stale-managed-up") in closed
+    assert ("http://127.0.0.1:8001/mcp", "base-up") in closed
+
+
+@pytest.mark.asyncio
+async def test_gateway_session_cannot_be_reused_by_another_connector_principal(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    db = Database(settings.studio.database)
+    await db.init()
+    studio = await db.create_session({
+        "client_id": "conversation-a",
+        "client_type": "openai-chatgpt",
+        "server_id": "serena-8001",
+    })
+    gw = await db.create_gateway_session(
+        studio_session_id=studio["id"],
+        client_id="conversation-a",
+        client_type="openai-chatgpt",
+        server_id="serena-8001",
+        upstream_session_id="base-up",
+        protocol_version="2025-06-18",
+        init_payload={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        metadata={"connector_principal_id": "oauth-principal-a"},
+    )
+    manager = GatewaySessionManager(settings, db, managed_sessions=FakeManagedPool())
+    body = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list",
+        "params": {},
+    }).encode()
+    request = request_for(body, gw["id"])
+    request.state.connector_principal_id = "oauth-principal-b"
+
+    with pytest.raises(HTTPException) as exc:
+        await manager.proxy_existing(
+            request=request,
+            server=settings.servers[0],
+            body=body,
+            gateway_session_id=gw["id"],
+        )
+    assert exc.value.status_code == 404
+
+
 def test_tools_list_injects_session_manager_tools(tmp_path: Path):
     settings = settings_for(tmp_path)
     manager = GatewaySessionManager(settings, Database(settings.studio.database), managed_sessions=FakeManagedPool())
@@ -500,6 +683,8 @@ def test_tools_list_injects_session_manager_tools(tmp_path: Path):
     assert "mcpstudio_create_session" in names
     assert "mcpstudio_use_session" in names
     assert "mcpstudio_use_workspace" in names
+    assert "mcpstudio_pstack_status" in names
+    assert "mcpstudio_pstack_checkpoint" in names
     assert "mcpstudio_register_workspace" in names
 
 
@@ -572,6 +757,336 @@ async def test_reclaimed_logical_session_preserves_pin_without_waking_runtime_du
 
     logical = await db.get_session(studio["id"])
     assert logical["managed_session_id"] == "ms-alpha"
+
+
+@pytest.mark.asyncio
+async def test_initialize_adopts_reclaimed_legacy_pin_for_same_connector_without_waking_runtime(
+    tmp_path: Path, monkeypatch
+):
+    settings = settings_for(tmp_path)
+    db = Database(settings.studio.database)
+    await db.init()
+    project = tmp_path / "projects" / "legacy"
+    project.mkdir()
+    await db.upsert_managed_workspace(
+        key="legacy",
+        name="Legacy",
+        project_path=str(project.resolve()),
+        metadata={"source": "pre-isolation"},
+    )
+    managed = await db.create_managed_session(
+        name="Legacy",
+        workspace_key="legacy",
+        project_path=str(project.resolve()),
+        server_id="serena-8001",
+        port=43110,
+    )
+    studio = await db.create_session(
+        {
+            "client_id": "stable-legacy",
+            "client_type": "chatgpt",
+            "server_id": "serena-8001",
+        }
+    )
+
+    def pin_legacy_session():
+        with db._connect() as conn:
+            conn.execute(
+                "UPDATE sessions SET managed_session_id=? WHERE id=?",
+                (managed["id"], studio["id"]),
+            )
+
+    await db._run(pin_legacy_session)
+
+    manager = GatewaySessionManager(settings, db, managed_sessions=FakeManagedPool())
+    ensure_calls = []
+    targets = []
+
+    async def unexpected_ensure(session_id):
+        ensure_calls.append(session_id)
+        raise AssertionError("initialize must not wake a managed Serena runtime")
+
+    async def fake_send(**kwargs):
+        targets.append(kwargs["server_url"])
+        return FakeHttpClient(), httpx.Response(
+            200,
+            headers={"content-type": "application/json", "mcp-session-id": "base-up"},
+            content=b'{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"Serena","version":"1"}}}',
+            request=httpx.Request("POST", kwargs["server_url"]),
+        )
+
+    monkeypatch.setattr(manager.managed_sessions, "ensure_running", unexpected_ensure)
+    monkeypatch.setattr(manager, "_send", fake_send)
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "1"},
+        },
+    }
+    body_bytes = json.dumps(payload).encode()
+    request = init_request(body_bytes)
+    request.state.connector_principal_id = "oauth-principal-a"
+
+    response = await manager.initialize(
+        request=request,
+        server=settings.servers[0],
+        body=body_bytes,
+        jsonrpc=payload,
+        client_id="stable-legacy",
+        client_type="chatgpt",
+        identity_scope="explicit",
+        identity_source="test",
+    )
+
+    assert ensure_calls == []
+    assert targets == ["http://127.0.0.1:8001/mcp"]
+    workspace = await db.get_managed_workspace("legacy")
+    adopted = await db.get_managed_session(managed["id"])
+    assert workspace["principal_id"] == "oauth-principal-a"
+    assert adopted["principal_id"] == "oauth-principal-a"
+    assert [item["key"] for item in await db.list_managed_workspaces("oauth-principal-a")] == [
+        "legacy"
+    ]
+    gateway = await db.get_gateway_session(response.headers["mcp-session-id"])
+    assert gateway["managed_session_id"] is None
+    logical = await db.get_session(studio["id"])
+    assert logical["managed_session_id"] == managed["id"]
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_legacy_pin_adoption_denies_conflicting_connector_evidence(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    db = Database(settings.studio.database)
+    await db.init()
+    project = tmp_path / "projects" / "legacy-conflict"
+    project.mkdir()
+    await db.upsert_managed_workspace(
+        key="legacy-conflict",
+        name="Legacy conflict",
+        project_path=str(project.resolve()),
+        metadata={"source": "pre-isolation"},
+    )
+    managed = await db.create_managed_session(
+        name="Legacy conflict",
+        workspace_key="legacy-conflict",
+        project_path=str(project.resolve()),
+        server_id="serena-8001",
+        port=43110,
+    )
+    studio = await db.create_session(
+        {
+            "client_id": "stable-conflict",
+            "client_type": "chatgpt",
+            "server_id": "serena-8001",
+            "metadata": {"connector_principal_id": "oauth-principal-a"},
+        }
+    )
+    gateway = await db.create_gateway_session(
+        studio_session_id=studio["id"],
+        client_id="stable-conflict",
+        client_type="chatgpt",
+        server_id="serena-8001",
+        upstream_session_id="legacy-up",
+        protocol_version="2025-06-18",
+        init_payload={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        metadata={"connector_principal_id": "oauth-principal-b"},
+        managed_session_id=managed["id"],
+    )
+
+    def pin_legacy_session():
+        with db._connect() as conn:
+            conn.execute(
+                "UPDATE sessions SET managed_session_id=? WHERE id=?",
+                (managed["id"], studio["id"]),
+            )
+
+    await db._run(pin_legacy_session)
+
+    with pytest.raises(PermissionError, match="conflicting connector ownership evidence"):
+        await db.claim_reclaimed_managed_session_for_principal(
+            studio["id"],
+            managed["id"],
+            "oauth-principal-a",
+        )
+
+    assert (await db.get_managed_workspace("legacy-conflict"))["principal_id"] is None
+    assert (await db.get_managed_session(managed["id"]))["principal_id"] is None
+    assert (await db.get_gateway_session(gateway["id"]))["managed_session_id"] == managed["id"]
+
+
+@pytest.mark.asyncio
+async def test_lazy_reconcile_adopts_same_principal_legacy_pin_before_binding(
+    tmp_path: Path, monkeypatch
+):
+    settings = settings_for(tmp_path)
+    db = Database(settings.studio.database)
+    await db.init()
+    project = tmp_path / "projects" / "legacy-lazy"
+    project.mkdir()
+    await db.upsert_managed_workspace(
+        key="legacy-lazy",
+        name="Legacy lazy",
+        project_path=str(project.resolve()),
+        metadata={"source": "pre-isolation"},
+    )
+    managed = await db.create_managed_session(
+        name="Legacy lazy",
+        workspace_key="legacy-lazy",
+        project_path=str(project.resolve()),
+        server_id="serena-8001",
+        port=43110,
+    )
+    studio = await db.create_session(
+        {
+            "client_id": "stable-lazy",
+            "client_type": "openai-chatgpt",
+            "server_id": "serena-8001",
+            "metadata": {"connector_principal_id": "oauth-principal-a"},
+        }
+    )
+
+    def pin_legacy_session():
+        with db._connect() as conn:
+            conn.execute(
+                "UPDATE sessions SET managed_session_id=? WHERE id=?",
+                (managed["id"], studio["id"]),
+            )
+
+    await db._run(pin_legacy_session)
+    gateway = await db.create_gateway_session(
+        studio_session_id=studio["id"],
+        client_id="stable-lazy",
+        client_type="openai-chatgpt",
+        server_id="serena-8001",
+        upstream_session_id="base-up",
+        protocol_version="2025-06-18",
+        init_payload={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        metadata={"connector_principal_id": "oauth-principal-a"},
+        upstream_url="http://127.0.0.1:8001/mcp",
+    )
+    pool = ManagedSessionManager(settings, db)
+
+    async def fake_ensure(session_id):
+        item = await db.get_managed_session(session_id)
+        return await db.update_managed_session_runtime(
+            session_id,
+            status="ready",
+            pid=123,
+            endpoint=f"http://127.0.0.1:{item['port']}/mcp",
+        )
+
+    manager = GatewaySessionManager(settings, db, managed_sessions=pool)
+    monkeypatch.setattr(pool, "ensure_running", fake_ensure)
+    monkeypatch.setattr(manager, "_open_upstream_session", lambda *args, **kwargs: None)
+
+    async def fake_open(session, url):
+        return "managed-up"
+
+    async def fake_close(url, upstream):
+        return None
+
+    monkeypatch.setattr(manager, "_open_upstream_session", fake_open)
+    monkeypatch.setattr(manager, "_close_upstream_session", fake_close)
+
+    reconciled = await manager._reconcile_gateway_managed_binding(gateway["id"], gateway)
+
+    assert reconciled["managed_session_id"] == managed["id"]
+    assert (await db.get_managed_workspace("legacy-lazy"))["principal_id"] == "oauth-principal-a"
+    assert (await db.get_managed_session(managed["id"]))["principal_id"] == "oauth-principal-a"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_skips_legacy_adoption_when_principal_ownership_is_already_authoritative(
+    tmp_path: Path, monkeypatch
+):
+    settings = settings_for(tmp_path)
+    db = Database(settings.studio.database)
+    await db.init()
+    project = tmp_path / "projects" / "owned"
+    project.mkdir()
+    await db.upsert_managed_workspace(
+        key="owned",
+        name="Owned",
+        project_path=str(project.resolve()),
+        metadata={"source": "test"},
+    )
+    managed = await db.create_managed_session(
+        name="Owned",
+        workspace_key="owned",
+        project_path=str(project.resolve()),
+        server_id="serena-8001",
+        port=43110,
+    )
+    studio = await db.create_session(
+        {
+            "client_id": "stable-owned",
+            "client_type": "openai-chatgpt",
+            "server_id": "serena-8001",
+            "metadata": {"connector_principal_id": "oauth-principal-a"},
+        }
+    )
+
+    def own_and_pin():
+        with db._connect() as conn:
+            conn.execute(
+                "UPDATE managed_workspaces SET principal_id=? WHERE key=?",
+                ("oauth-principal-a", "owned"),
+            )
+            conn.execute(
+                "UPDATE managed_sessions SET principal_id=? WHERE id=?",
+                ("oauth-principal-a", managed["id"]),
+            )
+            conn.execute(
+                "UPDATE sessions SET managed_session_id=? WHERE id=?",
+                (managed["id"], studio["id"]),
+            )
+
+    await db._run(own_and_pin)
+    gateway = await db.create_gateway_session(
+        studio_session_id=studio["id"],
+        client_id="stable-owned",
+        client_type="openai-chatgpt",
+        server_id="serena-8001",
+        upstream_session_id="managed-up",
+        protocol_version="2025-06-18",
+        init_payload={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        metadata={"connector_principal_id": "oauth-principal-a"},
+        managed_session_id=managed["id"],
+        upstream_url="http://127.0.0.1:43110/mcp",
+    )
+    manager = GatewaySessionManager(
+        settings,
+        db,
+        managed_sessions=ManagedSessionManager(settings, db),
+    )
+
+    async def legacy_adoption_must_not_run(*args, **kwargs):
+        raise AssertionError(
+            "authoritatively owned sessions must not re-run legacy adoption"
+        )
+
+    monkeypatch.setattr(
+        manager,
+        "_adopt_reclaimed_logical_pin",
+        legacy_adoption_must_not_run,
+    )
+
+    reconciled = await manager._reconcile_gateway_managed_binding(
+        gateway["id"],
+        gateway,
+    )
+
+    assert reconciled["managed_session_id"] == managed["id"]
+    assert (
+        await db.get_managed_session(managed["id"])
+    )["principal_id"] == "oauth-principal-a"
+    assert (
+        await db.get_managed_workspace("owned")
+    )["principal_id"] == "oauth-principal-a"
 
 
 @pytest.mark.asyncio
@@ -1347,3 +1862,113 @@ async def test_semantic_readiness_failure_never_reports_ready(
     assert failed["status"] == "error"
     assert failed["language_runtime"]["state"] == "degraded"
     assert "semantic probe failed" in failed["language_runtime"]["last_error"]
+
+
+@pytest.mark.asyncio
+async def test_drain_gateway_bindings_preserves_logical_managed_session_pins(tmp_path: Path):
+    db = Database(str(tmp_path / "drain.sqlite3"))
+    await db.init()
+    studio = await db.create_session({"client_id": "drain", "client_type": "chatgpt", "server_id": "serena-8001"})
+    connected = await db.create_gateway_session(
+        studio_session_id=studio["id"], client_id="drain", client_type="chatgpt",
+        server_id="serena-8001", upstream_session_id="up-connected",
+        protocol_version="2025-06-18", init_payload={}, managed_session_id="ms-drain",
+        upstream_url="http://127.0.0.1:43110/mcp",
+    )
+    closed_studio = await db.create_session({"client_id": "closed", "client_type": "chatgpt", "server_id": "serena-8001"})
+    closed = await db.create_gateway_session(
+        studio_session_id=closed_studio["id"], client_id="closed", client_type="chatgpt",
+        server_id="serena-8001", upstream_session_id="up-closed",
+        protocol_version="2025-06-18", init_payload={}, managed_session_id="ms-drain",
+    )
+    await db.close_gateway_session(closed["id"])
+    def pin():
+        with db._connect() as conn:
+            conn.execute("UPDATE sessions SET managed_session_id=? WHERE id=?", ("ms-drain", studio["id"]))
+    await db._run(pin)
+
+    drained = await db.drain_gateway_bindings_for_managed_session("ms-drain", reason="test recovery")
+
+    assert drained == [connected["id"]]
+    rebound = await db.get_gateway_session(connected["id"])
+    assert rebound["managed_session_id"] is None
+    assert rebound["upstream_session_id"] is None
+    assert (await db.get_gateway_session(closed["id"]))["managed_session_id"] == "ms-drain"
+    assert (await db.get_session(studio["id"]))["managed_session_id"] == "ms-drain"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_runtime_recovery_coalesces_when_generation_changed_and_probe_healthy(tmp_path: Path, monkeypatch):
+    settings = settings_for(tmp_path)
+    db = Database(settings.studio.database)
+    await db.init()
+    manager = ManagedSessionManager(settings, db)
+    project = tmp_path / "projects" / "coalesce"
+    project.mkdir()
+    await manager.register_workspace(key="coalesce", project_path=str(project))
+    item = await db.create_managed_session(
+        name="Coalesce", workspace_key="coalesce", project_path=str(project.resolve()),
+        server_id="serena-8001", port=43110,
+    )
+    def bump_generation():
+        with db._connect() as conn:
+            conn.execute("UPDATE managed_sessions SET generation=5, status='ready' WHERE id=?", (item["id"],))
+    await db._run(bump_generation)
+    current = await db.get_managed_session(item["id"])
+    await manager._set_language_runtime_state(item["id"], state="ready")
+    calls = []
+    async def probe(session_id):
+        calls.append(session_id)
+        return {"ok": True, "generation": 5}
+    async def unexpected(*args, **kwargs):
+        raise AssertionError("coalesced recovery must not restart runtime")
+    monkeypatch.setattr(manager, "probe_tool_execution", probe)
+    monkeypatch.setattr(manager, "_terminate_instance", unexpected)
+    monkeypatch.setattr(manager, "ensure_running", unexpected)
+
+    result = await manager.recover_language_runtime(
+        item["id"], reason="duplicate request", expected_generation=4,
+    )
+
+    assert result["generation"] == current["generation"] == 5
+    assert calls == [item["id"]]
+    assert (await db.get_managed_session(item["id"]))["metadata"]["language_runtime"]["restart_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_semantic_probe_calls_config_then_symbol_and_rejects_tool_error(tmp_path: Path, monkeypatch):
+    settings = settings_for(tmp_path)
+    db = Database(settings.studio.database)
+    await db.init()
+    manager = ManagedSessionManager(settings, db)
+    session = await db.create_managed_session(
+        name="Probe", workspace_key="probe", project_path=str(tmp_path),
+        server_id="serena-8001", port=43110,
+    )
+    calls = []
+
+    class FakeClient:
+        def __init__(self, url, **kwargs):
+            calls.append(("endpoint", url))
+
+        async def call_tools(self, tools, *, client_name):
+            calls.append(("tools", tools, client_name))
+            raise RuntimeError("MCP tool find_symbol returned isError=true: symbol lookup failed")
+
+    monkeypatch.setattr(managed_sessions_module, "MCPClient", FakeClient)
+
+    with pytest.raises(RuntimeError, match="symbol lookup failed"):
+        await manager._probe_tool_execution_endpoint(
+            f"http://127.0.0.1:{session['port']}/mcp",
+            client_name="readiness-test",
+        )
+
+    assert calls[0] == ("endpoint", f"http://127.0.0.1:{session['port']}/mcp")
+    assert calls[1][1] == [
+        ("get_current_config", {}),
+        ("find_symbol", {
+            "name_path_pattern": "__hirda_semantic_readiness_probe__",
+            "relative_path": "", "include_body": False, "max_matches": 1,
+        }),
+    ]
+    assert calls[1][2] == "readiness-test"

@@ -110,6 +110,40 @@ class OAuthManager:
         expected = os.environ.get(self.settings.studio.oauth_owner_token_env, "")
         return bool(expected and supplied and secrets.compare_digest(supplied, expected))
 
+
+    async def create_owner_approval_token(
+        self, *, lifetime_seconds: int = 600, purpose: str = "owner_approval"
+    ) -> dict[str, Any]:
+        lifetime_seconds = max(60, min(int(lifetime_seconds), 3600))
+        token = "HIRDA-APPROVE-" + secrets.token_urlsafe(18)
+        record = await self.db.create_owner_approval_token(
+            token_hash=_sha256(token),
+            purpose=purpose,
+            lifetime_seconds=lifetime_seconds,
+            metadata={"max_uses": 1},
+        )
+        return {
+            "token": token,
+            "purpose": purpose,
+            "created_at": record["created_at"],
+            "expires_at": record["expires_at"],
+            "expires_in": lifetime_seconds,
+            "max_uses": 1,
+        }
+
+    async def consume_owner_approval_token(
+        self, supplied: str, *, purpose: str = "owner_approval"
+    ) -> bool:
+        if not supplied:
+            return False
+        if self.verify_owner_token(supplied):
+            return True
+        try:
+            await self.db.consume_owner_approval_token(_sha256(supplied), purpose)
+        except KeyError:
+            return False
+        return True
+
     def _owner_token_fingerprint(self) -> str:
         import hashlib
         expected = os.environ.get(self.settings.studio.oauth_owner_token_env, "")
@@ -278,10 +312,12 @@ class OAuthManager:
         owner_token: str,
         owner_session_token: str = "",
     ) -> str:
-        if not (
-            self.verify_owner_token(owner_token)
-            or self.verify_owner_session(owner_session_token)
-        ):
+        approved = self.verify_owner_session(owner_session_token)
+        if not approved:
+            approved = await self.consume_owner_approval_token(
+                owner_token, purpose="owner_approval"
+            )
+        if not approved:
             raise OAuthError("access_denied", "Owner approval is required", 403)
         req = await self.validate_authorization_request(params)
         code = secrets.token_urlsafe(36)

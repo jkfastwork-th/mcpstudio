@@ -22,6 +22,16 @@ Computer Use provisioning is an `execute` side effect.
 - A failed `read` or `write` browser action cannot silently upgrade authority. HIRDA returns `fallback_required=true` and names `hirda__browser__visual_fallback` as the next tool. That explicit tool is classified as `execute` and must pass the normal policy/Reflex/JEV path separately.
 - Remote machines cannot fall through to the local Computer Use provider.
 
+## Existing HIRDA browser attachment
+
+For canvas-heavy or native-rendered applications, OpenBrowser can explicitly attach to the Chromium instance already owned by the managed HIRDA Computer Use session.
+
+1. Call `hirda__openbrowser__attach_session` once for the managed session. This is an `execute` action because obtaining the Computer Use descriptor may provision the session-isolated browser runtime.
+2. HIRDA passes only the internal loopback CDP port to the adapter; raw VNC host/port data is not exposed to lanes.
+3. `state`, `navigate`, and `click_xy` then reuse that existing Chromium target through `existing_hirda_cdp` instead of spawning a second browser.
+4. `click_xy` uses CSS viewport coordinates and is intended for canvas/native-rendered controls that do not appear in DOM element state.
+5. If no attachment exists, the original isolated OpenBrowser MCP/profile path remains unchanged.
+
 ## Session isolation and persistence
 
 Each managed session receives a stable hashed OpenBrowser profile directory plus a per-session `storage_state.json`.

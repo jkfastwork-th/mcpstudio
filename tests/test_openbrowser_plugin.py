@@ -120,6 +120,118 @@ async def test_call_tool_requires_managed_session_context(monkeypatch):
     )
     assert "await click(3)" in result["code"]
 
+
+@pytest.mark.asyncio
+async def test_attach_session_reuses_existing_hirda_cdp(monkeypatch):
+    module = _load_module()
+    adapter = module.OpenBrowserIntegration()
+    calls = []
+
+    class FakeCDP:
+        def __init__(self, port, *, timeout_seconds):
+            calls.append(("init", port, timeout_seconds))
+
+        async def state(self, max_elements):
+            calls.append(("state", max_elements))
+            return {"content": [{"type": "text", "text": "{}"}], "isError": False}
+
+        async def click_xy(self, x, y, *, button, click_count):
+            calls.append(("click_xy", x, y, button, click_count))
+            return {"content": [{"type": "text", "text": "{}"}], "isError": False}
+
+        async def input_text(self, index, text, *, clear):
+            calls.append(("input_text", index, "<redacted>", clear))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": '{"ok":true,"action":"input_text","index":%d}' % index,
+                    }
+                ],
+                "isError": False,
+            }
+
+    monkeypatch.setattr(module, "_ExistingCDPClient", FakeCDP)
+
+    attached = await adapter.call_tool(
+        "attach_session",
+        {},
+        context={"managed_session_id": "managed-cdp", "cdp_port": 9231},
+    )
+    assert attached["isError"] is False
+
+    clicked = await adapter.call_tool(
+        "click_xy",
+        {"x": 11, "y": 22},
+        context={"managed_session_id": "managed-cdp"},
+    )
+    assert clicked["isError"] is False
+
+    typed = await adapter.call_tool(
+        "input_text",
+        {"index": 2, "text": "super-secret", "clear": True},
+        context={"managed_session_id": "managed-cdp"},
+    )
+    assert typed["isError"] is False
+    assert "super-secret" not in typed["content"][0]["text"]
+    assert calls == [
+        ("init", 9231, adapter.timeout_seconds),
+        ("state", 1),
+        ("click_xy", 11.0, 22.0, "left", 1),
+        ("input_text", 2, "<redacted>", True),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_existing_cdp_state_redacts_password_values(monkeypatch):
+    module = _load_module()
+    client = module._ExistingCDPClient(9231, timeout_seconds=5)
+    captured = {}
+
+    async def fake_page():
+        return {"webSocketDebuggerUrl": "ws://fake"}
+
+    async def fake_targets():
+        return []
+
+    async def fake_rpc(websocket_url, method, params=None):
+        captured["websocket_url"] = websocket_url
+        captured["method"] = method
+        captured["params"] = params
+        return {
+            "result": {
+                "value": {
+                    "url": "https://accounts.google.com/",
+                    "title": "Sign in",
+                    "elements": [],
+                }
+            }
+        }
+
+    monkeypatch.setattr(client, "_page", fake_page)
+    monkeypatch.setattr(client, "_targets", fake_targets)
+    monkeypatch.setattr(client, "_rpc", fake_rpc)
+
+    result = await client.state(20)
+    expression = captured["params"]["expression"]
+    assert "[REDACTED]" in expression
+    assert "getAttribute('type')" in expression
+    assert result["isError"] is False
+
+
+@pytest.mark.asyncio
+async def test_attach_session_requires_hirda_cdp_port():
+    module = _load_module()
+    adapter = module.OpenBrowserIntegration()
+
+    with pytest.raises(module.OpenBrowserAdapterError, match="existing_cdp_unavailable"):
+        await adapter.call_tool(
+            "attach_session",
+            {},
+            context={"managed_session_id": "managed-no-cdp"},
+        )
+
+
 @pytest.mark.asyncio
 async def test_session_process_uses_persistent_profile_and_graceful_eof(monkeypatch, tmp_path):
     module = _load_module()

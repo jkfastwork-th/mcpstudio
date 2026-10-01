@@ -411,3 +411,230 @@ def test_language_runtime_error_does_not_retry_ordinary_tool_error():
         )
         is None
     )
+
+
+def test_managed_runtime_error_detects_buffered_failures_but_not_ordinary_tool_errors():
+    http_failure = GatewaySessionManager._managed_runtime_error(
+        b"upstream internal failure", "text/plain", 502
+    )
+    protocol_failure = GatewaySessionManager._managed_runtime_error(
+        b'{"jsonrpc":"2.0","id":1,"error":{"message":"internal error"}}',
+        "application/json", 200,
+    )
+    ordinary_tool_error = GatewaySessionManager._managed_runtime_error(
+        b'{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"File does not exist"}],"isError":true}}',
+        "application/json", 200,
+    )
+
+    assert http_failure == "upstream internal failure"
+    assert protocol_failure == "internal error"
+    assert ordinary_tool_error is None
+
+
+@pytest.mark.asyncio
+async def test_managed_transport_exception_self_heals_rebinds_and_replays_once(tmp_path: Path, monkeypatch):
+    from types import SimpleNamespace
+
+    from mcp_studio.managed_sessions import ManagedSessionManager
+
+    settings = make_settings(tmp_path)
+    settings.studio.managed_session_enabled = True
+    settings.studio.managed_session_workspace_roots = [str(tmp_path)]
+    settings.studio.managed_session_require_binding_for_tools = True
+    db = Database(settings.studio.database)
+    await db.init()
+    studio = await db.create_session({"client_id": "self-heal", "client_type": "chatgpt", "server_id": "serena-8001"})
+    gw = await db.create_gateway_session(
+        studio_session_id=studio["id"], client_id="self-heal", client_type="chatgpt",
+        server_id="serena-8001", upstream_session_id="old-up", protocol_version="2025-06-18",
+        init_payload={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        managed_session_id="ms-alpha", upstream_url="http://127.0.0.1:43110/mcp",
+    )
+
+    class FakePool:
+        enabled = True
+        async def get_session(self, session_id):
+            return {"id": session_id, "generation": 7}
+        async def probe_tool_execution(self, session_id):
+            return {"ok": True, "generation": 7}
+        async def recover_language_runtime(self, *args, **kwargs):
+            raise AssertionError("healthy transport recovery should rebind without restart")
+
+    manager = GatewaySessionManager(settings, db, managed_sessions=FakePool())
+    sent = []
+    async def fake_bind(gateway_session_id, managed_id, *, actor):
+        assert gateway_session_id == gw["id"]
+        assert managed_id == "ms-alpha"
+        assert actor == "system/gateway-runtime-self-heal"
+        await db.bind_gateway_managed_session(
+            gateway_session_id, managed_session_id=managed_id,
+            upstream_url="http://127.0.0.1:43110/mcp", upstream_session_id="fresh-up",
+        )
+        return {"gateway_session": await db.get_gateway_session(gateway_session_id)}
+    async def fake_send(**kwargs):
+        sent.append(kwargs)
+        if len(sent) == 1:
+            raise httpx.ConnectError("managed transport dropped")
+        return FakeClient(), httpx.Response(
+            200, headers={"content-type": "application/json"},
+            content=b'{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"replayed"}],"isError":false}}',
+            request=httpx.Request("POST", kwargs["server_url"]),
+        )
+    async def fake_reconcile(gateway_session_id, session):
+        return session
+    async def fake_get_session(session_id):
+        return {"id": session_id, "managed_session_id": "ms-alpha"}
+    monkeypatch.setattr(db, "get_session", fake_get_session)
+    monkeypatch.setattr(manager, "_reconcile_gateway_managed_binding", fake_reconcile)
+    monkeypatch.setattr(manager, "bind_managed_session", fake_bind)
+    monkeypatch.setattr(manager, "_send", fake_send)
+
+    body = b'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"relative_path":"x"}}}'
+    response = await manager.proxy_existing(
+        request=make_request(body=body, session_id=gw["id"]), server=settings.servers[0],
+        body=body, gateway_session_id=gw["id"],
+    )
+
+    assert response.status_code == 200
+    assert len(sent) == 2
+    assert sent[0]["server_url"] == sent[1]["server_url"] == "http://127.0.0.1:43110/mcp"
+    assert sent[1]["headers"]["Mcp-Session-Id"] == "fresh-up"
+    assert sent[0]["body"] == sent[1]["body"] == body
+    assert (await db.get_gateway_session(gw["id"]))["upstream_session_id"] == "fresh-up"
+
+
+@pytest.mark.asyncio
+async def test_managed_response_stream_read_failure_self_heals_and_replays_once(tmp_path: Path, monkeypatch):
+    settings = make_settings(tmp_path)
+    settings.studio.managed_session_enabled = True
+    settings.studio.managed_session_workspace_roots = [str(tmp_path)]
+    settings.studio.managed_session_require_binding_for_tools = True
+    db = Database(settings.studio.database)
+    await db.init()
+    studio = await db.create_session({
+        "client_id": "stream-self-heal",
+        "client_type": "chatgpt",
+        "server_id": "serena-8001",
+    })
+    gw = await db.create_gateway_session(
+        studio_session_id=studio["id"],
+        client_id="stream-self-heal",
+        client_type="chatgpt",
+        server_id="serena-8001",
+        upstream_session_id="old-up",
+        protocol_version="2025-06-18",
+        init_payload={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        managed_session_id="ms-alpha",
+        upstream_url="http://127.0.0.1:43110/mcp",
+    )
+
+    recovered = []
+
+    class FakePool:
+        enabled = True
+
+        async def get_session(self, session_id):
+            return {"id": session_id, "generation": 7}
+
+        async def probe_tool_execution(self, session_id):
+            return {
+                "ok": False,
+                "managed_session_id": session_id,
+                "generation": 7,
+                "error": "probe failed",
+            }
+
+        async def recover_language_runtime(self, session_id, **kwargs):
+            recovered.append((session_id, kwargs))
+            return {"id": session_id, "generation": 8}
+
+    class BrokenStreamResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        async def aread(self):
+            raise httpx.ReadError("response stream closed")
+
+        async def aclose(self):
+            return None
+
+    manager = GatewaySessionManager(settings, db, managed_sessions=FakePool())
+    sent = []
+
+    async def fake_bind(gateway_session_id, managed_id, *, actor):
+        assert gateway_session_id == gw["id"]
+        assert managed_id == "ms-alpha"
+        assert actor == "system/gateway-runtime-self-heal"
+        await db.bind_gateway_managed_session(
+            gateway_session_id,
+            managed_session_id=managed_id,
+            upstream_url="http://127.0.0.1:43110/mcp",
+            upstream_session_id="fresh-up",
+        )
+        return {"gateway_session": await db.get_gateway_session(gateway_session_id)}
+
+    async def fake_send(**kwargs):
+        sent.append(kwargs)
+        if len(sent) == 1:
+            return FakeClient(), BrokenStreamResponse()
+        return FakeClient(), httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=b'{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"replayed"}],"isError":false}}',
+            request=httpx.Request("POST", kwargs["server_url"]),
+        )
+
+    async def fake_reconcile(gateway_session_id, session):
+        return session
+
+    async def fake_get_session(session_id):
+        return {"id": session_id, "managed_session_id": "ms-alpha"}
+
+    monkeypatch.setattr(db, "get_session", fake_get_session)
+    monkeypatch.setattr(manager, "_reconcile_gateway_managed_binding", fake_reconcile)
+    monkeypatch.setattr(manager, "bind_managed_session", fake_bind)
+    monkeypatch.setattr(manager, "_send", fake_send)
+
+    body = b'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"relative_path":"x"}}}'
+    response = await manager.proxy_existing(
+        request=make_request(body=body, session_id=gw["id"]),
+        server=settings.servers[0],
+        body=body,
+        gateway_session_id=gw["id"],
+    )
+
+    assert response.status_code == 200
+    assert len(sent) == 2
+    assert len(recovered) == 1
+    assert recovered[0][0] == "ms-alpha"
+    assert "ReadError: response stream closed" in recovered[0][1]["reason"]
+    assert sent[1]["headers"]["Mcp-Session-Id"] == "fresh-up"
+    assert sent[0]["body"] == sent[1]["body"] == body
+    assert (await db.get_gateway_session(gw["id"]))["upstream_session_id"] == "fresh-up"
+
+
+def test_managed_runtime_error_detects_http_500_internal_failure():
+    content = b'{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"Internal error"}}'
+    error = GatewaySessionManager._managed_runtime_error(
+        content,
+        "application/json",
+        500,
+    )
+    assert error is not None
+    assert "Internal error" in error
+
+
+def test_managed_runtime_error_does_not_classify_ordinary_tool_error():
+    content = (
+        b'{"jsonrpc":"2.0","id":1,"result":{"content":'
+        b'[{"type":"text","text":"File does not exist"}],'
+        b'"isError":true}}'
+    )
+    assert (
+        GatewaySessionManager._managed_runtime_error(
+            content,
+            "application/json",
+            200,
+        )
+        is None
+    )

@@ -20,6 +20,7 @@ _READ_TOOLS = {
     "think_about_whether_you_are_done",
     "herdr_list_agents", "herdr_list_panes", "herdr_get_agent", "herdr_read_agent", "herdr_wait_agent",
     "family_context_read", "fern_bridge_status", "fern_inbox_list_or_peek",
+    "hirda_peer_list", "hirda_peer_inbox", "hirda_peer_threads",
     "mcpstudio_current_session", "mcpstudio_get_session", "mcpstudio_list_sessions",
     "mcpstudio_list_workspaces", "mcpstudio_list_machines", "mcpstudio_list_machine_enrollments", "mcpstudio_session_history", "mcpstudio_context_status",
     "mcpstudio_lane_status", "mcpstudio_list_capsules", "mcpstudio_get_capsule",
@@ -43,6 +44,7 @@ _EXECUTE_TOOLS = {
     "mcpstudio_certify_language_runtime_recovery",
     "mcpstudio_set_lane_state", "mcpstudio_approve_capsule_handoff",
     "fern_inbox_claim", "fern_reply_submit", "fern_interjection_decide",
+    "hirda_peer_send", "hirda_peer_claim", "hirda_peer_reply",
 }
 _SHELL_TOOLS = {"execute_shell_command", "shell", "run_command", "start_process"}
 

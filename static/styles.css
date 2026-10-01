@@ -3796,3 +3796,60 @@ html[data-theme="dark"] .machine-enrollment-caps>div>span{border-color:rgba(138,
 html[data-theme="dark"] .machine-enrollment-error{color:#f28b82;border-color:rgba(242,139,130,.28);background:rgba(242,139,130,.07)}
 @media(max-width:1000px){.machine-enrollment-row{grid-template-columns:1fr 1fr}.machine-enrollment-actions{justify-content:flex-start}}
 @media(max-width:620px){.machine-enrollment-row{grid-template-columns:1fr}.machine-enrollment-head{gap:10px;flex-direction:column}.machine-enrollment-head .button{width:100%}}
+
+/* OAuth client management */
+[data-page="connections"]>.page-section-head{align-items:flex-start}
+.oauth-client-layout{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(340px,.85fr);gap:16px;margin-bottom:16px;align-items:start}
+.oauth-client-create,.oauth-client-result,.oauth-client-list-card{overflow:hidden}
+.oauth-client-create>.panel-head,.oauth-client-result>.panel-head,.oauth-client-list-card>.panel-head{border-bottom:1px solid var(--ref-border-soft)}
+.oauth-client-create>.panel-head p,.oauth-client-result>.panel-head p,.oauth-client-list-card>.panel-head p{display:block;margin:3px 0 0;color:var(--ref-muted,var(--muted));font-size:var(--fs-8);line-height:1.45}
+.oauth-client-form{display:grid;gap:14px;padding:14px}
+.oauth-client-form label{display:grid;gap:6px;min-width:0}
+.oauth-server-url{display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0;padding:11px 12px;border:1px solid var(--ref-border-soft,var(--border));border-radius:8px;background:var(--surface-2)}
+.oauth-server-url>div{display:grid;gap:4px;min-width:0}
+.oauth-server-url span{color:var(--ref-muted,var(--muted));font-size:var(--fs-75);font-weight:800;text-transform:uppercase;letter-spacing:.05em}
+.oauth-server-url code{min-width:0;overflow-wrap:anywhere;word-break:break-word;color:var(--ref-text,var(--text))}
+.oauth-server-url .button{flex:0 0 auto}
+.oauth-approval-bootstrap{display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0;padding:11px 12px;border:1px solid color-mix(in srgb,var(--hirda-accent) 24%,var(--ref-border-soft));border-radius:8px;background:color-mix(in srgb,var(--hirda-accent) 5%,var(--surface-2))}
+.oauth-approval-bootstrap>div:first-child{display:grid;gap:4px;min-width:0}
+.oauth-approval-bootstrap span{color:var(--ref-muted,var(--muted));font-size:var(--fs-75);font-weight:800;text-transform:uppercase;letter-spacing:.05em}
+.oauth-approval-bootstrap code{min-width:0;overflow-wrap:anywhere;word-break:break-word;color:var(--ref-text,var(--text));font-weight:700}
+.oauth-approval-bootstrap small{color:var(--ref-muted,var(--muted));line-height:1.4}
+.oauth-approval-actions{display:flex;align-items:center;gap:8px;flex:0 0 auto}
+.oauth-client-form label>span,.oauth-client-fixed span,.oauth-setup-grid span,.oauth-client-meta span{color:var(--ref-muted,var(--muted));font-size:var(--fs-75);font-weight:800;text-transform:uppercase;letter-spacing:.05em}
+.oauth-client-form input{width:100%;min-width:0;box-sizing:border-box;padding:10px 12px;border:1px solid var(--theme-control-border,var(--border));border-radius:7px;background:var(--theme-control,var(--surface-2));color:var(--ref-text,var(--text));font:inherit;line-height:1.35}
+.oauth-client-form input::placeholder{color:var(--ref-muted,var(--muted));opacity:.72}
+.oauth-client-form input:focus-visible{outline:2px solid color-mix(in srgb,var(--hirda-accent) 28%,transparent);outline-offset:1px;border-color:var(--hirda-accent)}
+.oauth-client-form>.toolbar{justify-content:flex-end}
+.oauth-client-fixed{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.oauth-client-fixed>div,.oauth-setup-grid>div{display:grid;gap:4px;min-width:0;padding:10px 12px;border:1px solid var(--ref-border-soft,var(--border));border-radius:8px;background:var(--surface-2)}
+.oauth-client-fixed strong{color:var(--ref-text,var(--text))}
+.oauth-client-fixed small{color:var(--ref-muted,var(--muted));line-height:1.4}
+.oauth-client-result>.oauth-setup-grid{display:grid;gap:8px;margin:0;padding:14px 14px 0}
+.oauth-setup-grid code{min-width:0;overflow-wrap:anywhere;word-break:break-word}
+.oauth-setup-grid .text-button{justify-self:start}
+.oauth-setup-note{padding:10px 12px;border:1px solid color-mix(in srgb,var(--hirda-accent) 20%,transparent);border-radius:8px;background:color-mix(in srgb,var(--hirda-accent) 6%,transparent);color:var(--ref-muted,var(--muted));font-size:var(--fs-8);line-height:1.45}
+.oauth-client-form>.oauth-setup-note{margin:0}
+.oauth-client-result>.oauth-setup-note{margin:12px 14px}
+.oauth-client-result>#oauthCopySetupBtn{margin:0 14px 14px}
+.oauth-client-list{display:grid;gap:8px;padding:0 14px 14px}
+.oauth-client-list>.empty-state{margin-top:0}
+.oauth-client-row{display:grid;grid-template-columns:minmax(180px,.8fr) minmax(0,1.7fr);gap:14px;padding:12px 14px;border:1px solid var(--ref-border-soft,var(--border));border-radius:9px;background:var(--surface-2);align-items:start}
+.oauth-client-main,.oauth-client-meta,.oauth-client-meta>div{display:grid;gap:4px;min-width:0}
+.oauth-client-main code,.oauth-client-meta code{min-width:0;overflow-wrap:anywhere;word-break:break-word}
+.oauth-client-main small{color:var(--ref-muted,var(--muted))}
+.oauth-scope-list{display:flex;gap:4px;flex-wrap:wrap}
+@media(max-width:900px){
+  .oauth-client-layout{grid-template-columns:1fr}
+  .oauth-client-row{grid-template-columns:1fr}
+}
+@media(max-width:620px){
+  .oauth-server-url,.oauth-approval-bootstrap{align-items:stretch;flex-direction:column}
+  .oauth-server-url .button,.oauth-approval-actions .button{width:100%}
+  .oauth-approval-actions{display:grid;grid-template-columns:1fr auto;width:100%}
+  .oauth-client-fixed{grid-template-columns:1fr}
+  .oauth-client-form>.toolbar .button,.oauth-client-result>#oauthCopySetupBtn,[data-page="connections"]>.page-section-head .toolbar .button{width:100%}
+  .oauth-client-form,.oauth-client-result>.oauth-setup-grid,.oauth-client-list{padding-left:12px;padding-right:12px}
+  .oauth-client-result>.oauth-setup-note{margin-left:12px;margin-right:12px}
+  .oauth-client-result>#oauthCopySetupBtn{margin-left:12px;margin-right:12px}
+}

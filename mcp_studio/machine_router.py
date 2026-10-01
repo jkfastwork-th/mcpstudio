@@ -709,9 +709,21 @@ class MachineCapabilityRouter:
             raise IntegrationError(f"unknown backend tool: {exposed_name}")
         integration_id, raw_name = route
         if integration_id == "openbrowser":
+            browser_context = context
+            if raw_name == "attach_session":
+                managed_session_id = str(context.get("managed_session_id") or "").strip()
+                provider = dict(machine.providers.get("computer_use") or {})
+                if not managed_session_id or str(provider.get("mode") or "") != "local" or not machine.local:
+                    raise MachineRegistryError("OpenBrowser existing-CDP attach requires local HIRDA Computer Use")
+                descriptor = await self._computer_descriptor_for_machine(
+                    machine,
+                    managed_session_id,
+                )
+                browser_context = dict(context)
+                browser_context["cdp_port"] = int(descriptor["cdp_port"])
             try:
                 result = await self.integrations.call_backend_tool(
-                    exposed_name, arguments, context=context
+                    exposed_name, arguments, context=browser_context
                 )
             except Exception as exc:
                 fallback = await self._browser_visual_fallback(
@@ -787,10 +799,17 @@ class MachineCapabilityRouter:
                 raise MachineRegistryError(f"native computer tool is unavailable: {raw_name}")
             return await self.integrations.call_backend_tool(exposed_name, arguments, context=context)
         if mode in {"agent", "broker"}:
+            remote_arguments = dict(arguments)
+            if (
+                raw_name == "start_process"
+                and str(machine.os_name or "").lower().startswith("win")
+                and not str(remote_arguments.get("shell") or "").strip()
+            ):
+                remote_arguments["shell"] = "cmd.exe"
             return await self.registry.remote_call(
                 machine,
                 tool_name=raw_name,
-                arguments=arguments,
+                arguments=remote_arguments,
                 workspace_key=str(context.get("workspace_key") or ""),
                 project_path=(str(context.get("project_path")) if context.get("project_path") else None),
                 session_id=str(context.get("managed_session_id") or ""),
@@ -958,6 +977,93 @@ class MachineCapabilityRouter:
         descriptor = await self._computer_descriptor_for_machine(machine, managed_session_id)
         descriptor["machine"] = machine.public()
         return descriptor
+
+
+    async def computer_monitors(self, session: dict[str, Any]) -> dict[str, Any]:
+        machine = self.registry.machine_for_session(session)
+        provider = dict(machine.providers.get("computer_use") or {})
+        if str(provider.get("mode") or "") != "agent":
+            raise MachineRegistryError(
+                f"remote monitor selection is unavailable for machine {machine.machine_id}"
+            )
+        payload = await self.registry.remote_computer_monitors(machine)
+        payload["machine"] = machine.public()
+        return payload
+
+    async def select_computer_monitor(
+        self,
+        session: dict[str, Any],
+        mode: str,
+    ) -> dict[str, Any]:
+        machine = self.registry.machine_for_session(session)
+        provider = dict(machine.providers.get("computer_use") or {})
+        if str(provider.get("mode") or "") != "agent":
+            raise MachineRegistryError(
+                f"remote monitor selection is unavailable for machine {machine.machine_id}"
+            )
+        payload = await self.registry.set_remote_computer_monitor(
+            machine,
+            mode=mode,
+        )
+        payload["machine"] = machine.public()
+        return payload
+
+
+    async def browser_profiles(self, session: dict[str, Any]) -> dict[str, Any]:
+        machine = self.registry.machine_for_session(session)
+        payload = await self.registry.remote_browser_profiles(machine)
+        payload["machine"] = machine.public()
+        return payload
+
+    async def set_browser_profile_alias(
+        self,
+        session: dict[str, Any],
+        *,
+        alias: str,
+        profile: str,
+    ) -> dict[str, Any]:
+        machine = self.registry.machine_for_session(session)
+        payload = await self.registry.set_remote_browser_profile_alias(
+            machine,
+            alias=alias,
+            profile=profile,
+        )
+        payload["machine"] = machine.public()
+        return payload
+
+    async def rename_browser_profile_alias(
+        self,
+        session: dict[str, Any],
+        *,
+        alias: str,
+        new_alias: str,
+    ) -> dict[str, Any]:
+        machine = self.registry.machine_for_session(session)
+        payload = await self.registry.rename_remote_browser_profile_alias(
+            machine,
+            alias=alias,
+            new_alias=new_alias,
+        )
+        payload["machine"] = machine.public()
+        return payload
+
+    async def launch_browser_profile(
+        self,
+        session: dict[str, Any],
+        *,
+        profile: str,
+        url: str | None,
+        monitor: str | None,
+    ) -> dict[str, Any]:
+        machine = self.registry.machine_for_session(session)
+        payload = await self.registry.launch_remote_browser_profile(
+            machine,
+            profile=profile,
+            url=url,
+            monitor=monitor,
+        )
+        payload["machine"] = machine.public()
+        return payload
 
 
     async def computer_transport(
