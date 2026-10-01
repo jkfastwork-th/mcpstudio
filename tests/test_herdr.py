@@ -1,6 +1,6 @@
 import json
 
-from mcp_studio.herdr import _count_items, _decode_text_content
+from mcp_studio.herdr import HerdrManager, _count_items, _decode_text_content
 
 
 def test_decode_json_text_content_and_count():
@@ -39,3 +39,39 @@ def test_decode_nested_panes_count():
     raw = {"result": json.dumps(inner)}
     decoded = _decode_text_content(raw)
     assert _count_items(decoded, ("panes",)) == 6
+
+
+def test_pane_list_enriches_agent_name_and_session_from_agent_inventory():
+    snapshot = {
+        "panes": {
+            "panes": [
+                {
+                    "pane_id": "w1:p1",
+                    "agent": "hermes",
+                    "agent_status": "idle",
+                }
+            ]
+        },
+        "agents": {
+            "agents": [
+                {
+                    "pane_id": "w1:p1",
+                    "agent": "hermes",
+                    "name": "hirda-fern-hermes",
+                    "agent_session": {"value": "session-fern"},
+                }
+            ]
+        },
+    }
+
+    panes = HerdrManager.pane_list(snapshot)
+
+    assert panes == [
+        {
+            "pane_id": "w1:p1",
+            "agent": "hermes",
+            "agent_status": "idle",
+            "agent_name": "hirda-fern-hermes",
+            "agent_session": {"value": "session-fern"},
+        }
+    ]

@@ -93,6 +93,7 @@ class CognitiveRequest:
     preferred_runtime: str | None = None
     target_pane_id: str | None = None
     fallback_target_pane_id: str | None = None
+    principal_id: str | None = None
     agent_id: str | None = None
     conversation_id: str | None = None
 
@@ -197,6 +198,17 @@ def normalize_cognitive_request(payload: CognitiveRequest | dict[str, Any]) -> C
     if fallback_target_pane_id and fallback_target_pane_id == target_pane_id:
         raise CognitiveRouterError("cognitive_fallback_pane_matches_target")
 
+    agent_id = str(payload.get("agent_id") or "").strip() or None
+    principal_id = (
+        str(
+            payload.get("principal_id")
+            or context.get("principal_id")
+            or agent_id
+            or ""
+        ).strip()
+        or None
+    )
+
     return CognitiveRequest(
         schema=COGNITIVE_REQUEST_SCHEMA,
         request_id=request_id,
@@ -209,7 +221,8 @@ def normalize_cognitive_request(payload: CognitiveRequest | dict[str, Any]) -> C
         preferred_runtime=preferred_runtime,
         target_pane_id=target_pane_id,
         fallback_target_pane_id=fallback_target_pane_id,
-        agent_id=str(payload.get("agent_id") or "").strip() or None,
+        principal_id=principal_id,
+        agent_id=agent_id,
         conversation_id=str(payload.get("conversation_id") or "").strip() or None,
     )
 
@@ -1303,15 +1316,110 @@ class CognitiveRouter:
                 if str(value or "").strip()
             )
 
+        principal_prefixes: list[str] = []
+        raw_principals = selected.get("principal_pane_name_prefixes")
+        if isinstance(raw_principals, dict):
+            for raw_values in raw_principals.values():
+                items = [raw_values] if isinstance(raw_values, str) else raw_values
+                if not isinstance(items, list):
+                    continue
+                principal_prefixes.extend(
+                    str(value).strip().casefold()
+                    for value in items
+                    if str(value or "").strip()
+                )
+
+        pane_name_prefixes = [
+            value.casefold()
+            for value in values("pane_name_prefixes")
+        ]
+        pane_name_prefixes.extend(principal_prefixes)
+
         return {
             "pane_ids": values("pane_ids"),
-            "pane_name_prefixes": tuple(
-                value.casefold() for value in values("pane_name_prefixes")
-            ),
+            "pane_name_prefixes": tuple(dict.fromkeys(pane_name_prefixes)),
             "pane_label_prefixes": tuple(
                 value.casefold() for value in values("pane_label_prefixes")
             ),
         }
+
+
+    def _request_principal_id(
+        self,
+        request: CognitiveRequest | None,
+    ) -> str | None:
+        if request is None:
+            return None
+        context = dict(request.context or {})
+        return (
+            str(
+                request.principal_id
+                or request.agent_id
+                or context.get("principal_id")
+                or context.get("owner_agent_id")
+                or context.get("persona_id")
+                or ""
+            ).strip()
+            or None
+        )
+
+    def _principal_pane_name_prefixes(
+        self,
+        runtime_id: str,
+        principal_id: str | None,
+    ) -> tuple[str, ...]:
+        if not principal_id:
+            return ()
+        raw_bindings = getattr(self.studio, "cognitive_runtime_bindings", {})
+        selected: Any = None
+        if isinstance(raw_bindings, dict):
+            for key, value in raw_bindings.items():
+                if str(key or "").strip().casefold() == runtime_id.casefold():
+                    selected = value
+                    break
+        if not isinstance(selected, dict):
+            return ()
+        raw_map = selected.get("principal_pane_name_prefixes")
+        if not isinstance(raw_map, dict):
+            return ()
+        for key, raw_values in raw_map.items():
+            if str(key or "").strip().casefold() != principal_id.casefold():
+                continue
+            if isinstance(raw_values, str):
+                raw_values = [raw_values]
+            if not isinstance(raw_values, list):
+                return ()
+            return tuple(
+                str(value).strip().casefold()
+                for value in raw_values
+                if str(value or "").strip()
+            )
+        return ()
+
+    def _pane_owned_by_principal(
+        self,
+        pane: dict[str, Any],
+        runtime_id: str,
+        principal_id: str | None,
+    ) -> bool:
+        if not principal_id:
+            return True
+        prefixes = self._principal_pane_name_prefixes(
+            runtime_id,
+            principal_id,
+        )
+        if not prefixes:
+            return False
+        names = tuple(
+            str(pane.get(key) or "").strip().casefold()
+            for key in ("agent_name", "name", "label")
+            if str(pane.get(key) or "").strip()
+        )
+        return any(
+            name.startswith(prefix)
+            for name in names
+            for prefix in prefixes
+        )
 
     def _pane_owned_by_runtime(
         self,
@@ -1322,20 +1430,59 @@ class CognitiveRouter:
             return False
         selectors = self._runtime_pane_selectors(runtime_id)
         pane_id = str(pane.get("pane_id") or "").strip()
-        name = str(pane.get("name") or "").strip().casefold()
-        label = str(pane.get("label") or "").strip().casefold()
+        names = tuple(
+            str(pane.get(key) or "").strip().casefold()
+            for key in ("agent_name", "name", "label")
+            if str(pane.get(key) or "").strip()
+        )
         if pane_id and pane_id in selectors["pane_ids"]:
             return True
-        if name and any(name.startswith(prefix) for prefix in selectors["pane_name_prefixes"]):
+        if names and any(
+            name.startswith(prefix)
+            for name in names
+            for prefix in selectors["pane_name_prefixes"]
+        ):
             return True
-        if label and any(label.startswith(prefix) for prefix in selectors["pane_label_prefixes"]):
+        label = str(pane.get("label") or "").strip().casefold()
+        if label and any(
+            label.startswith(prefix)
+            for prefix in selectors["pane_label_prefixes"]
+        ):
             return True
         return False
 
-    def pane_routing_status(self) -> dict[str, Any]:
+
+    def _pane_snapshot_rows(self) -> list[dict[str, Any]]:
         snapshot = getattr(self.herdr, "snapshot", {})
+        pane_list = getattr(self.herdr, "pane_list", None)
+        if callable(pane_list):
+            raw_rows = pane_list(snapshot)
+            if not isinstance(raw_rows, list):
+                return []
+            return [
+                dict(row)
+                for row in raw_rows
+                if isinstance(row, dict)
+            ]
+
         panes_block = snapshot.get("panes") if isinstance(snapshot, dict) else {}
-        panes = panes_block.get("panes", []) if isinstance(panes_block, dict) else []
+        raw_rows = (
+            panes_block.get("panes", [])
+            if isinstance(panes_block, dict)
+            else panes_block
+            if isinstance(panes_block, list)
+            else []
+        )
+        if not isinstance(raw_rows, list):
+            return []
+        return [
+            dict(row)
+            for row in raw_rows
+            if isinstance(row, dict)
+        ]
+
+    def pane_routing_status(self) -> dict[str, Any]:
+        panes = self._pane_snapshot_rows()
         raw_bindings = getattr(self.studio, "cognitive_runtime_bindings", {})
         runtime_ids = sorted(
             str(key or "").strip().casefold()
@@ -1365,6 +1512,7 @@ class CognitiveRouter:
                 "owned_panes": [
                     {
                         "pane_id": pane.get("pane_id"),
+                        "agent_name": pane.get("agent_name"),
                         "name": pane.get("name"),
                         "label": pane.get("label"),
                         "status": pane.get("agent_status"),
@@ -1384,10 +1532,12 @@ class CognitiveRouter:
             ),
         }
 
-    def _find_runtime_pane(self, runtime_id: str) -> dict[str, Any] | None:
-        snapshot = getattr(self.herdr, "snapshot", {})
-        panes_block = snapshot.get("panes") if isinstance(snapshot, dict) else {}
-        panes = panes_block.get("panes", []) if isinstance(panes_block, dict) else []
+    def _find_runtime_pane(
+        self,
+        runtime_id: str,
+        request: CognitiveRequest | None = None,
+    ) -> dict[str, Any] | None:
+        panes = self._pane_snapshot_rows()
         candidates = [
             dict(pane)
             for pane in panes
@@ -1395,12 +1545,30 @@ class CognitiveRouter:
             and str(pane.get("agent") or "").casefold() == runtime_id
             and not self._pane_reserved(pane)
         ]
-        if self._pane_routing_mode() == "enforce":
+        mode = self._pane_routing_mode()
+        if mode == "enforce":
             candidates = [
                 pane
                 for pane in candidates
                 if self._pane_owned_by_runtime(pane, runtime_id)
             ]
+
+        principal_id = self._request_principal_id(request)
+        if principal_id:
+            principal_candidates = [
+                pane
+                for pane in candidates
+                if self._pane_owned_by_principal(
+                    pane,
+                    runtime_id,
+                    principal_id,
+                )
+            ]
+            if principal_candidates:
+                candidates = principal_candidates
+            elif mode == "enforce":
+                return None
+
         if not candidates:
             return None
         rank = {"idle": 0, "done": 1, "unknown": 2}
@@ -1419,6 +1587,7 @@ class CognitiveRouter:
         pane_id: str,
         *,
         timeout_seconds: float,
+        principal_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Wait for an owned cognitive pane to settle within the caller budget.
 
@@ -1435,6 +1604,15 @@ class CognitiveRouter:
             if status in {"idle", "done"}:
                 return current
             if not self._pane_owned_by_runtime(current, runtime_id):
+                return current
+            if (
+                principal_id
+                and not self._pane_owned_by_principal(
+                    current,
+                    runtime_id,
+                    principal_id,
+                )
+            ):
                 return current
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -2093,6 +2271,17 @@ class CognitiveRouter:
                 and not self._pane_owned_by_runtime(pane, runtime_id)
             ):
                 return []
+            principal_id = self._request_principal_id(request)
+            if (
+                self._pane_routing_mode() == "enforce"
+                and principal_id
+                and not self._pane_owned_by_principal(
+                    pane,
+                    runtime_id,
+                    principal_id,
+                )
+            ):
+                return []
             primary = dict(row)
             primary["_pane"] = dict(pane)
             selected = [primary]
@@ -2109,13 +2298,24 @@ class CognitiveRouter:
                             fallback_runtime_id,
                         )
                     )
+                    fallback_principal_owned = (
+                        not principal_id
+                        or self._pane_owned_by_principal(
+                            fallback_pane,
+                            fallback_runtime_id,
+                            principal_id,
+                        )
+                    )
                     if (
                         fallback_runtime_id
                         and fallback_runtime_id != runtime_id
                         and fallback_row is not None
                         and (
                             self._pane_routing_mode() != "enforce"
-                            or fallback_owned
+                            or (
+                                fallback_owned
+                                and fallback_principal_owned
+                            )
                         )
                     ):
                         fallback = dict(fallback_row)
@@ -2138,7 +2338,7 @@ class CognitiveRouter:
             row = by_id.get(runtime_id)
             if row is None:
                 continue
-            pane = self._find_runtime_pane(runtime_id)
+            pane = self._find_runtime_pane(runtime_id, request)
             if not pane:
                 continue
             candidate = dict(row)
@@ -2276,6 +2476,16 @@ class CognitiveRouter:
                     "pane_owned": self._pane_owned_by_runtime(
                         row.get("_pane") or {},
                         str(row.get("id") or ""),
+                    ),
+                    "principal_id": self._request_principal_id(request),
+                    "pane_principal_owned": (
+                        self._pane_owned_by_principal(
+                            row.get("_pane") or {},
+                            str(row.get("id") or ""),
+                            self._request_principal_id(request),
+                        )
+                        if self._request_principal_id(request)
+                        else None
                     ),
                     "capability_profile": self._runtime_capability_profile(row),
                     "infrastructure_route": (
@@ -2554,6 +2764,7 @@ class CognitiveRouter:
         runtime_rows: dict[str, dict[str, Any]],
         *,
         timeout_seconds: float,
+        request: CognitiveRequest | None = None,
     ) -> dict[str, Any]:
         runtime_id = str(runtime_id or "").strip().casefold()
         if runtime_id != "claude":
@@ -2566,7 +2777,7 @@ class CognitiveRouter:
                 "error": "context_reset_unsupported_runtime",
             }
 
-        pane = self._find_runtime_pane(runtime_id)
+        pane = self._find_runtime_pane(runtime_id, request)
         if pane is None:
             return {
                 "ok": False,
@@ -2647,6 +2858,26 @@ class CognitiveRouter:
             }
 
         current = self.herdr.find_pane(pane_id=pane_id) or pane
+        principal_id = self._request_principal_id(request)
+        if (
+            self._pane_routing_mode() == "enforce"
+            and principal_id
+            and not self._pane_owned_by_principal(
+                current,
+                runtime_id,
+                principal_id,
+            )
+        ):
+            return {
+                "ok": False,
+                "runtime": runtime_id,
+                "pane_id": pane_id,
+                "status": str(
+                    current.get("agent_status") or "unknown"
+                ).strip().casefold(),
+                "session_rotated": None,
+                "error": "cognitive_principal_pane_mismatch",
+            }
         status = str(
             current.get("agent_status") or "unknown"
         ).strip().casefold()
@@ -2697,6 +2928,7 @@ class CognitiveRouter:
             "claude",
             runtime_rows,
             timeout_seconds=min(remaining, 20.0),
+            request=request,
         )
         recovery_attempt = {
             "stage": "supervisor_context_recovery",
@@ -2736,7 +2968,7 @@ class CognitiveRouter:
         runtime_rows: dict[str, dict[str, Any]],
     ) -> str:
         row = dict(runtime_rows.get(runtime_id) or {})
-        pane = self._find_runtime_pane(runtime_id)
+        pane = self._find_runtime_pane(runtime_id, request)
         if pane is None:
             raise CognitiveRouterError(
                 f"cognitive_{runtime_id}_pane_unavailable"
@@ -2753,6 +2985,19 @@ class CognitiveRouter:
         async with pane_lock:
             await self.herdr.refresh()
             current = self.herdr.find_pane(pane_id=pane_key) or pane
+            principal_id = self._request_principal_id(request)
+            if (
+                self._pane_routing_mode() == "enforce"
+                and principal_id
+                and not self._pane_owned_by_principal(
+                    current,
+                    runtime_id,
+                    principal_id,
+                )
+            ):
+                raise CognitiveRouterError(
+                    "cognitive_principal_pane_mismatch"
+                )
             status = str(
                 current.get("agent_status") or "unknown"
             ).casefold()
@@ -2765,6 +3010,7 @@ class CognitiveRouter:
                     runtime_id,
                     pane_key,
                     timeout_seconds=request.timeout_seconds,
+                    principal_id=principal_id,
                 )
                 status = str(
                     (current or {}).get("agent_status") or "unknown"
@@ -2790,8 +3036,19 @@ class CognitiveRouter:
             )
             or "workspace"
         ).strip().casefold()
+        principal = self._request_principal_id(request) or ""
         if mode == "shared":
-            return "shared"
+            if not principal:
+                return "shared"
+            return json.dumps(
+                {
+                    "mode": "shared",
+                    "principal": principal,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
 
         context = dict(request.context or {})
         tenant = next(
@@ -2825,12 +3082,14 @@ class CognitiveRouter:
             payload = {
                 "mode": "conversation",
                 "tenant": tenant,
+                "principal": principal,
                 "conversation": conversation or workspace or "default",
             }
         else:
             payload = {
                 "mode": "workspace",
                 "tenant": tenant,
+                "principal": principal,
                 "workspace": workspace or conversation or "default",
             }
         return json.dumps(
@@ -3209,10 +3468,14 @@ class CognitiveRouter:
             runtime_id = str(candidate.get("runtime") or "").casefold()
             row = dict(runtime_rows.get(runtime_id) or {})
             pane_id = candidate.get("pane_id")
-            pane = self.herdr.find_pane(pane_id=str(pane_id)) if pane_id else self.herdr.find_pane(agent=runtime_id)
+            pane = (
+                self.herdr.find_pane(pane_id=str(pane_id))
+                if pane_id
+                else self._find_runtime_pane(runtime_id, request)
+            )
             pane_status = str((pane or {}).get("agent_status") or "unknown").casefold()
             if pane_status not in {"idle", "done"} and not request.target_pane_id:
-                alternate = self._find_runtime_pane(runtime_id)
+                alternate = self._find_runtime_pane(runtime_id, request)
                 alternate_status = str((alternate or {}).get("agent_status") or "unknown").casefold()
                 if alternate is not None and alternate_status in {"idle", "done"}:
                     pane = alternate
@@ -3257,6 +3520,21 @@ class CognitiveRouter:
                             pane.get("agent_status") or "unknown"
                         ).casefold()
 
+                principal_id = self._request_principal_id(request)
+                if (
+                    self._pane_routing_mode() == "enforce"
+                    and principal_id
+                    and pane is not None
+                    and not self._pane_owned_by_principal(
+                        pane,
+                        runtime_id,
+                        principal_id,
+                    )
+                ):
+                    raise CognitiveRouterError(
+                        "cognitive_principal_pane_mismatch"
+                    )
+
                 remaining_after_queue = min(
                     max(0.0, attempt_timeout - (time.monotonic() - attempt_started)),
                     max(0.0, deadline - time.monotonic()),
@@ -3275,6 +3553,7 @@ class CognitiveRouter:
                         runtime_id,
                         pane_key,
                         timeout_seconds=remaining_after_queue,
+                        principal_id=principal_id,
                     )
                     pane_status = str(
                         (pane or {}).get("agent_status") or "unknown"

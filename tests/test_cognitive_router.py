@@ -2049,6 +2049,84 @@ def test_hermes_group_scope_key_can_follow_conversation():
     )
 
 
+def test_hermes_group_scope_key_isolated_by_cognitive_principal():
+    cfg = studio()
+    cfg.cognitive_hermes_group_scope_mode = "workspace"
+    router = CognitiveRouter(cfg, ProfiledHerdr(), ProfiledRuntimes())
+
+    fern = CognitiveRequest(
+        schema="hirda-cognitive-request-v1",
+        request_id="REQ-FERN",
+        prompt="x",
+        context={"workspace_path": "/tmp/project", "account_id": "acct-a"},
+        principal_id="fern",
+    )
+    nova = CognitiveRequest(
+        schema="hirda-cognitive-request-v1",
+        request_id="REQ-NOVA",
+        prompt="x",
+        context={"workspace_path": "/tmp/project", "account_id": "acct-a"},
+        principal_id="nova",
+    )
+
+    assert router._hermes_group_scope_key(fern) != router._hermes_group_scope_key(
+        nova
+    )
+
+
+def test_hermes_shared_group_scope_still_isolates_named_principals():
+    cfg = studio()
+    cfg.cognitive_hermes_group_scope_mode = "shared"
+    router = CognitiveRouter(cfg, ProfiledHerdr(), ProfiledRuntimes())
+
+    anonymous = CognitiveRequest(
+        schema="hirda-cognitive-request-v1",
+        request_id="REQ-SHARED",
+        prompt="x",
+    )
+    fern = CognitiveRequest(
+        schema="hirda-cognitive-request-v1",
+        request_id="REQ-SHARED-FERN",
+        prompt="x",
+        principal_id="fern",
+    )
+    nova = CognitiveRequest(
+        schema="hirda-cognitive-request-v1",
+        request_id="REQ-SHARED-NOVA",
+        prompt="x",
+        principal_id="nova",
+    )
+
+    assert router._hermes_group_scope_key(anonymous) == "shared"
+    assert router._hermes_group_scope_key(fern) != "shared"
+    assert router._hermes_group_scope_key(fern) != router._hermes_group_scope_key(
+        nova
+    )
+
+
+def test_normalize_cognitive_request_uses_agent_id_as_principal_fallback():
+    request = normalize_cognitive_request(
+        {
+            "request_id": "REQ-PRINCIPAL-FALLBACK",
+            "prompt": "x",
+            "agent_id": "fern",
+        }
+    )
+    explicit = normalize_cognitive_request(
+        {
+            "request_id": "REQ-PRINCIPAL-EXPLICIT",
+            "prompt": "x",
+            "agent_id": "runtime-agent",
+            "principal_id": "nova",
+        }
+    )
+
+    assert request.agent_id == "fern"
+    assert request.principal_id == "fern"
+    assert explicit.agent_id == "runtime-agent"
+    assert explicit.principal_id == "nova"
+
+
 @pytest.mark.asyncio
 async def test_semantic_shadow_ranking_prefers_claude_for_social_dialogue():
     router = CognitiveRouter(studio(), ProfiledHerdr(), ProfiledRuntimes())
@@ -2335,6 +2413,164 @@ async def test_pane_routing_enforce_rejects_explicit_unowned_target():
     )
 
     assert plan["candidates"] == []
+
+
+@pytest.mark.asyncio
+async def test_principal_routing_selects_distinct_hermes_panes_in_same_workspace():
+    herdr = FakeHerdr()
+    herdr.snapshot["panes"]["panes"].extend(
+        [
+            {
+                "pane_id": "wH:pFern",
+                "agent": "hermes",
+                "agent_status": "idle",
+                "agent_name": "hirda-fern-hermes",
+            },
+            {
+                "pane_id": "wH:pNova",
+                "agent": "hermes",
+                "agent_status": "idle",
+                "agent_name": "hirda-nova-hermes",
+            },
+        ]
+    )
+    cfg = studio()
+    cfg.cognitive_pane_routing_mode = "enforce"
+    cfg.cognitive_runtime_bindings = {
+        "hermes": {
+            "machine_id": "openclaw",
+            "backend_id": "hermes-runtime",
+            "principal_pane_name_prefixes": {
+                "fern": ["hirda-fern-hermes"],
+                "nova": ["hirda-nova-hermes"],
+            },
+        }
+    }
+    router = CognitiveRouter(cfg, herdr, FakeRuntimes())
+
+    fern = await router.plan(
+        {
+            "request_id": "COG-FERN-PANE",
+            "prompt": "Return exactly FERN.",
+            "capability": "fast_utility",
+            "preferred_runtime": "hermes",
+            "allow_fallback": False,
+            "principal_id": "fern",
+        }
+    )
+    nova = await router.plan(
+        {
+            "request_id": "COG-NOVA-PANE",
+            "prompt": "Return exactly NOVA.",
+            "capability": "fast_utility",
+            "preferred_runtime": "hermes",
+            "allow_fallback": False,
+            "principal_id": "nova",
+        }
+    )
+
+    assert fern["candidates"][0]["pane_id"] == "wH:pFern"
+    assert fern["candidates"][0]["principal_id"] == "fern"
+    assert fern["candidates"][0]["pane_principal_owned"] is True
+    assert nova["candidates"][0]["pane_id"] == "wH:pNova"
+    assert nova["candidates"][0]["principal_id"] == "nova"
+    assert nova["candidates"][0]["pane_principal_owned"] is True
+
+
+@pytest.mark.asyncio
+async def test_principal_routing_rejects_explicit_cross_principal_target():
+    herdr = FakeHerdr()
+    herdr.snapshot["panes"]["panes"].append(
+        {
+            "pane_id": "wH:pFern",
+            "agent": "hermes",
+            "agent_status": "idle",
+            "agent_name": "hirda-fern-hermes",
+        }
+    )
+    cfg = studio()
+    cfg.cognitive_pane_routing_mode = "enforce"
+    cfg.cognitive_runtime_bindings = {
+        "hermes": {
+            "machine_id": "openclaw",
+            "backend_id": "hermes-runtime",
+            "principal_pane_name_prefixes": {
+                "fern": ["hirda-fern-hermes"],
+                "nova": ["hirda-nova-hermes"],
+            },
+        }
+    }
+    router = CognitiveRouter(cfg, herdr, FakeRuntimes())
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-NOVA-CROSS-PANE",
+            "prompt": "Return exactly NOVA.",
+            "capability": "fast_utility",
+            "preferred_runtime": "hermes",
+            "target_pane_id": "wH:pFern",
+            "allow_fallback": False,
+            "principal_id": "nova",
+        }
+    )
+
+    assert plan["candidates"] == []
+
+
+@pytest.mark.asyncio
+async def test_principal_routing_rejects_cross_principal_fallback_target():
+    herdr = FakeHerdr()
+    herdr.snapshot["panes"]["panes"].extend(
+        [
+            {
+                "pane_id": "wH:pNova",
+                "agent": "hermes",
+                "agent_status": "idle",
+                "agent_name": "hirda-nova-hermes",
+            },
+            {
+                "pane_id": "wC:pFern",
+                "agent": "claude",
+                "agent_status": "idle",
+                "agent_name": "hirda-fern-claude",
+            },
+        ]
+    )
+    cfg = studio()
+    cfg.cognitive_pane_routing_mode = "enforce"
+    cfg.cognitive_runtime_bindings = {
+        "hermes": {
+            "machine_id": "openclaw",
+            "backend_id": "hermes-runtime",
+            "principal_pane_name_prefixes": {
+                "nova": ["hirda-nova-hermes"],
+            },
+        },
+        "claude": {
+            "machine_id": "openclaw",
+            "backend_id": "claude-runtime",
+            "principal_pane_name_prefixes": {
+                "fern": ["hirda-fern-claude"],
+                "nova": ["hirda-nova-claude"],
+            },
+        },
+    }
+    router = CognitiveRouter(cfg, herdr, FakeRuntimes())
+
+    plan = await router.plan(
+        {
+            "request_id": "COG-NOVA-CROSS-FALLBACK",
+            "prompt": "Return exactly NOVA.",
+            "capability": "fast_utility",
+            "target_pane_id": "wH:pNova",
+            "fallback_target_pane_id": "wC:pFern",
+            "allow_fallback": True,
+            "principal_id": "nova",
+        }
+    )
+
+    assert len(plan["candidates"]) == 1
+    assert plan["candidates"][0]["pane_id"] == "wH:pNova"
 
 
 @pytest.mark.asyncio
@@ -2890,8 +3126,14 @@ async def test_controlled_team_supervisor_context_exhaustion_clears_once_and_ret
             raise CognitiveRouterError("runtime_context_exhausted")
         return "RECOVERED_RESULT"
 
-    async def fake_reset(runtime_id, runtime_rows, *, timeout_seconds):
-        resets.append((runtime_id, timeout_seconds))
+    async def fake_reset(
+        runtime_id,
+        runtime_rows,
+        *,
+        timeout_seconds,
+        request=None,
+    ):
+        resets.append((runtime_id, timeout_seconds, request.principal_id if request else None))
         return {
             "ok": True,
             "runtime": runtime_id,

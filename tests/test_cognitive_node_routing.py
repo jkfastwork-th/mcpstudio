@@ -280,10 +280,20 @@ def test_cognitive_pane_routing_settings_validate_mode_and_selectors():
                 "pane_ids": ["wH:p1"],
                 "pane_name_prefixes": ["hirda-cognitive-"],
                 "pane_label_prefixes": ["cognition:"],
+                "principal_pane_name_prefixes": {
+                    "fern": "hirda-fern-hermes",
+                    "nova": ["hirda-nova-hermes"],
+                },
             }
         },
     )
     assert cfg.cognitive_pane_routing_mode == "shadow"
+    assert (
+        cfg.cognitive_runtime_bindings["hermes"][
+            "principal_pane_name_prefixes"
+        ]["fern"]
+        == "hirda-fern-hermes"
+    )
 
     with pytest.raises(
         ValueError,
@@ -297,6 +307,34 @@ def test_cognitive_pane_routing_settings_validate_mode_and_selectors():
                 "hermes": {
                     "machine_id": "openclaw",
                     "pane_ids": "wH:p1",
+                }
+            }
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="principal_pane_name_prefixes must be an object",
+    ):
+        StudioConfig(
+            cognitive_runtime_bindings={
+                "hermes": {
+                    "machine_id": "openclaw",
+                    "principal_pane_name_prefixes": ["fern"],
+                }
+            }
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="principal_pane_name_prefixes values must be",
+    ):
+        StudioConfig(
+            cognitive_runtime_bindings={
+                "hermes": {
+                    "machine_id": "openclaw",
+                    "principal_pane_name_prefixes": {
+                        "fern": [],
+                    },
                 }
             }
         )

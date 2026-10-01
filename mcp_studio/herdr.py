@@ -494,10 +494,29 @@ class HerdrManager:
     def pane_list(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
         value = snapshot.get("panes")
         if isinstance(value, dict) and isinstance(value.get("panes"), list):
-            return [x for x in value["panes"] if isinstance(x, dict)]
-        if isinstance(value, list):
-            return [x for x in value if isinstance(x, dict)]
-        return []
+            panes = [x for x in value["panes"] if isinstance(x, dict)]
+        elif isinstance(value, list):
+            panes = [x for x in value if isinstance(x, dict)]
+        else:
+            panes = []
+
+        agents_by_pane = {
+            str(agent.get("pane_id")): agent
+            for agent in HerdrManager.agent_list(snapshot)
+            if agent.get("pane_id")
+        }
+        enriched: list[dict[str, Any]] = []
+        for pane in panes:
+            row = dict(pane)
+            agent_row = agents_by_pane.get(str(row.get("pane_id") or ""))
+            if agent_row:
+                agent_name = str(agent_row.get("name") or "").strip()
+                if agent_name:
+                    row.setdefault("agent_name", agent_name)
+                if not row.get("agent_session") and agent_row.get("agent_session"):
+                    row["agent_session"] = agent_row.get("agent_session")
+            enriched.append(row)
+        return enriched
 
     @staticmethod
     def agent_list(snapshot: dict[str, Any]) -> list[dict[str, Any]]:

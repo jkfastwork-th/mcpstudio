@@ -608,6 +608,35 @@ class StudioConfig:
                         f"{selector_key} must be a list of non-empty strings"
                     )
 
+            principal_selectors = raw.get(
+                "principal_pane_name_prefixes",
+                {},
+            )
+            if principal_selectors is None:
+                principal_selectors = {}
+            if not isinstance(principal_selectors, dict):
+                raise ValueError(
+                    "studio.cognitive_runtime_bindings "
+                    "principal_pane_name_prefixes must be an object"
+                )
+            for principal_id, selector in principal_selectors.items():
+                if not str(principal_id or "").strip():
+                    raise ValueError(
+                        "studio.cognitive_runtime_bindings "
+                        "principal_pane_name_prefixes keys must be non-empty"
+                    )
+                values = [selector] if isinstance(selector, str) else selector
+                if (
+                    not isinstance(values, list)
+                    or not values
+                    or any(not str(value or "").strip() for value in values)
+                ):
+                    raise ValueError(
+                        "studio.cognitive_runtime_bindings "
+                        "principal_pane_name_prefixes values must be "
+                        "a string or list of non-empty strings"
+                    )
+
         if not (1 <= int(self.cognitive_soak_window_minutes) <= 7 * 24 * 60):
             raise ValueError(
                 "studio.cognitive_soak_window_minutes must be between 1 and 10080"

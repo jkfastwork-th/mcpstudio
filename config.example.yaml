@@ -253,6 +253,15 @@ studio:
   #    machine_id: openclaw
   #    backend_id: local-inference
   #    model_id: model-a
+  #    # Runtime-owned panes. HERDR unique agent names are preferred because
+  #    # they survive refreshes and remain visible in the agent inventory.
+  #    pane_name_prefixes: ["hirda-cognitive-"]
+  #    # Optional principal isolation inside the same project workspace.
+  #    # In enforce mode a request carrying principal_id/agent_id may only use
+  #    # a pane whose HERDR agent name matches its configured prefix.
+  #    principal_pane_name_prefixes:
+  #      fern: ["hirda-fern-runtime-a"]
+  #      nova: ["hirda-nova-runtime-a"]
   # Cognitive enforce soak/observability thresholds. These are reporting-only
   # and never change route eligibility or runtime authority.
   #cognitive_soak_window_minutes: 1440
