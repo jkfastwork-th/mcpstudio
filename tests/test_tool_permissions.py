@@ -83,9 +83,28 @@ def test_shell_classifier_keeps_read_write_execute_separate():
     assert classify_shell_command("git worktree move ../old ../new") == "write"
     assert classify_shell_command("git worktree remove ../old") == "destructive"
     assert classify_shell_command("git worktree prune") == "destructive"
+    assert classify_shell_command("git submodule") == "read"
+    assert classify_shell_command("git submodule status") == "read"
+    assert classify_shell_command("git submodule summary") == "read"
+    assert classify_shell_command("git submodule update --init third_party/pstack-claude") == "write"
+    assert classify_shell_command("git submodule sync") == "write"
+    assert classify_shell_command("git submodule deinit third_party/pstack-claude") == "destructive"
+    assert classify_shell_command("git submodule foreach 'echo $name'") == "unknown"
+    assert classify_shell_command(
+        "MCP_STUDIO_CONFIG=/home/alfred/mcp-studio/config.yaml "
+        "/home/alfred/mcp-studio/.venv/bin/python -m pytest -q tests/test_tool_permissions.py"
+    ) == "execute"
+    assert classify_shell_command(
+        "cd . && git submodule update --init third_party/pstack-claude && "
+        "pytest -q tests/test_tool_permissions.py"
+    ) == "write"
     assert classify_tool(
         "execute_shell_command",
         {"command": "git worktree add ../mcp-studio-permission-classifier HEAD"},
+    ) == "write"
+    assert classify_tool(
+        "execute_shell_command",
+        {"command": "git submodule update --init third_party/pstack-claude"},
     ) == "write"
     assert classify_shell_command("git push origin review/remove-hca") == "execute"
     assert classify_shell_command("git reset --hard HEAD") == "destructive"

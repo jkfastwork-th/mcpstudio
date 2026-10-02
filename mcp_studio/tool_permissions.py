@@ -112,6 +112,17 @@ def _git_command_class(tokens: list[str]) -> ToolClass:
         if tokens[2] in {"remove", "prune"}:
             return "destructive"
         return "unknown"
+    if sub == "submodule":
+        if len(tokens) < 3:
+            return "read"
+        action = tokens[2]
+        if action in {"status", "summary"}:
+            return "read"
+        if action in {"init", "update", "sync", "absorbgitdirs", "set-branch", "set-url"}:
+            return "write"
+        if action == "deinit":
+            return "destructive"
+        return "unknown"
     if sub in {"push"}:
         return "execute"
     if sub in {"reset", "clean", "restore"}:
