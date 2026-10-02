@@ -100,6 +100,8 @@ def _git_command_class(tokens: list[str]) -> ToolClass:
     if len(tokens) < 2:
         return "read"
     sub = tokens[1]
+    if sub == "branch":
+        return "read" if tokens[2:] == ["--show-current"] else "unknown"
     if sub in {"status", "diff", "log", "show", "rev-parse", "ls-files", "ls-tree", "grep"}:
         return "read"
     if sub in {"add", "commit", "merge", "rebase", "cherry-pick", "tag", "switch", "checkout"}:
