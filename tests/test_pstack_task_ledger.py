@@ -1048,8 +1048,11 @@ def test_pstack_ui_exposes_multi_task_ledger():
     assert "persistent task traces" in app
     assert "HIRDA STACK FLOW" in app
     assert "Task flow overview" in app
-    for label in ("Task", "Pstack", "JEV", "HIRDA", "Runtime / Tools", "Verify", "Done"):
+    for label in ("Task", "Pstack", "HIRDA", "Runtime / Tools", "Verify", "Done"):
         assert label in app
+    assert "{label:'JEV'" not in app
+    assert "JEV advisory" in app
+    assert "HIRDA remains routing and action authority" in app
     assert "downstreamSeen?'skipped':'waiting'" in app
     assert "const hirdaReached=hirdaSeen||hirdaDone||toolStarted||toolDone" in app
     assert "hirdaDone?'done':(hirdaReached?'active':'waiting')" in app
@@ -1061,6 +1064,8 @@ def test_pstack_ui_exposes_multi_task_ledger():
     assert "lifecycleRevision" in app
     assert "BLOCKED" in app
     assert ".pstack-flow-step.skipped" in css
+    assert ".pstack-jev-advisory" in css
+    assert "repeat(6,minmax(88px,1fr))" in css
     assert ".pstack-flow-step" in css
     assert ".pstack-task-row" in css
     assert ".pstack-ledger-card" in css

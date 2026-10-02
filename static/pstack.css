@@ -43,7 +43,7 @@
 }
 .pstack-flow{
   display:grid;
-  grid-template-columns:repeat(7,minmax(82px,1fr));
+  grid-template-columns:repeat(6,minmax(88px,1fr));
   align-items:center;
   gap:0;
   padding:14px 16px 16px;
@@ -112,6 +112,53 @@
   color:var(--ref-muted);
 }
 .pstack-flow-step.skipped>i{background:var(--ref-border)}
+.pstack-jev-advisory{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  margin:0 16px 14px;
+  padding:9px 11px;
+  border:1px solid var(--ref-border-soft);
+  border-radius:9px;
+  background:var(--theme-surface-2);
+}
+.pstack-jev-kicker,
+.pstack-jev-role{
+  flex:0 0 auto;
+  padding:3px 7px;
+  border:1px solid var(--ref-border);
+  border-radius:999px;
+  color:var(--ref-muted);
+  font-size:var(--fs-65);
+  font-weight:800;
+  letter-spacing:.04em;
+  text-transform:uppercase;
+}
+.pstack-jev-copy{
+  display:grid;
+  min-width:0;
+  gap:2px;
+}
+.pstack-jev-copy strong{
+  color:var(--ref-text);
+  font-size:var(--fs-8);
+}
+.pstack-jev-copy small{
+  color:var(--ref-muted);
+  font-size:var(--fs-7);
+}
+.pstack-jev-advisory.observed .pstack-jev-kicker{
+  border-color:#29a56c;
+  color:#208458;
+}
+.pstack-jev-advisory.failed .pstack-jev-kicker{
+  border-color:#d8505b;
+  color:#b43b46;
+}
+.pstack-jev-advisory.quiet .pstack-jev-kicker{
+  border-style:dashed;
+}
+.pstack-jev-role{margin-left:auto}
 .pstack-summary-grid{
   display:grid;
   grid-template-columns:repeat(4,minmax(0,1fr));

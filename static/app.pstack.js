@@ -74,7 +74,7 @@ function pstackFlowSteps(trace, events){
     ||pstackCanonicalState(trace)==='failed';
   const pstackDone=phases.has('handoff_ready');
   const pstackSeen=actors.has('pstack');
-  const jevSeen=actors.has('jev')||[...phases].some(phase=>phase.includes('jev'));
+
   const hirdaDone=phases.has('hirda_execution_completed')||canonicalCompleted;
   const hirdaSeen=actors.has('hirda')||lifecycleStages.length>0;
   const toolStarted=phases.has('tool_started')
@@ -96,7 +96,7 @@ function pstackFlowSteps(trace, events){
   const steps=[
     {label:'Task',state:trace?'done':'waiting'},
     {label:'Pstack',state:pstackDone?'done':(pstackSeen?'active':(downstreamSeen?'skipped':'waiting'))},
-    {label:'JEV',state:jevSeen?'done':(downstreamSeen?'skipped':'waiting')},
+
     {label:'HIRDA',state:hirdaDone?'done':(hirdaReached?'active':'waiting')},
     {label:'Runtime / Tools',state:toolDone?'done':(toolStarted?'active':'waiting')},
     {label:'Verify',state:verifyDone?'done':(verifyActive?'active':'waiting')},
@@ -110,8 +110,30 @@ function pstackFlowSteps(trace, events){
   return steps;
 }
 
+function pstackJevAdvisory(events){
+  const jevEvent=[...events].reverse().find(event=>{
+    const actor=String(event&&event.actor||'').toLowerCase();
+    const phase=String(event&&event.phase||'').toLowerCase();
+    return actor==='jev'||phase.includes('jev');
+  });
+  if(jevEvent){
+    const status=String(jevEvent.status||'passed').toLowerCase();
+    return {
+      state:status==='failed'?'failed':'observed',
+      label:status==='failed'?'JEV advisory issue':'JEV advisory evaluated',
+      detail:'Advisory only · HIRDA remains routing and action authority',
+    };
+  }
+  return {
+    state:'quiet',
+    label:'JEV advisory not observed',
+    detail:'No JEV activity was recorded in this PStack trace · HIRDA continues independently',
+  };
+}
+
 function pstackFlowHtml(trace, events){
   const steps=pstackFlowSteps(trace,events);
+  const jev=pstackJevAdvisory(events);
   return '<article class="panel-card pstack-flow-card">'
     +'<div class="panel-head"><div><span class="eyebrow">HIRDA STACK FLOW</span><h3>Task flow overview</h3></div><small>selected task</small></div>'
     +'<div class="pstack-flow">'
@@ -120,6 +142,11 @@ function pstackFlowHtml(trace, events){
       +'<strong>'+esc(step.label)+'</strong>'
       +(index<steps.length-1?'<i></i>':'')
       +'</div>').join('')
+    +'</div>'
+    +'<div class="pstack-jev-advisory '+esc(jev.state)+'">'
+      +'<span class="pstack-jev-kicker">JEV</span>'
+      +'<span class="pstack-jev-copy"><strong>'+esc(jev.label)+'</strong><small>'+esc(jev.detail)+'</small></span>'
+      +'<span class="pstack-jev-role">advisory</span>'
     +'</div></article>';
 }
 
