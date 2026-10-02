@@ -55,6 +55,9 @@ def test_classifies_serena_read_write_and_destructive_tools():
 
 def test_shell_classifier_keeps_read_write_execute_separate():
     assert classify_shell_command("git status && git diff --stat") == "read"
+    assert classify_shell_command("git branch --show-current") == "read"
+    assert classify_shell_command("git status --short && git branch --show-current") == "read"
+    assert classify_shell_command("git branch feature/x") != "read"
     assert classify_shell_command("pytest -q tests") == "execute"
     assert classify_shell_command("cmd /c echo HIRDA_NATIVE_JKFASTDEV") == "read"
     assert classify_tool(
