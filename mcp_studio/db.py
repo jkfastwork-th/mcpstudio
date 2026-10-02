@@ -779,6 +779,42 @@ class Database:
 
                 db.executescript(
                     """
+                    CREATE TABLE IF NOT EXISTS mcp_event_subscriptions (
+                        id TEXT PRIMARY KEY,
+                        principal_id TEXT NOT NULL,
+                        peer_scope_id TEXT NOT NULL,
+                        event_name TEXT NOT NULL,
+                        arguments_json TEXT NOT NULL DEFAULT '{}',
+                        callback_url TEXT NOT NULL,
+                        delivery_secret TEXT NOT NULL,
+                        previous_delivery_secret TEXT,
+                        previous_secret_expires_at TEXT,
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        verified_at TEXT NOT NULL,
+                        expires_at TEXT,
+                        last_delivery_at TEXT,
+                        failure_count INTEGER NOT NULL DEFAULT 0,
+                        last_error TEXT
+                    );
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_event_subscriptions_identity
+                        ON mcp_event_subscriptions(
+                            principal_id, peer_scope_id, event_name, arguments_json, callback_url
+                        );
+                    CREATE INDEX IF NOT EXISTS idx_mcp_event_subscriptions_recipient
+                        ON mcp_event_subscriptions(
+                            principal_id, peer_scope_id, event_name, enabled, expires_at
+                        );
+                    """
+                )
+                db.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version, name, applied_at) VALUES(14, 'hirda-mcp-events-webhooks-v1', ?)",
+                    (now,),
+                )
+
+                db.executescript(
+                    """
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id
                         ON events(event_id);
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_events_stream_seq
@@ -1226,7 +1262,7 @@ class Database:
                 integrity = db.execute("PRAGMA quick_check").fetchone()[0]
                 return {
                     "current_version": int(rows[-1]["version"]) if rows else 0,
-                    "expected_version": 13,
+                    "expected_version": 14,
                     "integrity": integrity,
                     "migrations": [dict(r) for r in rows],
                 }
@@ -1761,6 +1797,195 @@ class Database:
                 return self._peer_message_item(row)
 
         return await self._run(op)
+
+    @staticmethod
+    def _mcp_event_subscription_item(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "subscription_id": str(row["id"]),
+            "principal_id": str(row["principal_id"]),
+            "peer_scope_id": str(row["peer_scope_id"]),
+            "event_name": str(row["event_name"]),
+            "arguments": json.loads(row["arguments_json"] or "{}"),
+            "callback_url": str(row["callback_url"]),
+            "delivery_secret": str(row["delivery_secret"]),
+            "previous_delivery_secret": row["previous_delivery_secret"],
+            "previous_secret_expires_at": row["previous_secret_expires_at"],
+            "enabled": bool(row["enabled"]),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+            "verified_at": str(row["verified_at"]),
+            "expires_at": row["expires_at"],
+            "last_delivery_at": row["last_delivery_at"],
+            "failure_count": int(row["failure_count"] or 0),
+            "last_error": row["last_error"],
+        }
+
+    async def upsert_mcp_event_subscription(
+        self,
+        *,
+        subscription_id: str,
+        principal_id: str,
+        peer_scope_id: str,
+        event_name: str,
+        arguments: dict[str, Any],
+        callback_url: str,
+        delivery_secret: str,
+        expires_at: str | None,
+    ) -> dict[str, Any]:
+        stamp = _now()
+        canonical_arguments = json.dumps(
+            arguments,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        rotation_expires = (
+            datetime.now(timezone.utc) + timedelta(minutes=5)
+        ).isoformat()
+
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                existing = db.execute(
+                    """SELECT delivery_secret, previous_delivery_secret,
+                              previous_secret_expires_at
+                       FROM mcp_event_subscriptions WHERE id=?""",
+                    (subscription_id,),
+                ).fetchone()
+                previous_secret = None
+                previous_secret_expires_at = None
+                if existing is not None:
+                    current_secret = str(existing["delivery_secret"] or "")
+                    if current_secret and current_secret != delivery_secret:
+                        previous_secret = current_secret
+                        previous_secret_expires_at = rotation_expires
+                    else:
+                        previous_secret = existing["previous_delivery_secret"]
+                        previous_secret_expires_at = existing[
+                            "previous_secret_expires_at"
+                        ]
+
+                db.execute(
+                    """INSERT INTO mcp_event_subscriptions(
+                           id, principal_id, peer_scope_id, event_name,
+                           arguments_json, callback_url, delivery_secret,
+                           previous_delivery_secret, previous_secret_expires_at,
+                           enabled, created_at, updated_at, verified_at, expires_at,
+                           last_delivery_at, failure_count, last_error
+                       ) VALUES(?,?,?,?,?,?,?,?,?,1,?,?,?,?,NULL,0,NULL)
+                       ON CONFLICT(id) DO UPDATE SET
+                           principal_id=excluded.principal_id,
+                           peer_scope_id=excluded.peer_scope_id,
+                           event_name=excluded.event_name,
+                           arguments_json=excluded.arguments_json,
+                           callback_url=excluded.callback_url,
+                           delivery_secret=excluded.delivery_secret,
+                           previous_delivery_secret=excluded.previous_delivery_secret,
+                           previous_secret_expires_at=excluded.previous_secret_expires_at,
+                           enabled=1,
+                           updated_at=excluded.updated_at,
+                           verified_at=excluded.verified_at,
+                           expires_at=excluded.expires_at,
+                           failure_count=0,
+                           last_error=NULL""",
+                    (
+                        subscription_id,
+                        principal_id,
+                        peer_scope_id,
+                        event_name,
+                        canonical_arguments,
+                        callback_url,
+                        delivery_secret,
+                        previous_secret,
+                        previous_secret_expires_at,
+                        stamp,
+                        stamp,
+                        stamp,
+                        expires_at,
+                    ),
+                )
+                row = db.execute(
+                    "SELECT * FROM mcp_event_subscriptions WHERE id=?",
+                    (subscription_id,),
+                ).fetchone()
+                return self._mcp_event_subscription_item(row)
+
+        return await self._run(op)
+
+    async def list_mcp_event_subscriptions(
+        self,
+        *,
+        principal_id: str,
+        peer_scope_id: str,
+        event_name: str,
+    ) -> list[dict[str, Any]]:
+        stamp = _now()
+
+        def op() -> list[dict[str, Any]]:
+            with self._connect() as db:
+                rows = db.execute(
+                    """SELECT * FROM mcp_event_subscriptions
+                       WHERE principal_id=?
+                         AND peer_scope_id=?
+                         AND event_name=?
+                         AND enabled=1
+                         AND (expires_at IS NULL OR expires_at>?)
+                       ORDER BY created_at ASC, id ASC""",
+                    (principal_id, peer_scope_id, event_name, stamp),
+                ).fetchall()
+                return [self._mcp_event_subscription_item(row) for row in rows]
+
+        return await self._run(op)
+
+    async def disable_mcp_event_subscription(
+        self,
+        subscription_id: str,
+        *,
+        principal_id: str,
+        peer_scope_id: str,
+    ) -> bool:
+        stamp = _now()
+
+        def op() -> bool:
+            with self._connect() as db:
+                cursor = db.execute(
+                    """UPDATE mcp_event_subscriptions
+                       SET enabled=0, updated_at=?
+                       WHERE id=? AND principal_id=? AND peer_scope_id=?""",
+                    (stamp, subscription_id, principal_id, peer_scope_id),
+                )
+                return int(cursor.rowcount or 0) > 0
+
+        return await self._run(op)
+
+    async def record_mcp_event_delivery(
+        self,
+        subscription_id: str,
+        *,
+        delivered: bool,
+        error: str | None,
+    ) -> None:
+        stamp = _now()
+
+        def op() -> None:
+            with self._connect() as db:
+                if delivered:
+                    db.execute(
+                        """UPDATE mcp_event_subscriptions
+                           SET last_delivery_at=?, failure_count=0,
+                               last_error=NULL, updated_at=?
+                           WHERE id=?""",
+                        (stamp, stamp, subscription_id),
+                    )
+                else:
+                    db.execute(
+                        """UPDATE mcp_event_subscriptions
+                           SET failure_count=failure_count+1,
+                               last_error=?, updated_at=?
+                           WHERE id=?""",
+                        (str(error or "delivery_failed")[:500], stamp, subscription_id),
+                    )
+
+        await self._run(op)
 
     async def list_peer_threads(
         self,

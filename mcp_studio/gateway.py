@@ -45,6 +45,12 @@ from .integrations import IntegrationManager, IntegrationError
 from .machine_router import MachineCapabilityRouter
 from .machine_registry import MachineRegistryError
 from .machine_enrollment import MachineEnrollmentManager, MachineEnrollmentError
+from .mcp_events import (
+    EventProtocolError,
+    MCP_EVENTS_PROTOCOL_VERSION,
+    UPSTREAM_COMPAT_PROTOCOL_VERSION,
+    McpEventService,
+)
 
 
 PEER_TOOL_NAMES = (
@@ -119,6 +125,7 @@ class GatewaySessionManager:
         self.integrations = integrations
         self.machine_router = machine_router
         self.machine_enrollment = machine_enrollment
+        self.mcp_events = McpEventService(settings, db)
         # Live transports are process-local and only accelerate delivery. The
         # durable peer inbox remains the source of truth.
         self._peer_notify_transports: dict[
@@ -1276,11 +1283,17 @@ class GatewaySessionManager:
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def _augment_initialize_payload(payload: dict[str, Any]) -> dict[str, Any]:
-        """Advertise that HIRDA may change the effective tool catalog."""
+    def _augment_initialize_payload(
+        payload: dict[str, Any],
+        *,
+        protocol_version_override: str | None = None,
+    ) -> dict[str, Any]:
+        """Advertise HIRDA tool changes and MCP Events when the gateway bridges MCP 2.0."""
         result = payload.get("result") if isinstance(payload, dict) else None
         if not isinstance(result, dict):
             return payload
+        if protocol_version_override:
+            result["protocolVersion"] = protocol_version_override
         capabilities = result.get("capabilities")
         if not isinstance(capabilities, dict):
             capabilities = {}
@@ -1292,9 +1305,17 @@ class GatewaySessionManager:
         tools["listChanged"] = True
         if not isinstance(capabilities.get("logging"), dict):
             capabilities["logging"] = {}
+        if protocol_version_override == MCP_EVENTS_PROTOCOL_VERSION:
+            capabilities["events"] = {}
         return payload
 
-    def _augment_initialize_content(self, content: bytes, content_type: str) -> bytes:
+    def _augment_initialize_content(
+        self,
+        content: bytes,
+        content_type: str,
+        *,
+        protocol_version_override: str | None = None,
+    ) -> bytes:
         """Rewrite initialize responses so clients know HIRDA owns a dynamic catalog."""
         try:
             if "text/event-stream" in content_type:
@@ -1308,7 +1329,10 @@ class GatewaySessionManager:
                             payload = json.loads(raw)
                             result = payload.get("result") if isinstance(payload, dict) else None
                             if isinstance(result, dict):
-                                payload = self._augment_initialize_payload(payload)
+                                payload = self._augment_initialize_payload(
+                                    payload,
+                                    protocol_version_override=protocol_version_override,
+                                )
                                 core = "data: " + json.dumps(
                                     payload, ensure_ascii=False, separators=(",", ":")
                                 )
@@ -1318,7 +1342,10 @@ class GatewaySessionManager:
                 return "".join(out).encode("utf-8")
             payload = json.loads(content.decode("utf-8"))
             return json.dumps(
-                self._augment_initialize_payload(payload),
+                self._augment_initialize_payload(
+                    payload,
+                    protocol_version_override=protocol_version_override,
+                ),
                 ensure_ascii=False,
                 separators=(",", ":"),
             ).encode("utf-8")
@@ -3297,6 +3324,7 @@ class GatewaySessionManager:
                         correlation_id=message["correlation_id"],
                     )
                     await self._notify_peer_message(message)
+                    await self.mcp_events.dispatch_peer_message(message)
                     return {"message": message}
                 if name == "hirda_peer_inbox":
                     return {
@@ -3347,6 +3375,7 @@ class GatewaySessionManager:
                         correlation_id=message["correlation_id"],
                     )
                     await self._notify_peer_message(message)
+                    await self.mcp_events.dispatch_peer_message(message)
                     return {"message": message}
                 if name == "hirda_peer_threads":
                     return {
@@ -4131,6 +4160,24 @@ class GatewaySessionManager:
         observation = self.client_observation(
             request, jsonrpc, identity_scope=identity_scope, identity_source=identity_source
         )
+        params = jsonrpc.get("params") if isinstance(jsonrpc.get("params"), dict) else {}
+        requested_protocol = str(params.get("protocolVersion") or "").strip()
+        protocol_version_override = (
+            MCP_EVENTS_PROTOCOL_VERSION
+            if requested_protocol == MCP_EVENTS_PROTOCOL_VERSION
+            else None
+        )
+        upstream_body = body
+        if protocol_version_override:
+            upstream_jsonrpc = json.loads(json.dumps(jsonrpc))
+            upstream_params = upstream_jsonrpc.setdefault("params", {})
+            if isinstance(upstream_params, dict):
+                upstream_params["protocolVersion"] = UPSTREAM_COMPAT_PROTOCOL_VERSION
+                upstream_body = json.dumps(
+                    upstream_jsonrpc,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
         connector_principal_id = str(
             getattr(request.state, "connector_principal_id", "") or ""
         ).strip() or None
@@ -4196,6 +4243,11 @@ class GatewaySessionManager:
                 )
                 if reusable_principal != connector_principal_id:
                     reusable = None
+            if (
+                reusable is not None
+                and str(reusable.get("protocol_version") or "") != requested_protocol
+            ):
+                reusable = None
             if reusable is not None:
                 cached = self._cached_initialize_response(
                     reusable, request_id=jsonrpc.get("id")
@@ -4252,7 +4304,7 @@ class GatewaySessionManager:
             server_url=target_url,
             method=request.method,
             headers=headers,
-            body=body,
+            body=upstream_body,
             stream=True,
         )
         content = await response.aread()
@@ -4268,9 +4320,12 @@ class GatewaySessionManager:
         # HIRDA injects management/backend tools on top of the upstream Serena
         # catalog, so the effective catalog is dynamic even when Serena itself
         # advertises tools.listChanged=false.
-        content = self._augment_initialize_content(content, content_type)
+        content = self._augment_initialize_content(
+            content,
+            content_type,
+            protocol_version_override=protocol_version_override,
+        )
 
-        params = jsonrpc.get("params") if isinstance(jsonrpc.get("params"), dict) else {}
         gateway_session = await self.db.create_gateway_session(
             studio_session_id=studio_session["id"],
             client_id=client_id,
@@ -5533,7 +5588,11 @@ def make_gateway_router(settings: Settings, db: Database, manager: GatewaySessio
 
         async def observed_response(awaitable, *, gateway_id: str | None = None):
             try:
-                response_obj = await awaitable
+                response_obj = (
+                    awaitable
+                    if isinstance(awaitable, Response)
+                    else await awaitable
+                )
             except HTTPException as exc:
                 await db.record_mcp_request(
                     server_id=server_id, http_method=request.method, rpc_method=method,
@@ -5554,6 +5613,68 @@ def make_gateway_router(settings: Settings, db: Database, manager: GatewaySessio
                 client_class=client_class, gateway_session_id=gateway_id or response_obj.headers.get("mcp-session-id"),
             )
             return response_obj
+
+        if request.method == "POST" and method in {
+            "server/discover",
+            "events/list",
+            "events/subscribe",
+            "events/unsubscribe",
+        }:
+            principal_id = str(
+                getattr(request.state, "connector_principal_id", "") or ""
+            ).strip()
+            peer_scope_id = str(
+                getattr(request.state, "connector_peer_scope_id", "") or ""
+            ).strip()
+            try:
+                result = await manager.mcp_events.handle_rpc(
+                    principal_id=principal_id,
+                    peer_scope_id=peer_scope_id,
+                    method=str(method or ""),
+                    params=(
+                        jsonrpc.get("params")
+                        if jsonrpc and isinstance(jsonrpc.get("params"), dict)
+                        else {}
+                    ),
+                )
+                payload = {
+                    "jsonrpc": "2.0",
+                    "id": jsonrpc.get("id") if jsonrpc else None,
+                    "result": result,
+                }
+                response_obj = Response(
+                    content=json.dumps(
+                        payload,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8"),
+                    status_code=200,
+                    media_type="application/json",
+                    headers={
+                        "Cache-Control": "no-store",
+                        "X-Content-Type-Options": "nosniff",
+                    },
+                )
+            except EventProtocolError as exc:
+                payload = {
+                    "jsonrpc": "2.0",
+                    "id": jsonrpc.get("id") if jsonrpc else None,
+                    "error": exc.as_jsonrpc(),
+                }
+                response_obj = Response(
+                    content=json.dumps(
+                        payload,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8"),
+                    status_code=200,
+                    media_type="application/json",
+                    headers={
+                        "Cache-Control": "no-store",
+                        "X-Content-Type-Options": "nosniff",
+                    },
+                )
+            return await observed_response(response_obj)
 
         if settings.studio.gateway_session_enabled:
             if request.method == "POST" and method == "initialize":

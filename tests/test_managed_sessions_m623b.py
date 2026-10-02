@@ -73,8 +73,9 @@ async def test_schema_v6_managed_session_tables_and_gateway_columns(tmp_path: Pa
     db = Database(str(tmp_path / "db.sqlite3"))
     await db.init()
     status = await db.schema_status()
-    assert status["current_version"] == 13
-    assert status["expected_version"] == 13
+    assert status["current_version"] == 14
+    assert status["expected_version"] == 14
+    assert status["migrations"][-1]["name"] == "hirda-mcp-events-webhooks-v1"
 
     def inspect():
         with db._connect() as conn:
@@ -86,7 +87,7 @@ async def test_schema_v6_managed_session_tables_and_gateway_columns(tmp_path: Pa
             return tables, gateway, studio, managed, workspaces
 
     tables, gateway, studio, managed, workspaces = await db._run(inspect)
-    assert {"managed_sessions", "managed_workspaces"} <= tables
+    assert {"managed_sessions", "managed_workspaces", "mcp_event_subscriptions"} <= tables
     assert {"managed_session_id", "upstream_url"} <= gateway
     assert "managed_session_id" in studio
     assert "principal_id" in managed
