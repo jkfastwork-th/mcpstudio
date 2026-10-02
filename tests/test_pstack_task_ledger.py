@@ -91,6 +91,159 @@ class _SnapshotDb:
         ]
 
 
+    async def list_sessions(self, limit=500):
+        assert limit == 500
+        return []
+
+
+class _OverflowSnapshotDb:
+    def __init__(self):
+        self.calls = []
+        self.opened = {
+            "id": 1,
+            "created_at": "2026-10-02T10:00:00+00:00",
+            "kind": "pstack.task.opened",
+            "message": "Task opened",
+            "data": {
+                "task_id": "TASK-OVERFLOW",
+                "trace_id": "TRACE-OVERFLOW",
+                "workspace_key": "overflow",
+                "goal": "Finish after the event window fills",
+                "workflow": "feature",
+                "actor": "hirda",
+                "phase": "task_opened",
+                "title": "HIRDA task envelope opened",
+                "status": "ready",
+                "trace_status": "ready_for_hirda",
+            },
+        }
+        self.tab_opened = {
+            "id": 5001,
+            "created_at": "2026-10-02T10:05:00+00:00",
+            "kind": "pstack.herdr_tab.opened",
+            "message": "Pstack HERDR task tab opened.",
+            "data": {
+                "task_id": "TASK-OVERFLOW",
+                "trace_id": "TRACE-OVERFLOW",
+                "workspace_key": "overflow",
+                "tab_id": "wH:t9",
+                "tab_label": "[PStack] TASK-OVERFLOW",
+                "herdr_workspace_id": "wH",
+            },
+        }
+        self.completed = {
+            "id": 5002,
+            "created_at": "2026-10-02T10:06:00+00:00",
+            "kind": "pstack.lifecycle.checkpoint",
+            "message": "Pstack done checkpoint passed.",
+            "data": {
+                "task_id": "TASK-OVERFLOW",
+                "trace_id": "TRACE-OVERFLOW",
+                "workspace_key": "overflow",
+                "goal": "Finish after the event window fills",
+                "workflow": "feature",
+                "actor": "hirda",
+                "phase": "lifecycle_done_passed",
+                "title": "Done passed",
+                "status": "passed",
+                "trace_status": "completed",
+                "lifecycle": {
+                    "schema": "hirda-pstack-lifecycle-v1",
+                    "workflow": "feature",
+                    "status": "completed",
+                    "current_phase": "done",
+                    "revision": 75,
+                    "stages": [
+                        {"phase": "verify", "status": "passed", "evidence": []},
+                        {"phase": "done", "status": "passed", "evidence": []},
+                    ],
+                },
+            },
+        }
+        self.tab_closed = {
+            "id": 5003,
+            "created_at": "2026-10-02T10:06:01+00:00",
+            "kind": "pstack.herdr_tab.closed",
+            "message": "Pstack HERDR task tab closed.",
+            "data": {
+                "task_id": "TASK-OVERFLOW",
+                "trace_id": "TRACE-OVERFLOW",
+                "workspace_key": "overflow",
+                "tab_id": "wH:t9",
+                "tab_label": "[PStack] TASK-OVERFLOW",
+            },
+        }
+
+    async def list_events(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        kind_prefix = kwargs.get("kind_prefix")
+        ascending = kwargs.get("ascending", True)
+        if kind_prefix == "pstack.task.opened":
+            return [dict(self.opened)]
+        if kind_prefix == "pstack.":
+            if ascending:
+                # Reproduce the old bug: LIMIT on ascending order sees only
+                # the stale beginning of an overfull event ledger.
+                return [dict(self.opened)]
+            return [
+                dict(self.tab_closed),
+                dict(self.completed),
+                dict(self.tab_opened),
+            ]
+        return []
+
+
+    async def list_sessions(self, limit=500):
+        assert limit == 500
+        return []
+
+
+class _CanonicalSessionSnapshotDb:
+    async def list_events(self, **_kwargs):
+        return []
+
+    async def list_sessions(self, limit=500):
+        assert limit == 500
+        return [
+            {
+                "id": "gws-canonical",
+                "last_seen_at": "2026-10-02T10:30:00+00:00",
+                "metadata": {
+                    "active_pstack_task": {
+                        "task_id": "TASK-CANONICAL",
+                        "trace_id": "TRACE-CANONICAL",
+                        "goal": "Canonical task survives ledger truncation",
+                        "workflow": "feature",
+                        "workspace_key": "canonical",
+                        "managed_session_id": "ms-canonical",
+                        "gateway_session_id": "gws-canonical",
+                        "status": "completed",
+                        "lifecycle": {
+                            "schema": "hirda-pstack-lifecycle-v1",
+                            "workflow": "feature",
+                            "status": "completed",
+                            "current_phase": "done",
+                            "revision": 75,
+                            "updated_at": 1790936846.0,
+                            "stages": [
+                                {"phase": "verify", "status": "passed", "evidence": []},
+                                {"phase": "done", "status": "passed", "evidence": []},
+                            ],
+                        },
+                        "herdr_tab": {
+                            "status": "closed",
+                            "owner": "pstack",
+                            "persistent": False,
+                            "workspace_id": "wH",
+                            "tab_id": "wH:t7",
+                            "label": "[PStack] TASK-CANONICAL",
+                        },
+                    }
+                },
+            }
+        ]
+
+
 class _WritableSnapshotDb:
     def __init__(self):
         self.rows = []
@@ -117,6 +270,11 @@ class _WritableSnapshotDb:
         if _kwargs.get("correlation_id"):
             rows = [row for row in rows if row.get("correlation_id") == _kwargs["correlation_id"]]
         return rows if _kwargs.get("ascending", True) else list(reversed(rows))
+
+
+    async def list_sessions(self, limit=500):
+        assert limit == 500
+        return []
 
     async def get_gateway_session(self, _gateway_id):
         return {
@@ -177,6 +335,59 @@ async def test_pstack_activity_snapshot_reconstructs_multiple_persistent_tasks(
     assert snapshot["traces"][0]["goal"] == "Add activity timeline"
     assert snapshot["traces"][0]["lifecycle"]["current_phase"] == "analyze"
     assert snapshot["traces"][1]["identity"]["workspace_key"] == "alpha"
+
+
+@pytest.mark.asyncio
+async def test_pstack_snapshot_prefers_recent_completion_beyond_event_window(monkeypatch):
+    database = _OverflowSnapshotDb()
+    monkeypatch.setattr(main, "db", database)
+    monkeypatch.setattr(main, "_pstack_activity_adapter", lambda: _MemorylessAdapter())
+
+    snapshot = await main._pstack_activity_snapshot(limit=100)
+
+    trace = next(item for item in snapshot["traces"] if item["trace_id"] == "TRACE-OVERFLOW")
+    assert trace["task_id"] == "TASK-OVERFLOW"
+    assert trace["goal"] == "Finish after the event window fills"
+    assert trace["status"] == "completed"
+    assert trace["lifecycle"]["status"] == "completed"
+    assert trace["lifecycle"]["current_phase"] == "done"
+    assert trace["current_step"]["phase"] == "done"
+    assert trace["current_step"]["title"] == "Done"
+    assert trace["herdr_tab"]["status"] == "closed"
+    assert trace["herdr_tab"]["tab_id"] == "wH:t9"
+
+    pstack_calls = [
+        call for call in database.calls
+        if call.get("kind_prefix") == "pstack."
+    ]
+    assert pstack_calls
+    assert pstack_calls[-1]["ascending"] is False
+    assert pstack_calls[-1]["limit"] == 5000
+
+
+@pytest.mark.asyncio
+async def test_pstack_snapshot_merges_canonical_gateway_task_when_ledger_has_no_trace(monkeypatch):
+    database = _CanonicalSessionSnapshotDb()
+    monkeypatch.setattr(main, "db", database)
+    monkeypatch.setattr(main, "_pstack_activity_adapter", lambda: _MemorylessAdapter())
+
+    snapshot = await main._pstack_activity_snapshot(limit=100)
+
+    trace = next(item for item in snapshot["traces"] if item["trace_id"] == "TRACE-CANONICAL")
+    assert trace["task_id"] == "TASK-CANONICAL"
+    assert trace["goal"] == "Canonical task survives ledger truncation"
+    assert trace["status"] == "completed"
+    assert trace["lifecycle"]["status"] == "completed"
+    assert trace["lifecycle"]["current_phase"] == "done"
+    assert trace["current_step"] == {
+        "phase": "done",
+        "title": "Done",
+        "status": "passed",
+        "actor": "hirda",
+    }
+    assert trace["identity"]["gateway_session_id"] == "gws-canonical"
+    assert trace["herdr_tab"]["status"] == "closed"
+    assert trace["herdr_tab"]["tab_id"] == "wH:t7"
 
 
 @pytest.mark.asyncio
@@ -844,6 +1055,10 @@ def test_pstack_ui_exposes_multi_task_ledger():
     assert "hirdaDone?'done':(hirdaReached?'active':'waiting')" in app
     assert "lifecycleStages" in app
     assert "stage&&stage.phase" in app
+    assert "pstackCanonicalState" in app
+    assert "canonicalCompleted" in app
+    assert "HERDR tab" in app
+    assert "lifecycleRevision" in app
     assert "BLOCKED" in app
     assert ".pstack-flow-step.skipped" in css
     assert ".pstack-flow-step" in css

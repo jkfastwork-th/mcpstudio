@@ -770,10 +770,58 @@ async def _pstack_activity_snapshot(
     since: int = 0,
     limit: int = 100,
 ) -> dict[str, Any]:
-    rows = await db.list_events(
-        kind_prefix="pstack.",
+    opened_rows = await db.list_events(
+        kind_prefix="pstack.task.opened",
         limit=5000,
         ascending=True,
+    )
+    lifecycle_rows = await db.list_events(
+        kind_prefix="pstack.lifecycle.checkpoint",
+        limit=50000,
+        ascending=True,
+    )
+    hirda_rows = await db.list_events(
+        kind_prefix="pstack.hirda_",
+        limit=50000,
+        ascending=True,
+    )
+    herdr_rows = await db.list_events(
+        kind_prefix="pstack.herdr_tab.",
+        limit=50000,
+        ascending=True,
+    )
+    recent_rows = await db.list_events(
+        kind_prefix="pstack.",
+        limit=5000,
+        ascending=False,
+    )
+    rows_by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in [
+        *opened_rows,
+        *lifecycle_rows,
+        *hirda_rows,
+        *herdr_rows,
+        *recent_rows,
+    ]:
+        row_id = row.get("id")
+        key = (
+            ("id", row_id)
+            if row_id is not None
+            else (
+                "fallback",
+                row.get("created_at"),
+                row.get("kind"),
+                row.get("correlation_id"),
+                row.get("message"),
+            )
+        )
+        rows_by_key[key] = row
+    rows = sorted(
+        rows_by_key.values(),
+        key=lambda row: (
+            str(row.get("created_at") or ""),
+            int(row.get("id") or 0),
+        ),
     )
     traces: dict[str, dict[str, Any]] = {}
     persistent_events: list[dict[str, Any]] = []
@@ -863,6 +911,8 @@ async def _pstack_activity_snapshot(
             trace["role"] = data.get("role")
         if data.get("tool"):
             trace["tool"] = data.get("tool")
+        if data.get("task_id"):
+            trace["task_id"] = data.get("task_id")
         if isinstance(data.get("lifecycle"), dict):
             trace["lifecycle"] = dict(data.get("lifecycle") or {})
         identity_fields = {
@@ -878,6 +928,29 @@ async def _pstack_activity_snapshot(
         }
         if identity_fields:
             trace["identity"] = {**dict(trace.get("identity") or {}), **identity_fields}
+        row_kind = str(row.get("kind") or "").casefold()
+        if row_kind in {
+            "pstack.herdr_tab.opened",
+            "pstack.herdr_tab.closed",
+            "pstack.herdr_tab.open_failed",
+            "pstack.herdr_tab.close_failed",
+        }:
+            tab_status = {
+                "pstack.herdr_tab.opened": "open",
+                "pstack.herdr_tab.closed": "closed",
+                "pstack.herdr_tab.open_failed": "unavailable",
+                "pstack.herdr_tab.close_failed": "close_failed",
+            }[row_kind]
+            trace["herdr_tab"] = {
+                **dict(trace.get("herdr_tab") or {}),
+                "status": tab_status,
+                "tab_id": data.get("tab_id"),
+                "label": data.get("tab_label"),
+                "workspace_id": data.get("herdr_workspace_id"),
+                "persistent": False,
+                "owner": "pstack",
+                "updated_at": timestamp,
+            }
         trace["updated_at"] = timestamp
         trace["current_step"] = {
             "phase": event["phase"],
@@ -945,6 +1018,114 @@ async def _pstack_activity_snapshot(
                     "status": memory_event.get("status"),
                     "actor": memory_event.get("actor"),
                 }
+
+    logical_rows = await db.list_sessions(limit=500)
+    canonical_tasks: dict[str, tuple[tuple[int, float, str], dict[str, Any]]] = {}
+    for logical in logical_rows:
+        metadata = logical.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        task = metadata.get("active_pstack_task")
+        task = dict(task) if isinstance(task, dict) else {}
+        trace_id = str(task.get("trace_id") or "").strip()
+        if not trace_id:
+            continue
+        lifecycle = task.get("lifecycle")
+        lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+        score = (
+            int(lifecycle.get("revision") or 0),
+            float(lifecycle.get("updated_at") or task.get("opened_at") or 0.0),
+            str(logical.get("last_seen_at") or ""),
+        )
+        current = canonical_tasks.get(trace_id)
+        if current is None or score > current[0]:
+            canonical_tasks[trace_id] = (score, task)
+
+    for trace_id, (_, task) in canonical_tasks.items():
+        lifecycle = task.get("lifecycle")
+        lifecycle = dict(lifecycle) if isinstance(lifecycle, dict) else {}
+        lifecycle_updated = lifecycle.get("updated_at")
+        task_updated_at = ""
+        if isinstance(lifecycle_updated, (int, float)) and lifecycle_updated > 0:
+            task_updated_at = datetime.fromtimestamp(
+                float(lifecycle_updated),
+                timezone.utc,
+            ).isoformat()
+        trace = traces.setdefault(
+            trace_id,
+            {
+                "trace_id": trace_id,
+                "task_id": task.get("task_id"),
+                "tool": "route_task",
+                "goal": str(task.get("goal") or ""),
+                "workflow": task.get("workflow"),
+                "role": None,
+                "status": str(task.get("status") or "active"),
+                "current_step": None,
+                "lifecycle": lifecycle,
+                "started_at": task_updated_at,
+                "updated_at": task_updated_at,
+                "identity": {},
+            },
+        )
+        for key in ("task_id", "goal", "workflow"):
+            if task.get(key):
+                trace[key] = task.get(key)
+        if lifecycle:
+            trace["lifecycle"] = lifecycle
+        task_status = str(task.get("status") or "").strip()
+        if task_status:
+            trace["status"] = task_status
+        herdr_tab = task.get("herdr_tab")
+        if isinstance(herdr_tab, dict) and herdr_tab:
+            trace["herdr_tab"] = dict(herdr_tab)
+        identity_fields = {
+            key: task.get(key)
+            for key in (
+                "task_id",
+                "workspace_key",
+                "managed_session_id",
+                "gateway_session_id",
+            )
+            if task.get(key)
+        }
+        if identity_fields:
+            trace["identity"] = {
+                **dict(trace.get("identity") or {}),
+                **identity_fields,
+            }
+        if task_updated_at and task_updated_at >= str(trace.get("updated_at") or ""):
+            trace["updated_at"] = task_updated_at
+
+    for trace in traces.values():
+        lifecycle = trace.get("lifecycle")
+        if not isinstance(lifecycle, dict) or not lifecycle:
+            continue
+        lifecycle_status = str(lifecycle.get("status") or "").casefold()
+        current_phase = str(lifecycle.get("current_phase") or "").casefold()
+        if lifecycle_status == "completed":
+            trace["status"] = "completed"
+        elif lifecycle_status == "blocked":
+            trace["status"] = "blocked"
+        elif lifecycle_status == "active" and str(trace.get("status") or "").casefold() != "failed":
+            trace["status"] = "active"
+        if current_phase:
+            stages = lifecycle.get("stages")
+            stages = stages if isinstance(stages, list) else []
+            current_stage = next(
+                (
+                    stage
+                    for stage in stages
+                    if isinstance(stage, dict)
+                    and str(stage.get("phase") or "").casefold() == current_phase
+                ),
+                {},
+            )
+            trace["current_step"] = {
+                "phase": current_phase,
+                "title": current_phase.replace("_", " ").title(),
+                "status": str(current_stage.get("status") or lifecycle_status or "active"),
+                "actor": "hirda",
+            }
 
     persistent_events.sort(
         key=lambda item: (
