@@ -811,6 +811,67 @@ async def test_gateway_recovers_pstack_task_from_sibling_transport_and_seeds_man
 
 
 @pytest.mark.asyncio
+async def test_gateway_prefers_new_active_task_over_high_revision_completed_sibling():
+    gateway = object.__new__(GatewaySessionManager)
+    gateway.db = _GatewayDb()
+    gateway.integrations = _GatewayIntegrations()
+    completed = {
+        "task_id": "TASK-OLD-DONE",
+        "trace_id": "TRACE-OLD-DONE",
+        "goal": "Engineering work in mcp-studio",
+        "workflow": "feature",
+        "workspace_key": "mcp-studio",
+        "managed_session_id": "ms-1",
+        "status": "completed",
+        "opened_at": 10.0,
+        "lifecycle": {
+            "schema": "hirda-pstack-lifecycle-v1",
+            "workflow": "feature",
+            "status": "completed",
+            "current_phase": "done",
+            "revision": 126,
+            "updated_at": 126.0,
+            "stages": [],
+        },
+    }
+    active = {
+        "task_id": "TASK-NEW-ACTIVE",
+        "trace_id": "TRACE-NEW-ACTIVE",
+        "goal": "Engineering work in mcp-studio",
+        "workflow": "feature",
+        "workspace_key": "mcp-studio",
+        "managed_session_id": "ms-1",
+        "status": "active",
+        "opened_at": 200.0,
+        "lifecycle": {
+            "schema": "hirda-pstack-lifecycle-v1",
+            "workflow": "feature",
+            "status": "active",
+            "current_phase": "analyze",
+            "revision": 1,
+            "updated_at": 200.0,
+            "stages": [],
+        },
+    }
+    gateway.db.metadata["active_pstack_task"] = active
+    gateway.db.logical_metadata["active_pstack_task"] = completed
+    gateway.db.managed_metadata["active_pstack_task"] = completed
+    gateway.db.sibling_gateways = [
+        {"id": "gws-old", "metadata": {"active_pstack_task": completed}}
+    ]
+
+    selected = await gateway._active_pstack_gateway_task(
+        "gws-1",
+        managed_session=await gateway.db.get_managed_session("ms-1"),
+    )
+
+    assert selected is not None
+    assert selected["task_id"] == "TASK-NEW-ACTIVE"
+    assert gateway.db.logical_metadata["active_pstack_task"]["task_id"] == "TASK-NEW-ACTIVE"
+    assert gateway.db.managed_metadata["active_pstack_task"]["task_id"] == "TASK-NEW-ACTIVE"
+
+
+@pytest.mark.asyncio
 async def test_gateway_self_heals_missing_pstack_registration_before_admission():
     class _RecoveringIntegrations(_GatewayIntegrations):
         def __init__(self):

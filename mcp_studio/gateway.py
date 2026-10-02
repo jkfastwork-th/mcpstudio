@@ -244,8 +244,21 @@ class GatewaySessionManager:
             for task in (source_task, notice_task):
                 if task is not None:
                     task.cancel()
-            await asyncio.gather(*(t for t in (source_task, notice_task) if t is not None), return_exceptions=True)
+            if source_task is not None:
+                await asyncio.gather(source_task, return_exceptions=True)
+            if notice_task is not None:
+                await asyncio.gather(notice_task, return_exceptions=True)
 
+
+
+    @staticmethod
+    def oauth_peer_scope_id(resource: str) -> str:
+        normalized = str(resource or "").strip().rstrip("/")
+        if not normalized:
+            raise ValueError("OAuth resource is required for peer scope")
+        return "oauth-scope-" + hashlib.sha256(
+            normalized.encode("utf-8")
+        ).hexdigest()[:24]
 
     def authenticate(self, request: Request) -> tuple[str, str, str, str, str]:
         """Authenticate and derive a stable client identity.
@@ -333,9 +346,12 @@ class GatewaySessionManager:
             request.state.connector_principal_id = "oauth-" + hashlib.sha256(
                 oauth_identity_material.encode("utf-8")
             ).hexdigest()[:24]
-            request.state.connector_peer_scope_id = "oauth-scope-" + hashlib.sha256(
-                oauth_claims.client_id.encode("utf-8")
-            ).hexdigest()[:24]
+            peer_resource = str(oauth_claims.resource or "").strip()
+            if not peer_resource and self.oauth is not None:
+                peer_resource = self.oauth.resource
+            request.state.connector_peer_scope_id = self.oauth_peer_scope_id(
+                peer_resource
+            )
         elif static_ok and token:
             token_digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:24]
             request.state.connector_principal_id = "bearer-" + token_digest
@@ -2764,10 +2780,21 @@ class GatewaySessionManager:
         if not eligible:
             return None
 
-        def freshness(item: tuple[str, dict[str, Any]]) -> tuple[int, float, float]:
+        def freshness(
+            item: tuple[str, dict[str, Any]]
+        ) -> tuple[int, float, int, float]:
             _source, task = item
             lifecycle = task.get("lifecycle")
             lifecycle_dict = lifecycle if isinstance(lifecycle, dict) else {}
+            task_status = str(task.get("status") or "").strip().casefold()
+            lifecycle_status = str(lifecycle_dict.get("status") or "").strip().casefold()
+            non_terminal = int(
+                task_status != "completed" and lifecycle_status != "completed"
+            )
+            try:
+                opened_at = float(task.get("opened_at") or 0.0)
+            except (TypeError, ValueError):
+                opened_at = 0.0
             try:
                 revision = int(lifecycle_dict.get("revision") or 0)
             except (TypeError, ValueError):
@@ -2776,11 +2803,7 @@ class GatewaySessionManager:
                 updated_at = float(lifecycle_dict.get("updated_at") or 0.0)
             except (TypeError, ValueError):
                 updated_at = 0.0
-            try:
-                opened_at = float(task.get("opened_at") or 0.0)
-            except (TypeError, ValueError):
-                opened_at = 0.0
-            return revision, updated_at, opened_at
+            return non_terminal, opened_at, revision, updated_at
 
         _source, selected = max(eligible, key=freshness)
         if (

@@ -197,6 +197,20 @@ templates = Jinja2Templates(directory=str(ROOT / "templates"))
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.init()
+    if oauth.enabled:
+        canonical_peer_scope = gateway_sessions.oauth_peer_scope_id(oauth.resource)
+        peer_scope_normalization = await db.normalize_oauth_peer_scope(
+            canonical_peer_scope
+        )
+        if any(peer_scope_normalization.values()):
+            await db.add_event(
+                "peer.scope.normalized",
+                "Normalized legacy OAuth peer scopes to the stable MCP resource realm.",
+                data={
+                    "canonical_peer_scope": canonical_peer_scope,
+                    **peer_scope_normalization,
+                },
+            )
     # Integrations self-validate and self-certify at startup. Failures are
     # recorded in lifecycle state and never prevent the HIRDA control plane from starting.
     await integration_manager.snapshot(reconcile=True)

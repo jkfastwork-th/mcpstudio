@@ -1415,6 +1415,66 @@ class Database:
             "metadata": json.loads(row["metadata_json"] or "{}"),
         }
 
+
+    async def normalize_oauth_peer_scope(
+        self,
+        canonical_scope: str,
+    ) -> dict[str, int]:
+        peer_scope = str(canonical_scope or "").strip()
+        if not peer_scope.startswith("oauth-scope-"):
+            raise ValueError("canonical OAuth peer scope must use oauth-scope- prefix")
+
+        def op() -> dict[str, int]:
+            metadata_updates = 0
+            with self._connect() as db:
+                for table in ("sessions", "gateway_sessions"):
+                    rows = db.execute(
+                        f"SELECT id, metadata_json FROM {table}"
+                    ).fetchall()
+                    for row in rows:
+                        try:
+                            metadata = json.loads(row["metadata_json"] or "{}")
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            continue
+                        current = str(
+                            metadata.get("connector_peer_scope_id") or ""
+                        ).strip()
+                        if (
+                            not current.startswith("oauth-scope-")
+                            or current == peer_scope
+                        ):
+                            continue
+                        legacy = metadata.get("legacy_connector_peer_scope_ids")
+                        legacy_scopes = [
+                            str(item)
+                            for item in legacy
+                            if str(item).startswith("oauth-scope-")
+                        ] if isinstance(legacy, list) else []
+                        if current not in legacy_scopes:
+                            legacy_scopes.append(current)
+                        metadata["legacy_connector_peer_scope_ids"] = legacy_scopes[-8:]
+                        metadata["connector_peer_scope_id"] = peer_scope
+                        db.execute(
+                            f"UPDATE {table} SET metadata_json=? WHERE id=?",
+                            (json.dumps(metadata, ensure_ascii=False), row["id"]),
+                        )
+                        metadata_updates += 1
+
+                cursor = db.execute(
+                    """UPDATE peer_messages
+                       SET peer_scope_id=?
+                       WHERE peer_scope_id LIKE 'oauth-scope-%'
+                         AND peer_scope_id<>?""",
+                    (peer_scope, peer_scope),
+                )
+                peer_message_updates = max(0, int(cursor.rowcount or 0))
+            return {
+                "metadata_updates": metadata_updates,
+                "peer_message_updates": peer_message_updates,
+            }
+
+        return await self._run(op)
+
     async def list_peer_principals(
         self,
         *,

@@ -211,7 +211,7 @@ async def test_gateway_accepts_oauth_access_token_with_connector_identity(tmp_pa
         "oauth-" + hashlib.sha256(client["client_id"].encode("utf-8")).hexdigest()[:24]
     )
     assert request.state.connector_peer_scope_id == (
-        "oauth-scope-" + hashlib.sha256(client["client_id"].encode("utf-8")).hexdigest()[:24]
+        GatewaySessionManager.oauth_peer_scope_id(oauth.resource)
     )
     assert client_identity.startswith("oauth-")
     assert client_type == "mcp-http"
@@ -265,6 +265,49 @@ async def test_gateway_scopes_oauth_identity_to_openai_subject(tmp_path: Path):
     assert somchai_chat.state.connector_principal_id == somchai.state.connector_principal_id
     assert fern_chat_scope == somchai_chat_scope == "conversation"
     assert fern_chat_source == somchai_chat_source == "x-openai-session-fingerprint"
+
+
+@pytest.mark.asyncio
+async def test_gateway_peer_scope_is_stable_across_oauth_client_rotation(tmp_path: Path):
+    os.environ["MCP_STUDIO_TEST_OAUTH_SIGNING"] = "signing-secret-for-tests"
+    os.environ["MCP_STUDIO_TEST_OAUTH_OWNER"] = "owner-secret"
+    os.environ["MCP_STUDIO_TEST_GATEWAY_TOKEN"] = "static-admin-token"
+    st = make_settings(tmp_path)
+    db = Database(st.studio.database)
+    await db.init()
+    oauth = OAuthManager(st, db)
+    first = await oauth.create_client(
+        redirect_uris=["https://chatgpt.com/connector/oauth/first"],
+        token_endpoint_auth_method="none",
+    )
+    second = await oauth.create_client(
+        redirect_uris=["https://chatgpt.com/connector/oauth/second"],
+        token_endpoint_auth_method="none",
+    )
+    first_token, _ = oauth._issue_access_token(
+        client_id=first["client_id"],
+        scope="mcp:serena offline_access",
+        resource=oauth.resource,
+    )
+    second_token, _ = oauth._issue_access_token(
+        client_id=second["client_id"],
+        scope="mcp:serena offline_access",
+        resource=oauth.resource,
+    )
+    manager = GatewaySessionManager(st, db, oauth)
+
+    first_request = request_with_bearer(
+        first_token, subject="chatgpt-account-fern"
+    )
+    second_request = request_with_bearer(
+        second_token, subject="chatgpt-account-fern"
+    )
+    manager.authenticate(first_request)
+    manager.authenticate(second_request)
+
+    expected = GatewaySessionManager.oauth_peer_scope_id(oauth.resource)
+    assert first_request.state.connector_peer_scope_id == expected
+    assert second_request.state.connector_peer_scope_id == expected
 
 
 def test_invalid_bearer_has_protected_resource_challenge(tmp_path: Path):

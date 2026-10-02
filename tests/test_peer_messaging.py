@@ -74,6 +74,75 @@ async def test_peer_db_round_trip_is_principal_scoped(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_normalize_oauth_peer_scope_migrates_history_idempotently(tmp_path):
+    db = Database(str(tmp_path / "peer-scope.sqlite3"))
+    await db.init()
+    legacy_scope = "oauth-scope-legacy"
+    canonical_scope = "oauth-scope-stable"
+
+    studio = await db.create_session(
+        {
+            "client_id": "conversation-legacy",
+            "client_type": "openai-chatgpt",
+            "server_id": "serena-8001",
+            "metadata": {
+                "connector_principal_id": "oauth-fern",
+                "connector_peer_scope_id": legacy_scope,
+            },
+        }
+    )
+    gateway = await db.create_gateway_session(
+        studio_session_id=studio["id"],
+        client_id="conversation-legacy",
+        client_type="openai-chatgpt",
+        server_id="serena-8001",
+        upstream_session_id="upstream",
+        protocol_version="2025-11-25",
+        init_payload={},
+        metadata={
+            "connector_principal_id": "oauth-fern",
+            "connector_peer_scope_id": legacy_scope,
+        },
+    )
+    migrated = await db.create_peer_message(
+        peer_scope_id=legacy_scope,
+        sender_principal_id="peer-fern",
+        recipient_principal_id="peer-somchai",
+        text="legacy",
+    )
+    untouched = await db.create_peer_message(
+        peer_scope_id="bearer-scope-local",
+        sender_principal_id="bearer-a",
+        recipient_principal_id="bearer-b",
+        text="local",
+    )
+
+    result = await db.normalize_oauth_peer_scope(canonical_scope)
+
+    assert result["metadata_updates"] == 2
+    assert result["peer_message_updates"] == 1
+    refreshed_gateway = await db.get_gateway_session(gateway["id"])
+    gateway_metadata = refreshed_gateway["metadata"]
+    assert gateway_metadata["connector_peer_scope_id"] == canonical_scope
+    assert legacy_scope in gateway_metadata["legacy_connector_peer_scope_ids"]
+    refreshed_studio = await db.get_session(studio["id"])
+    assert refreshed_studio["metadata"]["connector_peer_scope_id"] == canonical_scope
+    inbox = await db.list_peer_inbox(
+        "peer-somchai", peer_scope_id=canonical_scope
+    )
+    assert [item["message_id"] for item in inbox] == [migrated["message_id"]]
+    bearer_inbox = await db.list_peer_inbox(
+        "bearer-b", peer_scope_id="bearer-scope-local"
+    )
+    assert [item["message_id"] for item in bearer_inbox] == [untouched["message_id"]]
+
+    assert await db.normalize_oauth_peer_scope(canonical_scope) == {
+        "metadata_updates": 0,
+        "peer_message_updates": 0,
+    }
+
+
+@pytest.mark.asyncio
 async def test_live_peer_notification_targets_matching_scope_only(tmp_path):
     db = Database(str(tmp_path / "peer-notify.sqlite3"))
     await db.init()
