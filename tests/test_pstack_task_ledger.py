@@ -399,6 +399,32 @@ class _GatewayIntegrations:
         }
 
 
+class _GatewayHerdr:
+    def __init__(self):
+        self.created = []
+        self.closed = []
+
+    async def create_task_tab(self, task, *, cwd=None):
+        self.created.append((dict(task), cwd))
+        return {
+            "status": "open",
+            "owner": "pstack",
+            "persistent": False,
+            "workspace_id": "wH",
+            "tab_id": "wH:t9",
+            "root_pane_id": "wH:p9",
+            "label": f"[PStack] {task['task_id']}",
+        }
+
+    async def close_task_tab(self, tab):
+        self.closed.append(dict(tab))
+        return {
+            **tab,
+            "status": "closed",
+            "closed_at": "2026-10-02T10:00:00+00:00",
+        }
+
+
 @pytest.mark.asyncio
 async def test_gateway_task_envelope_persists_trace_and_tool_activity():
     gateway = object.__new__(GatewaySessionManager)
@@ -466,6 +492,93 @@ async def test_gateway_task_envelope_persists_trace_and_tool_activity():
     assert hirda_events[0][2]["data"]["trace_status"] == "executing"
     assert gateway.db.logical_metadata["active_pstack_task"]["status"] == "active"
     assert gateway.db.metadata["active_pstack_task"]["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_pstack_task_owns_disposable_herdr_tab_until_done():
+    gateway = object.__new__(GatewaySessionManager)
+    gateway.db = _GatewayDb()
+    gateway.integrations = _GatewayIntegrations()
+    gateway.herdr = _GatewayHerdr()
+
+    task = await gateway._open_pstack_gateway_task(
+        "gws-1",
+        managed_session={
+            "id": "ms-1",
+            "workspace_key": "mcp-studio",
+            "project_path": "/work/mcp-studio",
+        },
+        goal="Create one HERDR tab per PStack task",
+    )
+
+    assert task is not None
+    assert task["herdr_tab"]["status"] == "open"
+    assert task["herdr_tab"]["tab_id"] == "wH:t9"
+    assert task["herdr_tab"]["persistent"] is False
+    assert gateway.herdr.created[0][1] == "/work/mcp-studio"
+
+    task = await gateway._record_pstack_lifecycle_tool_evidence(
+        "gws-1",
+        managed_session={"id": "ms-1", "workspace_key": "mcp-studio"},
+        tool_name="find_symbol",
+        tool_class="read",
+        status="passed",
+        detail="Analyzed HERDR task-tab ownership.",
+    )
+    task = await gateway._checkpoint_active_pstack_task(
+        "gws-1", phase="analyze", status="passed", evidence="Analyze complete"
+    )
+    task = await gateway._checkpoint_active_pstack_task(
+        "gws-1", phase="plan", status="passed", evidence="Plan complete"
+    )
+    task = await gateway._record_pstack_lifecycle_tool_evidence(
+        "gws-1",
+        managed_session={"id": "ms-1", "workspace_key": "mcp-studio"},
+        tool_name="replace_content",
+        tool_class="write",
+        status="passed",
+        detail="Implemented HERDR task-tab lifecycle.",
+    )
+    task = await gateway._checkpoint_active_pstack_task(
+        "gws-1", phase="implement", status="passed", evidence="Implement complete"
+    )
+    task = await gateway._record_pstack_lifecycle_tool_evidence(
+        "gws-1",
+        managed_session={"id": "ms-1", "workspace_key": "mcp-studio"},
+        tool_name="find_symbol",
+        tool_class="read",
+        status="passed",
+        detail="Reviewed HERDR task-tab lifecycle.",
+    )
+    task = await gateway._checkpoint_active_pstack_task(
+        "gws-1", phase="review", status="passed", evidence="Review complete"
+    )
+    task = await gateway._record_pstack_lifecycle_tool_evidence(
+        "gws-1",
+        managed_session={"id": "ms-1", "workspace_key": "mcp-studio"},
+        tool_name="pytest",
+        tool_class="execute",
+        status="passed",
+        detail="Verified HERDR task-tab lifecycle.",
+    )
+    task = await gateway._checkpoint_active_pstack_task(
+        "gws-1", phase="verify", status="passed", evidence="Verify complete"
+    )
+    task = await gateway._checkpoint_active_pstack_task(
+        "gws-1", phase="done", status="passed", evidence="Done"
+    )
+
+    assert task["status"] == "completed"
+    assert task["lifecycle"]["status"] == "completed"
+    assert task["herdr_tab"]["status"] == "closed"
+    assert len(gateway.herdr.closed) == 1
+    assert gateway.herdr.closed[0]["tab_id"] == "wH:t9"
+    persisted = gateway.db.metadata["active_pstack_task"]
+    assert persisted["herdr_tab"]["status"] == "closed"
+
+    kinds = [item[0] for item in gateway.db.events]
+    assert "pstack.herdr_tab.opened" in kinds
+    assert "pstack.herdr_tab.closed" in kinds
 
 
 @pytest.mark.asyncio

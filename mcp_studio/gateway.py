@@ -114,6 +114,7 @@ class GatewaySessionManager:
         integrations: IntegrationManager | None = None,
         machine_router: MachineCapabilityRouter | None = None,
         machine_enrollment: MachineEnrollmentManager | None = None,
+        herdr: Any | None = None,
     ):
         self.settings = settings
         self.db = db
@@ -125,6 +126,7 @@ class GatewaySessionManager:
         self.integrations = integrations
         self.machine_router = machine_router
         self.machine_enrollment = machine_enrollment
+        self.herdr = herdr
         self.mcp_events = McpEventService(settings, db)
         # Live transports are process-local and only accelerate delivery. The
         # durable peer inbox remains the source of truth.
@@ -2966,6 +2968,114 @@ class GatewaySessionManager:
                 if callable(updater):
                     await updater(managed_session_id, managed_metadata)
 
+
+    async def _open_pstack_herdr_tab(
+        self,
+        task: dict[str, Any],
+        *,
+        managed_session: dict[str, Any],
+    ) -> dict[str, Any]:
+        herdr = getattr(self, "herdr", None)
+        if herdr is None:
+            return task
+        existing = dict(task.get("herdr_tab") or {})
+        if str(existing.get("status") or "").casefold() == "open":
+            return task
+        try:
+            tab = await herdr.create_task_tab(
+                task,
+                cwd=str(managed_session.get("project_path") or "").strip() or None,
+            )
+        except Exception as exc:
+            tab = {
+                "status": "unavailable",
+                "owner": "pstack",
+                "persistent": False,
+                "error": f"{type(exc).__name__}: {exc}"[:1000],
+            }
+            await self.db.add_event(
+                "pstack.herdr_tab.open_failed",
+                "Pstack HERDR task tab could not be created.",
+                severity="warning",
+                data={
+                    "task_id": task.get("task_id"),
+                    "trace_id": task.get("trace_id"),
+                    "workspace_key": task.get("workspace_key"),
+                    "managed_session_id": task.get("managed_session_id"),
+                    "error": tab["error"],
+                },
+                stream_id=f"pstack:{task.get('trace_id')}",
+                correlation_id=str(task.get("trace_id") or ""),
+            )
+        else:
+            await self.db.add_event(
+                "pstack.herdr_tab.opened",
+                "Pstack HERDR task tab opened.",
+                data={
+                    "task_id": task.get("task_id"),
+                    "trace_id": task.get("trace_id"),
+                    "workspace_key": task.get("workspace_key"),
+                    "managed_session_id": task.get("managed_session_id"),
+                    "tab_id": tab.get("tab_id"),
+                    "tab_label": tab.get("label"),
+                    "herdr_workspace_id": tab.get("workspace_id"),
+                },
+                stream_id=f"pstack:{task.get('trace_id')}",
+                correlation_id=str(task.get("trace_id") or ""),
+            )
+        return {**task, "herdr_tab": tab}
+
+    async def _close_pstack_herdr_tab(
+        self,
+        task: dict[str, Any],
+    ) -> dict[str, Any]:
+        tab = dict(task.get("herdr_tab") or {})
+        if not tab:
+            return task
+        tab_status = str(tab.get("status") or "").casefold()
+        if tab_status in {"closed", "unavailable"}:
+            return task
+        herdr = getattr(self, "herdr", None)
+        if herdr is None:
+            return task
+        try:
+            closed = await herdr.close_task_tab(tab)
+        except Exception as exc:
+            closed = {
+                **tab,
+                "status": "close_failed",
+                "close_error": f"{type(exc).__name__}: {exc}"[:1000],
+            }
+            await self.db.add_event(
+                "pstack.herdr_tab.close_failed",
+                "Pstack HERDR task tab could not be closed.",
+                severity="warning",
+                data={
+                    "task_id": task.get("task_id"),
+                    "trace_id": task.get("trace_id"),
+                    "workspace_key": task.get("workspace_key"),
+                    "tab_id": tab.get("tab_id"),
+                    "error": closed["close_error"],
+                },
+                stream_id=f"pstack:{task.get('trace_id')}",
+                correlation_id=str(task.get("trace_id") or ""),
+            )
+        else:
+            await self.db.add_event(
+                "pstack.herdr_tab.closed",
+                "Pstack HERDR task tab closed.",
+                data={
+                    "task_id": task.get("task_id"),
+                    "trace_id": task.get("trace_id"),
+                    "workspace_key": task.get("workspace_key"),
+                    "tab_id": closed.get("tab_id"),
+                    "tab_label": closed.get("label"),
+                },
+                stream_id=f"pstack:{task.get('trace_id')}",
+                correlation_id=str(task.get("trace_id") or ""),
+            )
+        return {**task, "herdr_tab": closed}
+
     async def _checkpoint_active_pstack_task(
         self,
         gateway_session_id: str,
@@ -3010,6 +3120,8 @@ class GatewaySessionManager:
                 else "active"
             ),
         }
+        if lifecycle.get("status") == "completed":
+            updated = await self._close_pstack_herdr_tab(updated)
         await self._persist_active_pstack_task(gateway_session_id, updated)
         trace_id = str(updated.get("trace_id") or "")
         phase_key = str(phase or "").strip().casefold()
@@ -3224,6 +3336,10 @@ class GatewaySessionManager:
                 "lifecycle": lifecycle_for_workflow(routed.get("workflow")),
                 "opened_at": time.time(),
             }
+            task = await self._open_pstack_herdr_tab(
+                task,
+                managed_session=managed_session,
+            )
             await self.db.update_gateway_session_metadata(
                 gateway_session_id,
                 {"active_pstack_task": task},

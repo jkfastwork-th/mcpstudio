@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -468,6 +469,189 @@ class HerdrManager:
             timeout=resolved_timeout,
             protocol_version=server.protocol_version,
         )
+
+    @staticmethod
+    def _persistent_tab_labels() -> frozenset[str]:
+        return frozenset({"fern", "nova"})
+
+    @staticmethod
+    def _task_tab_label(task: dict[str, Any]) -> str:
+        task_id = str(task.get("task_id") or "TASK").strip()
+        goal = " ".join(str(task.get("goal") or "").split())
+        suffix = f" · {goal[:56]}" if goal else ""
+        return f"[PStack] {task_id}{suffix}"
+
+    @staticmethod
+    def _tabs_from_cli(payload: Any) -> list[dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return []
+        result = payload.get("result")
+        if isinstance(result, dict) and isinstance(result.get("tabs"), list):
+            return [dict(row) for row in result["tabs"] if isinstance(row, dict)]
+        return []
+
+    @staticmethod
+    def _tab_from_create_cli(payload: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return {}, {}
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            return {}, {}
+        tab = result.get("tab")
+        root_pane = result.get("root_pane")
+        return (
+            dict(tab) if isinstance(tab, dict) else {},
+            dict(root_pane) if isinstance(root_pane, dict) else {},
+        )
+
+    @staticmethod
+    def _herdr_cli_binary() -> str:
+        discovered = shutil.which("herdr")
+        if discovered:
+            return discovered
+        local = Path.home() / ".local" / "bin" / "herdr"
+        if local.is_file():
+            return str(local)
+        raise RuntimeError("herdr_cli_not_found")
+
+    async def _run_cli_json(
+        self,
+        *args: str,
+        timeout_seconds: float = 15.0,
+    ) -> dict[str, Any]:
+        proc = await asyncio.create_subprocess_exec(
+            self._herdr_cli_binary(),
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=max(1.0, float(timeout_seconds)),
+            )
+        except TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            raise RuntimeError("herdr_cli_timeout") from None
+        stdout_text = stdout.decode("utf-8", errors="replace").strip()
+        stderr_text = stderr.decode("utf-8", errors="replace").strip()
+        if proc.returncode != 0:
+            detail = stderr_text or stdout_text or f"exit_{proc.returncode}"
+            raise RuntimeError(f"herdr_cli_failed: {detail[:500]}")
+        if not stdout_text:
+            return {}
+        try:
+            payload = json.loads(stdout_text)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"herdr_cli_invalid_json: {stdout_text[:500]}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("herdr_cli_invalid_payload")
+        return payload
+
+    async def task_workspace_id(self) -> str:
+        payload = await self._run_cli_json("tab", "list")
+        tabs = self._tabs_from_cli(payload)
+        labels_by_workspace: dict[str, set[str]] = {}
+        for tab in tabs:
+            workspace_id = str(tab.get("workspace_id") or "").strip()
+            label = str(tab.get("label") or "").strip().casefold()
+            if workspace_id and label:
+                labels_by_workspace.setdefault(workspace_id, set()).add(label)
+        persistent = self._persistent_tab_labels()
+        candidates = [
+            workspace_id
+            for workspace_id, labels in labels_by_workspace.items()
+            if persistent.issubset(labels)
+        ]
+        if len(candidates) != 1:
+            raise RuntimeError(
+                "herdr_task_workspace_not_unique: expected one workspace "
+                "containing Fern and Nova"
+            )
+        return candidates[0]
+
+    async def create_task_tab(
+        self,
+        task: dict[str, Any],
+        *,
+        cwd: str | None = None,
+    ) -> dict[str, Any]:
+        workspace_id = await self.task_workspace_id()
+        label = self._task_tab_label(task)
+        args = [
+            "tab",
+            "create",
+            "--workspace",
+            workspace_id,
+            "--label",
+            label,
+        ]
+        cwd_text = str(cwd or "").strip()
+        if cwd_text:
+            args.extend(["--cwd", cwd_text])
+        identity_env = {
+            "PSTACK_TASK_ID": task.get("task_id"),
+            "PSTACK_TRACE_ID": task.get("trace_id"),
+            "HIRDA_WORKSPACE_KEY": task.get("workspace_key"),
+        }
+        for key, value in identity_env.items():
+            value_text = str(value or "").strip()
+            if value_text:
+                args.extend(["--env", f"{key}={value_text}"])
+        args.append("--no-focus")
+        payload = await self._run_cli_json(*args)
+        tab, root_pane = self._tab_from_create_cli(payload)
+        tab_id = str(tab.get("tab_id") or "").strip()
+        if not tab_id:
+            raise RuntimeError("herdr_task_tab_create_missing_id")
+        return {
+            "status": "open",
+            "owner": "pstack",
+            "persistent": False,
+            "workspace_id": str(tab.get("workspace_id") or workspace_id),
+            "tab_id": tab_id,
+            "root_pane_id": str(root_pane.get("pane_id") or "").strip() or None,
+            "label": str(tab.get("label") or label),
+            "created_at": _now(),
+        }
+
+    async def close_task_tab(self, tab: dict[str, Any]) -> dict[str, Any]:
+        tab_id = str(tab.get("tab_id") or "").strip()
+        if not tab_id:
+            return {
+                **tab,
+                "status": "closed",
+                "closed_at": _now(),
+                "already_closed": True,
+            }
+        payload = await self._run_cli_json("tab", "list")
+        live_tabs = self._tabs_from_cli(payload)
+        live = next(
+            (row for row in live_tabs if str(row.get("tab_id") or "") == tab_id),
+            None,
+        )
+        if live is None:
+            return {
+                **tab,
+                "status": "closed",
+                "closed_at": _now(),
+                "already_closed": True,
+            }
+        live_label = str(live.get("label") or tab.get("label") or "").strip()
+        if live_label.casefold() in self._persistent_tab_labels():
+            raise RuntimeError("herdr_persistent_tab_close_refused")
+        if str(tab.get("owner") or "").casefold() != "pstack":
+            raise RuntimeError("herdr_non_pstack_tab_close_refused")
+        await self._run_cli_json("tab", "close", tab_id)
+        return {
+            **tab,
+            "status": "closed",
+            "label": live_label or tab.get("label"),
+            "closed_at": _now(),
+        }
 
     async def start(self) -> None:
         await self.refresh()

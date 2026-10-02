@@ -165,6 +165,7 @@ gateway_sessions = GatewaySessionManager(
     integration_manager,
     machine_router,
     machine_enrollment,
+    herdr,
 )
 operations = OperationsManager(settings, db)
 observability = ObservabilityManager(settings, db)

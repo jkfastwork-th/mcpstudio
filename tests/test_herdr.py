@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from mcp_studio.herdr import HerdrManager, _count_items, _decode_text_content
 
 
@@ -75,3 +77,89 @@ def test_pane_list_enriches_agent_name_and_session_from_agent_inventory():
             "agent_session": {"value": "session-fern"},
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_create_task_tab_uses_workspace_containing_fern_and_nova():
+    manager = object.__new__(HerdrManager)
+    calls = []
+
+    async def run_cli(*args, timeout_seconds=15.0):
+        calls.append(args)
+        if args == ("tab", "list"):
+            return {
+                "result": {
+                    "tabs": [
+                        {"tab_id": "wH:t2", "workspace_id": "wH", "label": "Fern"},
+                        {"tab_id": "wH:t3", "workspace_id": "wH", "label": "Nova"},
+                        {"tab_id": "wF:t1", "workspace_id": "wF", "label": "Other"},
+                    ]
+                }
+            }
+        return {
+            "result": {
+                "tab": {
+                    "tab_id": "wH:t4",
+                    "workspace_id": "wH",
+                    "label": "[PStack] TASK-123",
+                },
+                "root_pane": {"pane_id": "wH:p7"},
+            }
+        }
+
+    manager._run_cli_json = run_cli
+    tab = await manager.create_task_tab(
+        {
+            "task_id": "TASK-123",
+            "trace_id": "TRACE-123",
+            "workspace_key": "alpha",
+            "goal": "Implement task scoped tabs",
+        },
+        cwd="/work/alpha",
+    )
+
+    assert tab["tab_id"] == "wH:t4"
+    assert tab["workspace_id"] == "wH"
+    assert tab["root_pane_id"] == "wH:p7"
+    assert tab["persistent"] is False
+    create_call = calls[1]
+    assert create_call[:5] == (
+        "tab",
+        "create",
+        "--workspace",
+        "wH",
+        "--label",
+    )
+    assert "--no-focus" in create_call
+    assert "--cwd" in create_call
+    assert "PSTACK_TASK_ID=TASK-123" in create_call
+    assert "PSTACK_TRACE_ID=TRACE-123" in create_call
+    assert "HIRDA_WORKSPACE_KEY=alpha" in create_call
+
+
+@pytest.mark.asyncio
+async def test_close_task_tab_refuses_fern_and_nova():
+    manager = object.__new__(HerdrManager)
+
+    async def run_cli(*args, timeout_seconds=15.0):
+        assert args == ("tab", "list")
+        return {
+            "result": {
+                "tabs": [
+                    {"tab_id": "wH:t2", "workspace_id": "wH", "label": "Fern"},
+                    {"tab_id": "wH:t3", "workspace_id": "wH", "label": "Nova"},
+                ]
+            }
+        }
+
+    manager._run_cli_json = run_cli
+
+    with pytest.raises(RuntimeError, match="persistent_tab_close_refused"):
+        await manager.close_task_tab(
+            {
+                "tab_id": "wH:t2",
+                "label": "not-trusted-metadata",
+                "owner": "pstack",
+                "status": "open",
+            }
+        )
