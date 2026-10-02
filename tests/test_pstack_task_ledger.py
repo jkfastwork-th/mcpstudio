@@ -282,9 +282,12 @@ class _GatewayDb:
         self.logical_metadata = {}
         self.managed_metadata = {}
         self.sibling_gateways = []
+        self.gateway_sessions = {}
         self.events = []
 
     async def get_gateway_session(self, gateway_id):
+        if gateway_id in self.gateway_sessions:
+            return dict(self.gateway_sessions[gateway_id])
         return {
             "id": gateway_id,
             "studio_session_id": "studio-1",
@@ -735,6 +738,118 @@ def test_pstack_ui_exposes_multi_task_ledger():
     assert ".pstack-ledger-card" in css
 
 
+
+@pytest.mark.asyncio
+async def test_gateway_does_not_adopt_higher_revision_task_from_other_conversation():
+    gateway = object.__new__(GatewaySessionManager)
+    gateway.db = _GatewayDb()
+    gateway.integrations = _GatewayIntegrations()
+    gateway.db.metadata["active_pstack_task"] = {
+        "task_id": "TASK-CURRENT",
+        "trace_id": "TRACE-CURRENT",
+        "goal": "Current tab work",
+        "workflow": "feature",
+        "workspace_key": "mcp-studio",
+        "managed_session_id": "ms-1",
+        "gateway_session_id": "gws-1",
+        "status": "active",
+        "opened_at": 20.0,
+        "lifecycle": {
+            "schema": "hirda-pstack-lifecycle-v1",
+            "workflow": "feature",
+            "status": "active",
+            "current_phase": "analyze",
+            "revision": 1,
+            "updated_at": 20.0,
+            "stages": [],
+        },
+    }
+    other_task = {
+        "task_id": "TASK-OTHER",
+        "trace_id": "TRACE-OTHER",
+        "goal": "Other tab work",
+        "workflow": "feature",
+        "workspace_key": "mcp-studio",
+        "managed_session_id": "ms-1",
+        "gateway_session_id": "gws-other",
+        "status": "active",
+        "opened_at": 10.0,
+        "lifecycle": {
+            "schema": "hirda-pstack-lifecycle-v1",
+            "workflow": "feature",
+            "status": "active",
+            "current_phase": "implement",
+            "revision": 184,
+            "updated_at": 19.0,
+            "stages": [],
+        },
+    }
+    gateway.db.managed_metadata["active_pstack_task"] = dict(other_task)
+    gateway.db.sibling_gateways = [{
+        "id": "gws-other",
+        "studio_session_id": "studio-other",
+        "managed_session_id": "ms-1",
+        "status": "stale",
+        "metadata": {"active_pstack_task": dict(other_task)},
+    }]
+    gateway.db.gateway_sessions["gws-other"] = gateway.db.sibling_gateways[0]
+
+    task = await gateway._active_pstack_gateway_task(
+        "gws-1",
+        managed_session=await gateway.db.get_managed_session("ms-1"),
+    )
+
+    assert task is not None
+    assert task["task_id"] == "TASK-CURRENT"
+    assert task["trace_id"] == "TRACE-CURRENT"
+    assert gateway.db.metadata["active_pstack_task"]["task_id"] == "TASK-CURRENT"
+    assert gateway.db.logical_metadata["active_pstack_task"]["task_id"] == "TASK-CURRENT"
+
+
+@pytest.mark.asyncio
+async def test_gateway_fresh_conversation_does_not_inherit_other_tab_task():
+    gateway = object.__new__(GatewaySessionManager)
+    gateway.db = _GatewayDb()
+    gateway.integrations = _GatewayIntegrations()
+    other_task = {
+        "task_id": "TASK-OTHER",
+        "trace_id": "TRACE-OTHER",
+        "goal": "Other tab work",
+        "workflow": "feature",
+        "workspace_key": "mcp-studio",
+        "managed_session_id": "ms-1",
+        "gateway_session_id": "gws-other",
+        "status": "active",
+        "opened_at": 10.0,
+        "lifecycle": {
+            "schema": "hirda-pstack-lifecycle-v1",
+            "workflow": "feature",
+            "status": "active",
+            "current_phase": "implement",
+            "revision": 184,
+            "updated_at": 19.0,
+            "stages": [],
+        },
+    }
+    gateway.db.managed_metadata["active_pstack_task"] = dict(other_task)
+    gateway.db.sibling_gateways = [{
+        "id": "gws-other",
+        "studio_session_id": "studio-other",
+        "managed_session_id": "ms-1",
+        "status": "stale",
+        "metadata": {"active_pstack_task": dict(other_task)},
+    }]
+    gateway.db.gateway_sessions["gws-other"] = gateway.db.sibling_gateways[0]
+
+    task = await gateway._active_pstack_gateway_task(
+        "gws-1",
+        managed_session=await gateway.db.get_managed_session("ms-1"),
+    )
+
+    assert task is None
+    assert "active_pstack_task" not in gateway.db.metadata
+    assert "active_pstack_task" not in gateway.db.logical_metadata
+
 @pytest.mark.asyncio
 async def test_gateway_rehydrates_pstack_task_from_managed_session_after_transport_rollover():
     gateway = object.__new__(GatewaySessionManager)
@@ -747,6 +862,7 @@ async def test_gateway_rehydrates_pstack_task_from_managed_session_after_transpo
         "workflow": "feature",
         "workspace_key": "mcp-studio",
         "managed_session_id": "ms-1",
+        "gateway_session_id": "gws-old",
         "status": "active",
         "lifecycle": {
             "schema": "hirda-pstack-lifecycle-v1",
@@ -757,6 +873,12 @@ async def test_gateway_rehydrates_pstack_task_from_managed_session_after_transpo
             "updated_at": 9.0,
             "stages": [],
         },
+    }
+    gateway.db.gateway_sessions["gws-old"] = {
+        "id": "gws-old",
+        "studio_session_id": "studio-1",
+        "managed_session_id": "ms-1",
+        "metadata": {},
     }
 
     task = await gateway._active_pstack_gateway_task(
@@ -777,6 +899,7 @@ async def test_gateway_recovers_pstack_task_from_sibling_transport_and_seeds_man
     gateway.integrations = _GatewayIntegrations()
     gateway.db.sibling_gateways = [{
         "id": "gws-old",
+        "studio_session_id": "studio-1",
         "metadata": {
             "active_pstack_task": {
                 "task_id": "TASK-SIBLING",
