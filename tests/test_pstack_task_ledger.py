@@ -850,6 +850,76 @@ async def test_gateway_fresh_conversation_does_not_inherit_other_tab_task():
     assert "active_pstack_task" not in gateway.db.metadata
     assert "active_pstack_task" not in gateway.db.logical_metadata
 
+
+@pytest.mark.asyncio
+async def test_gateway_compares_revision_only_within_same_task_lineage():
+    gateway = object.__new__(GatewaySessionManager)
+    gateway.db = _GatewayDb()
+    gateway.integrations = _GatewayIntegrations()
+    old_completed = {
+        "task_id": "TASK-OLD",
+        "trace_id": "TRACE-OLD",
+        "goal": "Old work",
+        "workflow": "feature",
+        "workspace_key": "mcp-studio",
+        "managed_session_id": "ms-1",
+        "gateway_session_id": "gws-old",
+        "status": "completed",
+        "opened_at": 10.0,
+        "lifecycle": {
+            "schema": "hirda-pstack-lifecycle-v1",
+            "workflow": "feature",
+            "status": "completed",
+            "current_phase": "done",
+            "revision": 184,
+            "updated_at": 18.0,
+            "stages": [],
+        },
+    }
+    new_active = {
+        "task_id": "TASK-NEW",
+        "trace_id": "TRACE-NEW",
+        "goal": "New work",
+        "workflow": "feature",
+        "workspace_key": "mcp-studio",
+        "managed_session_id": "ms-1",
+        "gateway_session_id": "gws-new",
+        "status": "active",
+        "opened_at": 20.0,
+        "lifecycle": {
+            "schema": "hirda-pstack-lifecycle-v1",
+            "workflow": "feature",
+            "status": "active",
+            "current_phase": "analyze",
+            "revision": 1,
+            "updated_at": 20.0,
+            "stages": [],
+        },
+    }
+    gateway.db.sibling_gateways = [
+        {
+            "id": "gws-old",
+            "studio_session_id": "studio-1",
+            "managed_session_id": "ms-1",
+            "metadata": {"active_pstack_task": old_completed},
+        },
+        {
+            "id": "gws-new",
+            "studio_session_id": "studio-1",
+            "managed_session_id": "ms-1",
+            "metadata": {"active_pstack_task": new_active},
+        },
+    ]
+
+    task = await gateway._active_pstack_gateway_task(
+        "gws-1",
+        managed_session=await gateway.db.get_managed_session("ms-1"),
+    )
+
+    assert task is not None
+    assert task["task_id"] == "TASK-NEW"
+    assert task["trace_id"] == "TRACE-NEW"
+
 @pytest.mark.asyncio
 async def test_gateway_rehydrates_pstack_task_from_managed_session_after_transport_rollover():
     gateway = object.__new__(GatewaySessionManager)

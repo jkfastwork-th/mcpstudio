@@ -2732,6 +2732,56 @@ class GatewaySessionManager:
         managed_session: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         gateway = await self.db.get_gateway_session(gateway_session_id)
+        studio_session_id = str(gateway.get("studio_session_id") or "").strip()
+        expected_id = str(
+            (managed_session or {}).get("id")
+            or gateway.get("managed_session_id")
+            or ""
+        )
+        expected_workspace = str(
+            (managed_session or {}).get("workspace_key") or ""
+        )
+
+        def task_identity(task: dict[str, Any]) -> str:
+            return (
+                str(task.get("task_id") or "").strip()
+                or str(task.get("trace_id") or "").strip()
+            )
+
+        def belongs_to_expected_scope(task: dict[str, Any]) -> bool:
+            if not str(task.get("trace_id") or "").strip():
+                return False
+            task_managed_id = str(task.get("managed_session_id") or "")
+            task_workspace = str(task.get("workspace_key") or "")
+            if expected_id and task_managed_id and task_managed_id != expected_id:
+                return False
+            if (
+                expected_workspace
+                and task_workspace
+                and task_workspace != expected_workspace
+            ):
+                return False
+            return True
+
+        async def task_originates_from_current_conversation(
+            task: dict[str, Any],
+        ) -> bool:
+            if not studio_session_id:
+                return False
+            origin_gateway_id = str(task.get("gateway_session_id") or "").strip()
+            if not origin_gateway_id:
+                return False
+            if origin_gateway_id == gateway_session_id:
+                return True
+            try:
+                origin = await self.db.get_gateway_session(origin_gateway_id)
+            except KeyError:
+                return False
+            return (
+                str(origin.get("studio_session_id") or "").strip()
+                == studio_session_id
+            )
+
         candidates: list[tuple[str, dict[str, Any]]] = []
         gateway_task = dict(
             (gateway.get("metadata") or {}).get("active_pstack_task") or {}
@@ -2739,7 +2789,6 @@ class GatewaySessionManager:
         if gateway_task:
             candidates.append(("gateway", gateway_task))
 
-        studio_session_id = str(gateway.get("studio_session_id") or "").strip()
         logical_task: dict[str, Any] = {}
         if studio_session_id:
             try:
@@ -2752,14 +2801,6 @@ class GatewaySessionManager:
             except KeyError:
                 pass
 
-        expected_id = str(
-            (managed_session or {}).get("id")
-            or gateway.get("managed_session_id")
-            or ""
-        )
-        expected_workspace = str(
-            (managed_session or {}).get("workspace_key") or ""
-        )
         managed_task: dict[str, Any] = {}
         managed_record = managed_session
         if expected_id and managed_record is None:
@@ -2771,57 +2812,57 @@ class GatewaySessionManager:
             managed_task = dict(
                 (managed_record.get("metadata") or {}).get("active_pstack_task") or {}
             )
-            if managed_task:
-                candidates.append(("managed", managed_task))
+
+        anchor_task = gateway_task or logical_task
+        anchor_identity = task_identity(anchor_task) if anchor_task else ""
+
+        if managed_task and (
+            (anchor_identity and task_identity(managed_task) == anchor_identity)
+            or (
+                not anchor_identity
+                and await task_originates_from_current_conversation(managed_task)
+            )
+        ):
+            candidates.append(("managed", managed_task))
 
         sibling_lister = getattr(
             self.db,
             "list_gateway_sessions_for_managed_session",
             None,
         )
-        if expected_id and callable(sibling_lister):
+        if expected_id and callable(sibling_lister) and studio_session_id:
             for sibling in await sibling_lister(expected_id):
                 if str(sibling.get("id") or "") == gateway_session_id:
+                    continue
+                if (
+                    str(sibling.get("studio_session_id") or "").strip()
+                    != studio_session_id
+                ):
                     continue
                 sibling_task = dict(
                     (sibling.get("metadata") or {}).get("active_pstack_task") or {}
                 )
                 if sibling_task:
                     candidates.append(("sibling", sibling_task))
-        eligible: list[tuple[str, dict[str, Any]]] = []
-        for source, task in candidates:
-            if not str(task.get("trace_id") or "").strip():
-                continue
-            task_managed_id = str(task.get("managed_session_id") or "")
-            task_workspace = str(task.get("workspace_key") or "")
-            if expected_id and task_managed_id and task_managed_id != expected_id:
-                continue
-            if (
-                expected_workspace
-                and task_workspace
-                and task_workspace != expected_workspace
-            ):
-                continue
-            eligible.append((source, task))
+
+        eligible = [
+            (source, task)
+            for source, task in candidates
+            if belongs_to_expected_scope(task)
+        ]
+        if anchor_identity:
+            eligible = [
+                (source, task)
+                for source, task in eligible
+                if task_identity(task) == anchor_identity
+            ]
 
         if not eligible:
             return None
 
-        def freshness(
-            item: tuple[str, dict[str, Any]]
-        ) -> tuple[int, float, int, float]:
-            _source, task = item
+        def lifecycle_values(task: dict[str, Any]) -> tuple[int, float]:
             lifecycle = task.get("lifecycle")
             lifecycle_dict = lifecycle if isinstance(lifecycle, dict) else {}
-            task_status = str(task.get("status") or "").strip().casefold()
-            lifecycle_status = str(lifecycle_dict.get("status") or "").strip().casefold()
-            non_terminal = int(
-                task_status != "completed" and lifecycle_status != "completed"
-            )
-            try:
-                opened_at = float(task.get("opened_at") or 0.0)
-            except (TypeError, ValueError):
-                opened_at = 0.0
             try:
                 revision = int(lifecycle_dict.get("revision") or 0)
             except (TypeError, ValueError):
@@ -2830,13 +2871,65 @@ class GatewaySessionManager:
                 updated_at = float(lifecycle_dict.get("updated_at") or 0.0)
             except (TypeError, ValueError):
                 updated_at = 0.0
-            return non_terminal, opened_at, revision, updated_at
+            return revision, updated_at
+
+        def task_recency(task: dict[str, Any]) -> tuple[int, float, float]:
+            lifecycle = task.get("lifecycle")
+            lifecycle_dict = lifecycle if isinstance(lifecycle, dict) else {}
+            status = str(task.get("status") or "").strip().casefold()
+            lifecycle_status = str(
+                lifecycle_dict.get("status") or ""
+            ).strip().casefold()
+            non_terminal = int(
+                status != "completed" and lifecycle_status != "completed"
+            )
+            try:
+                opened_at = float(task.get("opened_at") or 0.0)
+            except (TypeError, ValueError):
+                opened_at = 0.0
+            _revision, updated_at = lifecycle_values(task)
+            return non_terminal, opened_at, updated_at
+
+        selected_identity = anchor_identity
+        if not selected_identity:
+            by_identity: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+            for item in eligible:
+                identity = task_identity(item[1])
+                if identity:
+                    by_identity.setdefault(identity, []).append(item)
+            if not by_identity:
+                return None
+            selected_identity = max(
+                by_identity,
+                key=lambda identity: max(
+                    task_recency(task) for _source, task in by_identity[identity]
+                ),
+            )
+            eligible = by_identity[selected_identity]
+
+        def freshness(
+            item: tuple[str, dict[str, Any]],
+        ) -> tuple[int, float, float]:
+            _source, task = item
+            revision, updated_at = lifecycle_values(task)
+            try:
+                opened_at = float(task.get("opened_at") or 0.0)
+            except (TypeError, ValueError):
+                opened_at = 0.0
+            return revision, updated_at, opened_at
 
         _source, selected = max(eligible, key=freshness)
         if (
             selected != gateway_task
             or selected != logical_task
-            or (expected_id and selected != managed_task)
+            or (
+                expected_id
+                and (
+                    not managed_task
+                    or task_identity(managed_task) == selected_identity
+                )
+                and selected != managed_task
+            )
         ):
             await self._persist_active_pstack_task(
                 gateway_session_id,
