@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -468,6 +469,69 @@ class ExecutionSupervisor:
                 correlation_id=trace_id,
             )
 
+    async def _ensure_runtime_agent(
+        self,
+        work: dict[str, Any],
+        pane: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Ensure the HIRDA-selected runtime is live in the task-scoped pane."""
+        runtime_id = str(
+            work.get("agent")
+            or work.get("requested_agent")
+            or ""
+        ).strip().casefold()
+        if not runtime_id:
+            return pane
+
+        observed = str(pane.get("agent") or "").strip().casefold()
+        if observed == runtime_id:
+            return pane
+        if observed and observed != runtime_id:
+            raise RuntimeError(
+                "task pane is already owned by a different runtime: "
+                f"{observed} != {runtime_id}"
+            )
+
+        starter = getattr(self.herdr, "start_agent_in_pane", None)
+        if not callable(starter):
+            raise RuntimeError("herdr runtime bootstrap is unavailable")
+
+        metadata = self._pstack_execution_metadata(work)
+        task_id = str(metadata.get("pstack_task_id") or "").strip()
+        agent_name = (
+            f"pstack-{task_id.casefold()}"
+            if task_id
+            else f"work-{str(work.get('id') or '').removeprefix('work-')[:12]}"
+        )
+        starter_fn = cast(Callable[..., Awaitable[dict[str, Any]]], starter)
+        await starter_fn(
+            name=agent_name[:64],
+            kind=runtime_id,
+            pane_id=str(pane.get("pane_id") or ""),
+            timeout_ms=30000,
+        )
+        refreshed = self._pane_for_work(work)
+        if not refreshed:
+            raise RuntimeError("task pane disappeared after runtime bootstrap")
+        detected = str(refreshed.get("agent") or "").strip().casefold()
+        if detected != runtime_id:
+            raise RuntimeError(
+                "HIRDA-selected runtime did not become ready in task pane: "
+                f"expected {runtime_id}, observed {detected or 'none'}"
+            )
+        await self.db.add_event(
+            "execution.agent_started",
+            f"{work['id']} started {runtime_id} in {refreshed.get('pane_id')}",
+            server_id=work["server_id"],
+            data={
+                "work_id": work["id"],
+                "runtime": runtime_id,
+                "pane": refreshed.get("pane_id"),
+                "authority": "hirda",
+            },
+        )
+        return refreshed
+
     async def dispatch(
         self,
         work_id: str,
@@ -528,6 +592,34 @@ class ExecutionSupervisor:
                     execution_state="reconnecting",
                 )
                 raise RuntimeError("target pane is not currently discoverable")
+
+            try:
+                pane = await self._ensure_runtime_agent(work, pane)
+            except Exception as exc:
+                await self.db.update_work_execution(
+                    work_id,
+                    execution_state="recovering",
+                    failure_class="agent_start_failed",
+                    execution_patch={"agent_start_error": str(exc)[:1000]},
+                )
+                await self.db.mark_worker_degraded_for_work(work_id)
+                await self._patch_pstack_from_work(
+                    work,
+                    status="blocked",
+                    execution_state="recovering",
+                )
+                await self.db.add_event(
+                    "execution.agent_start_failed",
+                    f"{work_id} could not bootstrap the selected runtime: {exc}",
+                    severity="warning",
+                    server_id=work["server_id"],
+                    data={
+                        "work_id": work_id,
+                        "runtime": work.get("agent") or work.get("requested_agent"),
+                        "pane": pane.get("pane_id"),
+                    },
+                )
+                raise
 
             args = build_tool_arguments(
                 tool,

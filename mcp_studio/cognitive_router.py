@@ -2548,6 +2548,134 @@ class CognitiveRouter:
             ),
         }
 
+
+    async def bootstrap_runtime(
+        self,
+        payload: CognitiveRequest | dict[str, Any],
+    ) -> dict[str, Any]:
+        """Choose a launchable runtime without requiring a pre-existing agent pane.
+
+        This is the bootstrap counterpart to plan(): HIRDA retains semantic
+        ranking and supervisor policy authority, while HERDR may subsequently
+        start the selected runtime inside a task-scoped pane.
+        """
+        request = normalize_cognitive_request(payload)
+        runtime_snapshot = self.runtimes.snapshot(force=True)
+        lane_states = (
+            await self.capsules.lane_states()
+            if self.capsules is not None
+            else {}
+        )
+        lane_states = await self._reconcile_runtime_backoffs(lane_states)
+        lane_states = await self._reconcile_runtime_lane_health(
+            runtime_snapshot,
+            lane_states,
+        )
+        jev = await evaluate_cognitive_request(self.studio, request)
+        deterministic = self._deterministic_lane(request)
+        min_confidence = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    getattr(self.studio, "jev_min_confidence", 0.90)
+                    or 0.90
+                ),
+            ),
+        )
+        lane = deterministic
+        if (
+            request.preferred_depth == "auto"
+            and deterministic == "fast"
+            and jev.evaluated
+            and jev.suggested_lane == "deep"
+            and jev.confidence >= min_confidence
+        ):
+            lane = "deep"
+
+        task_profile = _task_semantic_profile(request, jev, lane)
+        rows = [
+            dict(row)
+            for row in runtime_snapshot.get("runtimes", [])
+            if isinstance(row, dict)
+            and self._runtime_healthy(row)
+            and bool(row.get("launchable", True))
+            and str(
+                (lane_states.get(str(row.get("id") or "").casefold()) or {}).get(
+                    "state"
+                )
+                or "normal"
+            ).casefold()
+            == "normal"
+        ]
+        by_id = {
+            str(row.get("id") or "").strip().casefold(): row
+            for row in rows
+            if str(row.get("id") or "").strip()
+        }
+
+        order: list[str] = []
+        if request.preferred_runtime:
+            order.append(request.preferred_runtime)
+        order.extend(("hermes", "claude") if lane == "fast" else ("claude", "hermes"))
+        order.extend(sorted(runtime_id for runtime_id in by_id if runtime_id not in order))
+        candidates = [
+            by_id[runtime_id]
+            for runtime_id in order
+            if runtime_id in by_id
+        ]
+
+        semantic_routing = self._semantic_runtime_ranking(
+            request,
+            task_profile,
+            candidates,
+        )
+        if semantic_routing.get("applied"):
+            semantic_position = {
+                runtime_id: index
+                for index, runtime_id in enumerate(
+                    semantic_routing.get("ranked_order") or []
+                )
+            }
+            candidates = sorted(
+                candidates,
+                key=lambda row: semantic_position.get(
+                    str(row.get("id") or "").strip().casefold(),
+                    10_000,
+                ),
+            )
+
+        supervisor_policy = self._supervisor_policy(
+            request,
+            task_profile,
+            semantic_routing,
+            candidates,
+        )
+        selected = str(
+            supervisor_policy.get("effective_supervisor")
+            or semantic_routing.get("effective_selected")
+            or (candidates[0].get("id") if candidates else "")
+            or ""
+        ).strip().casefold() or None
+        selected_row = dict(by_id.get(selected) or {}) if selected else {}
+
+        return {
+            "schema": "hirda-runtime-bootstrap-plan-v1",
+            "runtime": selected,
+            "lane": lane,
+            "task_semantic_profile": task_profile,
+            "semantic_routing": semantic_routing,
+            "supervisor_policy": supervisor_policy,
+            "runtime_row": selected_row,
+            "candidates": [
+                str(row.get("id") or "").strip().casefold()
+                for row in candidates
+                if str(row.get("id") or "").strip()
+            ],
+            "authority": "hirda",
+            "jev_advisory_only": True,
+        }
+
     async def _invoke_runtime(
         self,
         request: CognitiveRequest,

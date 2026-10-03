@@ -288,6 +288,28 @@ def studio():
 
 
 @pytest.mark.asyncio
+async def test_bootstrap_runtime_selects_launchable_runtime_without_existing_agent_pane():
+    herdr = FakeHerdr()
+    herdr.snapshot["panes"]["panes"] = []
+    router = CognitiveRouter(studio(), herdr, FakeRuntimes())
+
+    plan = await router.bootstrap_runtime(
+        {
+            "request_id": "COG-BOOTSTRAP",
+            "prompt": "Implement a deep software engineering task.",
+            "capability": "coding",
+            "preferred_depth": "deep",
+            "allow_fallback": True,
+        }
+    )
+
+    assert plan["authority"] == "hirda"
+    assert plan["jev_advisory_only"] is True
+    assert plan["runtime"] == "claude"
+    assert "claude" in plan["candidates"]
+
+
+@pytest.mark.asyncio
 async def test_fast_lane_prefers_hermes_free_runtime():
     router = CognitiveRouter(studio(), FakeHerdr(), FakeRuntimes())
     result = await router.execute(

@@ -653,6 +653,52 @@ class HerdrManager:
             "closed_at": _now(),
         }
 
+    async def start_agent_in_pane(
+        self,
+        *,
+        name: str,
+        kind: str,
+        pane_id: str,
+        timeout_ms: int = 30000,
+    ) -> dict[str, Any]:
+        """Start one HIRDA-selected runtime inside an existing HERDR pane."""
+        agent_name = str(name or "").strip()
+        runtime_kind = str(kind or "").strip().casefold()
+        target_pane = str(pane_id or "").strip()
+        if not agent_name or not runtime_kind or not target_pane:
+            raise ValueError("agent name, runtime kind, and pane id are required")
+        bounded_timeout = max(1000, min(int(timeout_ms or 30000), 300000))
+        payload = await self._run_cli_json(
+            "agent",
+            "start",
+            agent_name,
+            "--kind",
+            runtime_kind,
+            "--pane",
+            target_pane,
+            "--timeout",
+            str(bounded_timeout),
+            timeout_seconds=(bounded_timeout / 1000.0) + 5.0,
+        )
+        await self.refresh()
+        pane = self.find_pane(pane_id=target_pane)
+        if not pane:
+            raise RuntimeError("herdr_started_agent_pane_missing")
+        detected_kind = str(pane.get("agent") or "").strip().casefold()
+        if detected_kind != runtime_kind:
+            raise RuntimeError(
+                "herdr_started_agent_kind_mismatch: "
+                f"expected {runtime_kind}, observed {detected_kind or 'none'}"
+            )
+        return {
+            "name": agent_name,
+            "kind": runtime_kind,
+            "pane_id": target_pane,
+            "agent_session": pane.get("agent_session"),
+            "agent_status": pane.get("agent_status"),
+            "payload": payload,
+        }
+
     async def start(self) -> None:
         await self.refresh()
         self._task = asyncio.create_task(self._loop(), name="mcp-studio-herdr-discovery")
@@ -694,11 +740,16 @@ class HerdrManager:
             row = dict(pane)
             agent_row = agents_by_pane.get(str(row.get("pane_id") or ""))
             if agent_row:
+                agent_kind = str(agent_row.get("agent") or "").strip().casefold()
+                if agent_kind:
+                    row.setdefault("agent", agent_kind)
                 agent_name = str(agent_row.get("name") or "").strip()
                 if agent_name:
                     row.setdefault("agent_name", agent_name)
                 if not row.get("agent_session") and agent_row.get("agent_session"):
                     row["agent_session"] = agent_row.get("agent_session")
+                if not row.get("agent_status") and agent_row.get("agent_status"):
+                    row["agent_status"] = agent_row.get("agent_status")
             enriched.append(row)
         return enriched
 

@@ -190,6 +190,7 @@ cognitive_router = CognitiveRouter(
     machine_router,
     hermes_groups,
 )
+gateway_sessions.cognitive_router = cognitive_router
 cognitive_observability = CognitiveObservability(
     db,
     agent_runtimes,

@@ -163,6 +163,64 @@ def test_timeout_classified_ambiguous():
 
 
 @pytest.mark.asyncio
+async def test_dispatch_bootstraps_hirda_selected_runtime_before_prompt(tmp_path):
+    db = Database(str(tmp_path / "studio.sqlite3"))
+    await db.init()
+    running = await create_running_herdr_work(db)
+
+    class BootstrapHerdr(FakeHerdr):
+        def __init__(self):
+            super().__init__()
+            pane = self.snapshot["panes"]["panes"][0]
+            pane["agent"] = None
+            pane["agent_session"] = None
+            pane["agent_status"] = "unknown"
+            self.starts = []
+
+        async def start_agent_in_pane(
+            self,
+            *,
+            name,
+            kind,
+            pane_id,
+            timeout_ms=30000,
+        ):
+            self.starts.append((name, kind, pane_id, timeout_ms))
+            pane = self.snapshot["panes"]["panes"][0]
+            assert pane["pane_id"] == pane_id
+            pane["agent"] = kind
+            pane["agent_status"] = "idle"
+            pane["agent_session"] = {
+                "agent": kind,
+                "kind": "id",
+                "source": f"herdr:{kind}",
+                "value": "session-bootstrap",
+            }
+            return {
+                "name": name,
+                "kind": kind,
+                "pane_id": pane_id,
+                "agent_status": "idle",
+            }
+
+    herdr = BootstrapHerdr()
+    supervisor = ExecutionSupervisor(
+        studio_settings(),
+        db,
+        herdr,
+        FakeScheduler(),
+    )
+
+    dispatched = await supervisor.dispatch(running["id"], explicit=True)
+
+    assert herdr.starts
+    assert herdr.starts[0][1:] == ("claude", "wF:p1", 30000)
+    assert herdr.calls[0][0] == "herdr_prompt_agent"
+    assert dispatched["execution_state"] == "waiting_agent"
+    assert dispatched["agent"] == "claude"
+
+
+@pytest.mark.asyncio
 async def test_dispatch_then_monitor_completion_releases_worker(tmp_path):
     db = Database(str(tmp_path / "studio.sqlite3"))
     await db.init()

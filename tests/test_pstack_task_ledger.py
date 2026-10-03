@@ -677,6 +677,8 @@ class _GatewayDb:
             "dispatch_mode": payload.get("dispatch_mode", "manual"),
             "instruction": payload.get("instruction"),
             "requested_pane": payload.get("pane"),
+            "requested_agent": payload.get("agent"),
+            "agent": payload.get("agent"),
             "metadata": dict(payload.get("metadata") or {}),
             "server_id": payload.get("server_id") or default_server_id,
         }
@@ -762,6 +764,23 @@ class _GatewayIntegrations:
         }
 
 
+class _GatewayCognitiveRouter:
+    async def bootstrap_runtime(self, _request):
+        return {
+            "schema": "hirda-runtime-bootstrap-plan-v1",
+            "runtime": "claude",
+            "lane": "deep",
+            "semantic_routing": {"effective_selected": "claude"},
+            "supervisor_policy": {
+                "effective_supervisor": "claude",
+                "authority": "hirda_supervisor_policy",
+            },
+            "candidates": ["claude", "codex", "hermes"],
+            "authority": "hirda",
+            "jev_advisory_only": True,
+        }
+
+
 class _GatewayHerdr:
     def __init__(self):
         self.created = []
@@ -810,6 +829,7 @@ async def test_rejected_pstack_dispatch_is_retired_and_requeued():
         studio=SimpleNamespace(worker_server_id="serena-8001")
     )
     gateway.db = _GatewayDb()
+    gateway.cognitive_router = _GatewayCognitiveRouter()
 
     old = await gateway.db.create_work(
         {
@@ -879,6 +899,7 @@ async def test_gateway_task_envelope_persists_trace_and_tool_activity():
     )
     gateway.db = _GatewayDb()
     gateway.integrations = _GatewayIntegrations()
+    gateway.cognitive_router = _GatewayCognitiveRouter()
 
     task = await gateway._open_pstack_gateway_task(
         "gws-1",
@@ -1034,6 +1055,7 @@ async def test_gateway_pstack_failed_tool_persists_terminal_status():
     )
     gateway.db = _GatewayDb()
     gateway.integrations = _GatewayIntegrations()
+    gateway.cognitive_router = _GatewayCognitiveRouter()
     task = await gateway._open_pstack_gateway_task(
         "gws-1",
         managed_session={

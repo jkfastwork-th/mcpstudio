@@ -9,9 +9,9 @@ import os
 import re
 import secrets
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -129,6 +129,7 @@ class GatewaySessionManager:
         self.herdr = herdr
         self.scheduler: Any | None = None
         self.execution: Any | None = None
+        self.cognitive_router: Any | None = None
         self.mcp_events = McpEventService(settings, db)
         # Live transports are process-local and only accelerate delivery. The
         # durable peer inbox remains the source of truth.
@@ -3281,6 +3282,71 @@ class GatewaySessionManager:
             return True
         return execution.get("dispatch_rejected") is True
 
+    async def _select_pstack_execution_runtime(
+        self,
+        task: dict[str, Any],
+    ) -> dict[str, Any]:
+        router = getattr(self, "cognitive_router", None)
+        bootstrap = getattr(router, "bootstrap_runtime", None)
+        if not callable(bootstrap):
+            return {
+                "runtime": None,
+                "reason": "cognitive_router_unavailable",
+                "authority": "hirda",
+            }
+
+        directive = task.get("workflow_directive")
+        directive = directive if isinstance(directive, dict) else {}
+        context = directive.get("context")
+        context = context if isinstance(context, dict) else {}
+        request = {
+            "schema": "hirda-cognitive-request-v1",
+            "request_id": str(
+                directive.get("request_id")
+                or f"PSTACK-RUNTIME-{task.get('task_id') or 'UNKNOWN'}"
+            ),
+            "prompt": str(
+                directive.get("prompt")
+                or task.get("goal")
+                or "Execute the active PStack task."
+            ),
+            "capability": str(directive.get("capability") or "coding"),
+            "preferred_depth": str(
+                directive.get("preferred_depth") or "deep"
+            ),
+            "allow_fallback": True,
+            "context": {
+                **context,
+                "pstack_task_id": task.get("task_id"),
+                "pstack_trace_id": task.get("trace_id"),
+                "runtime_authority": "hirda",
+            },
+        }
+        bootstrap_fn = cast(
+            Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+            bootstrap,
+        )
+        try:
+            plan = await bootstrap_fn(request)
+        except Exception as exc:
+            return {
+                "runtime": None,
+                "reason": f"runtime_bootstrap_failed:{type(exc).__name__}",
+                "error": str(exc)[:1000],
+                "authority": "hirda",
+            }
+
+        runtime = str(plan.get("runtime") or "").strip().casefold() or None
+        return {
+            "runtime": runtime,
+            "reason": None if runtime else "runtime_unavailable",
+            "authority": "hirda",
+            "lane": plan.get("lane"),
+            "semantic_routing": plan.get("semantic_routing"),
+            "supervisor_policy": plan.get("supervisor_policy"),
+            "candidates": list(plan.get("candidates") or []),
+        }
+
     async def _ensure_pstack_execution_work(
         self,
         gateway_session_id: str,
@@ -3365,6 +3431,36 @@ class GatewaySessionManager:
                 "execution_state": "instruction_missing",
             }
 
+        runtime_plan = await self._select_pstack_execution_runtime(task_value)
+        runtime_id = str(runtime_plan.get("runtime") or "").strip().casefold()
+        if not runtime_id:
+            await self.db.add_event(
+                "pstack.execution.runtime_unavailable",
+                f"PStack task {task_id} has no launchable HIRDA runtime",
+                severity="warning",
+                data={
+                    "task_id": task_id,
+                    "trace_id": trace_id,
+                    "actor": "hirda",
+                    "phase": "runtime_selection",
+                    "title": "Runtime unavailable",
+                    "detail": str(
+                        runtime_plan.get("reason") or "No launchable runtime candidate."
+                    ),
+                    "status": "waiting",
+                    "trace_status": "waiting",
+                    "metadata": runtime_plan,
+                },
+                stream_id=f"pstack:{trace_id}",
+                correlation_id=trace_id,
+            )
+            return {
+                **task_value,
+                "status": "waiting",
+                "execution_state": "runtime_unavailable",
+                "runtime_selection": runtime_plan,
+            }
+
         tab = dict(task_value.get("herdr_tab") or {})
         pane_id = str(tab.get("root_pane_id") or "").strip() or None
         project_path = str(managed_session.get("project_path") or "").strip()
@@ -3405,7 +3501,7 @@ class GatewaySessionManager:
                 "lease_mode": "write",
                 "session_id": studio_session_id,
                 "pane": pane_id,
-                "agent": None,
+                "agent": runtime_id,
                 "server_id": self.settings.studio.worker_server_id or "serena-8001",
                 "dispatch_mode": "herdr",
                 "instruction": instruction,
@@ -3415,6 +3511,9 @@ class GatewaySessionManager:
                     "managed_session_id": task_value.get("managed_session_id"),
                     "gateway_session_id": gateway_session_id,
                     "pstack_auto_dispatch": True,
+                    "pstack_runtime": runtime_id,
+                    "runtime_authority": "hirda",
+                    "runtime_selection": runtime_plan,
                     "dedupe_key": f"pstack:{task_id}",
                 },
             },
@@ -3449,6 +3548,8 @@ class GatewaySessionManager:
         return {
             **task_value,
             "work_id": work.get("id"),
+            "runtime": runtime_id,
+            "runtime_selection": runtime_plan,
             "status": "queued",
             "execution_state": "queued",
         }
