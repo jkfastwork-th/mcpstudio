@@ -3292,9 +3292,15 @@ class GatewaySessionManager:
                     return active
 
             task_id = f"TASK-{uuid4().hex[:12].upper()}"
+            route_arguments: dict[str, Any] = {
+                "goal": goal_text,
+                "workflow_hint": "engineering_task",
+            }
+            if resume_context:
+                route_arguments["workflow"] = "session-pickup"
             routed = await self.integrations.call_backend_tool(
                 "hirda__pstack__route_task",
-                {"goal": goal_text, "workflow_hint": "engineering_task"},
+                route_arguments,
                 context={
                     "task_id": task_id,
                     "managed_session_id": managed_session.get("id"),

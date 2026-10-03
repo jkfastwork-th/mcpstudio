@@ -1171,6 +1171,7 @@ async def test_gateway_resumed_task_creates_new_lineage_without_reusing_lifecycl
     assert task["lifecycle"]["status"] == "active"
     assert task["lifecycle"]["schema"] == "hirda-pstack-lifecycle-v2"
     assert task["lifecycle"]["current_phase"] == "admitted"
+    assert gateway.integrations.calls[0][1]["workflow"] == "session-pickup"
     assert gateway.integrations.calls[0][2]["resume_context"]["task_id"] == "TASK-OLD"
     assert task["workflow_directive"]["context"]["resume_context"]["trace_id"] == "TRACE-OLD"
     assert "HIRDA PSTACK RESUME CONTEXT" in task["workflow_directive"]["prompt"]
