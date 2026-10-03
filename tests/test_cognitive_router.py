@@ -309,6 +309,174 @@ async def test_bootstrap_runtime_selects_launchable_runtime_without_existing_age
     assert "claude" in plan["candidates"]
 
 
+class BootstrapPrincipalHerdr(FakeHerdr):
+    def __init__(self):
+        super().__init__()
+        self.snapshot["panes"]["panes"] = [
+            {
+                "pane_id": "wN:p1",
+                "agent": "claude",
+                "agent_status": "idle",
+                "agent_name": "hirda-nova-claude",
+            }
+        ]
+        self.created_tabs = []
+        self.started_agents = []
+        self.closed_tabs = []
+
+    async def create_cognitive_tab(
+        self,
+        *,
+        principal_id,
+        request_id,
+        runtime_id,
+        cwd=None,
+    ):
+        tab = {
+            "status": "open",
+            "owner": "cognitive",
+            "persistent": False,
+            "workspace_id": "wH",
+            "tab_id": "wH:tC",
+            "root_pane_id": "wH:pC",
+            "label": f"[Cognitive] {principal_id}:{runtime_id} · {request_id}",
+            "principal_id": principal_id,
+            "request_id": request_id,
+            "runtime_id": runtime_id,
+        }
+        self.created_tabs.append((dict(tab), cwd))
+        self.snapshot["panes"]["panes"].append(
+            {
+                "pane_id": "wH:pC",
+                "agent_status": "unknown",
+            }
+        )
+        return tab
+
+    async def start_agent_in_pane(self, *, name, kind, pane_id, timeout_ms=30000):
+        pane = self.find_pane(pane_id=pane_id)
+        assert pane is not None
+        pane.update(
+            {
+                "agent": kind,
+                "agent_status": "idle",
+                "agent_name": name,
+            }
+        )
+        self.outputs[pane_id] = "BOOTSTRAPPED_RESULT"
+        self.started_agents.append(
+            {
+                "name": name,
+                "kind": kind,
+                "pane_id": pane_id,
+                "timeout_ms": timeout_ms,
+            }
+        )
+        return {
+            "name": name,
+            "kind": kind,
+            "pane_id": pane_id,
+            "agent_status": "idle",
+        }
+
+    async def close_cognitive_tab(self, tab):
+        self.closed_tabs.append(dict(tab))
+        pane_id = str(tab.get("root_pane_id") or "")
+        self.snapshot["panes"]["panes"] = [
+            pane
+            for pane in self.snapshot["panes"]["panes"]
+            if str(pane.get("pane_id") or "") != pane_id
+        ]
+        return {**tab, "status": "closed"}
+
+
+@pytest.mark.asyncio
+async def test_execute_bootstraps_isolated_principal_pane_when_missing():
+    herdr = BootstrapPrincipalHerdr()
+    cfg = studio()
+    cfg.cognitive_pane_routing_mode = "enforce"
+    cfg.cognitive_node_routing_mode = "off"
+    cfg.cognitive_runtime_bindings = {
+        "hermes": {
+            "machine_id": "openclaw",
+            "backend_id": "hermes-runtime",
+            "principal_pane_name_prefixes": {
+                "fern": ["hirda-fern-hermes"],
+                "nova": ["hirda-nova-hermes"],
+            },
+        },
+        "claude": {
+            "machine_id": "openclaw",
+            "backend_id": "claude-runtime",
+            "principal_pane_name_prefixes": {
+                "fern": ["hirda-fern-claude"],
+                "nova": ["hirda-nova-claude"],
+            },
+        },
+    }
+    router = CognitiveRouter(cfg, herdr, FakeRuntimes())
+
+    result = await router.execute(
+        {
+            "request_id": "COG-FERN-BOOTSTRAP",
+            "prompt": "Reply to one social comment.",
+            "capability": "social_dialogue",
+            "preferred_depth": "fast",
+            "allow_fallback": True,
+            "principal_id": "fern",
+            "agent_id": "fern",
+            "context": {"workspace_path": "/work/social"},
+        }
+    )
+
+    assert result.status == "success"
+    assert result.runtime == "hermes"
+    assert result.output == "BOOTSTRAPPED_RESULT"
+    assert len(herdr.created_tabs) == 1
+    assert herdr.created_tabs[0][1] == "/work/social"
+    assert len(herdr.started_agents) == 1
+    assert herdr.started_agents[0]["name"].startswith("hirda-fern-hermes")
+    assert herdr.started_agents[0]["pane_id"] == "wH:pC"
+    assert len(herdr.closed_tabs) == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_does_not_bootstrap_explicit_cross_principal_target():
+    herdr = BootstrapPrincipalHerdr()
+    cfg = studio()
+    cfg.cognitive_pane_routing_mode = "enforce"
+    cfg.cognitive_node_routing_mode = "off"
+    cfg.cognitive_runtime_bindings = {
+        "claude": {
+            "machine_id": "openclaw",
+            "backend_id": "claude-runtime",
+            "principal_pane_name_prefixes": {
+                "fern": ["hirda-fern-claude"],
+                "nova": ["hirda-nova-claude"],
+            },
+        }
+    }
+    router = CognitiveRouter(cfg, herdr, FakeRuntimes())
+
+    result = await router.execute(
+        {
+            "request_id": "COG-FERN-CROSS",
+            "prompt": "Do not cross identity boundaries.",
+            "capability": "social_dialogue",
+            "preferred_runtime": "claude",
+            "target_pane_id": "wN:p1",
+            "allow_fallback": False,
+            "principal_id": "fern",
+        }
+    )
+
+    assert result.status == "failed"
+    assert result.error == "no_healthy_cognitive_runtime"
+    assert herdr.created_tabs == []
+    assert herdr.started_agents == []
+    assert herdr.closed_tabs == []
+
+
 @pytest.mark.asyncio
 async def test_fast_lane_prefers_hermes_free_runtime():
     router = CognitiveRouter(studio(), FakeHerdr(), FakeRuntimes())

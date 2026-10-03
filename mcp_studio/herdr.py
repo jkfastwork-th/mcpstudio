@@ -618,6 +618,112 @@ class HerdrManager:
             "created_at": _now(),
         }
 
+    @staticmethod
+    def _cognitive_tab_label(
+        *,
+        principal_id: str,
+        request_id: str,
+        runtime_id: str,
+    ) -> str:
+        principal = " ".join(str(principal_id or "").split()) or "anonymous"
+        request = " ".join(str(request_id or "").split()) or "request"
+        runtime = " ".join(str(runtime_id or "").split()) or "runtime"
+        return f"[Cognitive] {principal}:{runtime} · {request[:48]}"
+
+    async def create_cognitive_tab(
+        self,
+        *,
+        principal_id: str,
+        request_id: str,
+        runtime_id: str,
+        cwd: str | None = None,
+    ) -> dict[str, Any]:
+        """Create one disposable, unfocused tab for isolated cognitive execution."""
+        workspace_id = await self.task_workspace_id()
+        label = self._cognitive_tab_label(
+            principal_id=principal_id,
+            request_id=request_id,
+            runtime_id=runtime_id,
+        )
+        args = [
+            "tab",
+            "create",
+            "--workspace",
+            workspace_id,
+            "--label",
+            label,
+        ]
+        cwd_text = str(cwd or "").strip()
+        if cwd_text:
+            args.extend(["--cwd", cwd_text])
+        identity_env = {
+            "HIRDA_COGNITIVE_REQUEST_ID": request_id,
+            "HIRDA_PRINCIPAL_ID": principal_id,
+            "HIRDA_RUNTIME_ID": runtime_id,
+        }
+        for key, value in identity_env.items():
+            value_text = str(value or "").strip()
+            if value_text:
+                args.extend(["--env", f"{key}={value_text}"])
+        args.append("--no-focus")
+        payload = await self._run_cli_json(*args)
+        tab, root_pane = self._tab_from_create_cli(payload)
+        tab_id = str(tab.get("tab_id") or "").strip()
+        root_pane_id = str(root_pane.get("pane_id") or "").strip()
+        if not tab_id or not root_pane_id:
+            raise RuntimeError("herdr_cognitive_tab_create_missing_id")
+        return {
+            "status": "open",
+            "owner": "cognitive",
+            "persistent": False,
+            "workspace_id": str(tab.get("workspace_id") or workspace_id),
+            "tab_id": tab_id,
+            "root_pane_id": root_pane_id,
+            "label": str(tab.get("label") or label),
+            "principal_id": str(principal_id or "").strip(),
+            "request_id": str(request_id or "").strip(),
+            "runtime_id": str(runtime_id or "").strip().casefold(),
+            "created_at": _now(),
+        }
+
+    async def close_cognitive_tab(self, tab: dict[str, Any]) -> dict[str, Any]:
+        """Close only a tab explicitly created by cognitive bootstrap."""
+        tab_id = str(tab.get("tab_id") or "").strip()
+        if not tab_id:
+            return {
+                **tab,
+                "status": "closed",
+                "closed_at": _now(),
+                "already_closed": True,
+            }
+        payload = await self._run_cli_json("tab", "list")
+        live_tabs = self._tabs_from_cli(payload)
+        live = next(
+            (row for row in live_tabs if str(row.get("tab_id") or "") == tab_id),
+            None,
+        )
+        if live is None:
+            return {
+                **tab,
+                "status": "closed",
+                "closed_at": _now(),
+                "already_closed": True,
+            }
+        live_label = str(live.get("label") or tab.get("label") or "").strip()
+        if live_label.casefold() in self._persistent_tab_labels():
+            raise RuntimeError("herdr_persistent_tab_close_refused")
+        if str(tab.get("owner") or "").casefold() != "cognitive":
+            raise RuntimeError("herdr_non_cognitive_tab_close_refused")
+        if not live_label.startswith("[Cognitive] "):
+            raise RuntimeError("herdr_cognitive_tab_label_mismatch")
+        await self._run_cli_json("tab", "close", tab_id)
+        return {
+            **tab,
+            "status": "closed",
+            "label": live_label or tab.get("label"),
+            "closed_at": _now(),
+        }
+
     async def close_task_tab(self, tab: dict[str, Any]) -> dict[str, Any]:
         tab_id = str(tab.get("tab_id") or "").strip()
         if not tab_id:

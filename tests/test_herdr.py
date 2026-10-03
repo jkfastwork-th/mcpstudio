@@ -138,6 +138,124 @@ async def test_create_task_tab_uses_workspace_containing_fern_and_nova():
 
 
 @pytest.mark.asyncio
+async def test_create_cognitive_tab_is_isolated_and_unfocused():
+    manager = object.__new__(HerdrManager)
+    calls = []
+
+    async def run_cli(*args, timeout_seconds=15.0):
+        calls.append(args)
+        if args == ("tab", "list"):
+            return {
+                "result": {
+                    "tabs": [
+                        {"tab_id": "wH:t2", "workspace_id": "wH", "label": "Fern"},
+                        {"tab_id": "wH:t3", "workspace_id": "wH", "label": "Nova"},
+                    ]
+                }
+            }
+        return {
+            "result": {
+                "tab": {
+                    "tab_id": "wH:tC",
+                    "workspace_id": "wH",
+                    "label": "[Cognitive] fern:hermes · COG-123",
+                },
+                "root_pane": {"pane_id": "wH:pC"},
+            }
+        }
+
+    manager._run_cli_json = run_cli
+    tab = await manager.create_cognitive_tab(
+        principal_id="fern",
+        request_id="COG-123",
+        runtime_id="hermes",
+        cwd="/work/social",
+    )
+
+    assert tab["owner"] == "cognitive"
+    assert tab["persistent"] is False
+    assert tab["root_pane_id"] == "wH:pC"
+    assert tab["principal_id"] == "fern"
+    assert tab["runtime_id"] == "hermes"
+    create_call = calls[1]
+    assert create_call[:5] == (
+        "tab",
+        "create",
+        "--workspace",
+        "wH",
+        "--label",
+    )
+    assert "--no-focus" in create_call
+    assert "HIRDA_COGNITIVE_REQUEST_ID=COG-123" in create_call
+    assert "HIRDA_PRINCIPAL_ID=fern" in create_call
+    assert "HIRDA_RUNTIME_ID=hermes" in create_call
+
+
+@pytest.mark.asyncio
+async def test_close_cognitive_tab_only_closes_owned_cognitive_tab():
+    manager = object.__new__(HerdrManager)
+    calls = []
+
+    async def run_cli(*args, timeout_seconds=15.0):
+        calls.append(args)
+        if args == ("tab", "list"):
+            return {
+                "result": {
+                    "tabs": [
+                        {
+                            "tab_id": "wH:tC",
+                            "workspace_id": "wH",
+                            "label": "[Cognitive] fern:hermes · COG-123",
+                        }
+                    ]
+                }
+            }
+        return {"result": {}}
+
+    manager._run_cli_json = run_cli
+    result = await manager.close_cognitive_tab(
+        {
+            "tab_id": "wH:tC",
+            "label": "[Cognitive] fern:hermes · COG-123",
+            "owner": "cognitive",
+            "persistent": False,
+        }
+    )
+
+    assert result["status"] == "closed"
+    assert calls[-1] == ("tab", "close", "wH:tC")
+
+
+@pytest.mark.asyncio
+async def test_close_cognitive_tab_refuses_non_cognitive_owner():
+    manager = object.__new__(HerdrManager)
+
+    async def run_cli(*args, timeout_seconds=15.0):
+        assert args == ("tab", "list")
+        return {
+            "result": {
+                "tabs": [
+                    {
+                        "tab_id": "wH:tC",
+                        "workspace_id": "wH",
+                        "label": "[Cognitive] fern:hermes · COG-123",
+                    }
+                ]
+            }
+        }
+
+    manager._run_cli_json = run_cli
+    with pytest.raises(RuntimeError, match="non_cognitive_tab_close_refused"):
+        await manager.close_cognitive_tab(
+            {
+                "tab_id": "wH:tC",
+                "label": "[Cognitive] fern:hermes · COG-123",
+                "owner": "pstack",
+            }
+        )
+
+
+@pytest.mark.asyncio
 async def test_close_task_tab_refuses_fern_and_nova():
     manager = object.__new__(HerdrManager)
 

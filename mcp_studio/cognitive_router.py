@@ -2676,6 +2676,102 @@ class CognitiveRouter:
             "jev_advisory_only": True,
         }
 
+    @staticmethod
+    def _safe_agent_suffix(value: str, *, length: int = 6) -> str:
+        cleaned = "".join(
+            character
+            for character in str(value or "").casefold()
+            if character.isalnum()
+        )
+        return (cleaned[-length:] or uuid4().hex[:length])[:length]
+
+    async def _bootstrap_principal_pane(
+        self,
+        request: CognitiveRequest,
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        """Create an isolated cognitive pane when enforce mode has no principal pane."""
+        if request.target_pane_id or self._pane_routing_mode() != "enforce":
+            return None
+        principal_id = self._request_principal_id(request)
+        if not principal_id:
+            return None
+
+        bootstrap = await self.bootstrap_runtime(request)
+        runtime_id = str(bootstrap.get("runtime") or "").strip().casefold()
+        if not runtime_id:
+            return None
+
+        prefixes = self._principal_pane_name_prefixes(runtime_id, principal_id)
+        if not prefixes:
+            raise CognitiveRouterError("cognitive_principal_pane_prefix_missing")
+        prefix = str(prefixes[0] or "").strip().casefold()
+        if not prefix or len(prefix) > 25:
+            raise CognitiveRouterError("cognitive_principal_pane_prefix_invalid")
+
+        creator = getattr(self.herdr, "create_cognitive_tab", None)
+        starter = getattr(self.herdr, "start_agent_in_pane", None)
+        if not callable(creator) or not callable(starter):
+            raise CognitiveRouterError("cognitive_runtime_bootstrap_unavailable")
+
+        context = dict(request.context or {})
+        cwd = str(
+            context.get("workspace_path")
+            or context.get("project_path")
+            or context.get("cwd")
+            or ""
+        ).strip() or None
+        tab = await creator(
+            principal_id=principal_id,
+            request_id=request.request_id,
+            runtime_id=runtime_id,
+            cwd=cwd,
+        )
+        pane_id = str(tab.get("root_pane_id") or "").strip()
+        if not pane_id:
+            raise CognitiveRouterError("cognitive_runtime_bootstrap_pane_missing")
+
+        suffix = self._safe_agent_suffix(request.request_id)
+        agent_name = f"{prefix}-{suffix}"
+        if len(agent_name) > 32:
+            raise CognitiveRouterError("cognitive_runtime_bootstrap_agent_name_invalid")
+        try:
+            await starter(
+                name=agent_name,
+                kind=runtime_id,
+                pane_id=pane_id,
+                timeout_ms=min(30000, max(1000, int(request.timeout_seconds * 1000))),
+            )
+            await self.herdr.refresh()
+            routed_request = replace(
+                request,
+                preferred_runtime=runtime_id,
+                target_pane_id=pane_id,
+                fallback_target_pane_id=None,
+            )
+            plan = await self.plan(routed_request)
+            if not plan.get("candidates"):
+                raise CognitiveRouterError("cognitive_runtime_bootstrap_route_failed")
+        except Exception:
+            await self._close_cognitive_tab_best_effort(tab)
+            raise
+        return plan, tab
+
+    async def _close_cognitive_tab_best_effort(
+        self,
+        tab: dict[str, Any] | None,
+    ) -> None:
+        if not tab:
+            return
+        closer = getattr(self.herdr, "close_cognitive_tab", None)
+        if not callable(closer):
+            return
+        try:
+            await closer(tab)
+        except Exception:
+            # Cleanup must never replace the cognitive result. Any surviving
+            # disposable tab remains visibly labelled [Cognitive] for ops repair.
+            return
+
     async def _invoke_runtime(
         self,
         request: CognitiveRequest,
@@ -3593,30 +3689,78 @@ class CognitiveRouter:
             plan.get("infrastructure_routing") or {}
         )
         attempts: list[dict[str, Any]] = []
+        bootstrap_tab: dict[str, Any] | None = None
         if not candidates:
-            return CognitiveResult(
-                schema=COGNITIVE_RESULT_SCHEMA,
-                request_id=request.request_id,
-                status="failed",
-                output=None,
-                lane=str(plan["lane"]),
-                runtime=None,
-                provider=None,
-                model=None,
-                degraded=True,
-                fallback_used=False,
-                attempts=tuple(attempts),
-                jev=dict(plan["jev"]),
-                task_semantic_profile=dict(plan["task_semantic_profile"]),
-                semantic_routing=dict(plan["semantic_routing"]),
-                supervisor_policy=dict(plan.get("supervisor_policy") or {}),
-                infrastructure_routing=infrastructure_routing,
-                team_delegation=dict(plan.get("team_delegation") or {}),
-                semantic_authority_changed=bool(
-                    plan.get("semantic_authority_changed")
-                ),
-                error="no_healthy_cognitive_runtime",
-            )
+            try:
+                bootstrapped = await self._bootstrap_principal_pane(request)
+            except Exception as exc:
+                error_code = (
+                    str(exc)
+                    if isinstance(exc, CognitiveRouterError)
+                    else f"cognitive_runtime_bootstrap_failed:{type(exc).__name__}"
+                )
+                return CognitiveResult(
+                    schema=COGNITIVE_RESULT_SCHEMA,
+                    request_id=request.request_id,
+                    status="failed",
+                    output=None,
+                    lane=str(plan["lane"]),
+                    runtime=None,
+                    provider=None,
+                    model=None,
+                    degraded=True,
+                    fallback_used=False,
+                    attempts=({
+                        "attempt_id": f"{request.request_id}:BOOTSTRAP",
+                        "runtime": None,
+                        "pane_id": None,
+                        "status": "failed",
+                        "accepted": False,
+                        "error": error_code,
+                        "detail": str(exc)[:240],
+                    },),
+                    jev=dict(plan["jev"]),
+                    task_semantic_profile=dict(plan["task_semantic_profile"]),
+                    semantic_routing=dict(plan["semantic_routing"]),
+                    supervisor_policy=dict(plan.get("supervisor_policy") or {}),
+                    infrastructure_routing=infrastructure_routing,
+                    team_delegation=dict(plan.get("team_delegation") or {}),
+                    semantic_authority_changed=bool(
+                        plan.get("semantic_authority_changed")
+                    ),
+                    error=error_code,
+                )
+            if bootstrapped is not None:
+                plan, bootstrap_tab = bootstrapped
+                request = normalize_cognitive_request(plan["request"])
+                candidates = plan["candidates"]
+                infrastructure_routing = dict(
+                    plan.get("infrastructure_routing") or {}
+                )
+            if not candidates:
+                return CognitiveResult(
+                    schema=COGNITIVE_RESULT_SCHEMA,
+                    request_id=request.request_id,
+                    status="failed",
+                    output=None,
+                    lane=str(plan["lane"]),
+                    runtime=None,
+                    provider=None,
+                    model=None,
+                    degraded=True,
+                    fallback_used=False,
+                    attempts=tuple(attempts),
+                    jev=dict(plan["jev"]),
+                    task_semantic_profile=dict(plan["task_semantic_profile"]),
+                    semantic_routing=dict(plan["semantic_routing"]),
+                    supervisor_policy=dict(plan.get("supervisor_policy") or {}),
+                    infrastructure_routing=infrastructure_routing,
+                    team_delegation=dict(plan.get("team_delegation") or {}),
+                    semantic_authority_changed=bool(
+                        plan.get("semantic_authority_changed")
+                    ),
+                    error="no_healthy_cognitive_runtime",
+                )
 
         runtime_snapshot = self.runtimes.snapshot(force=False)
         runtime_rows = {
@@ -3625,11 +3769,14 @@ class CognitiveRouter:
             if isinstance(row, dict)
         }
         if bool((plan.get("team_delegation") or {}).get("applied")):
-            return await self._execute_controlled_team(
-                request,
-                plan,
-                runtime_rows,
-            )
+            try:
+                return await self._execute_controlled_team(
+                    request,
+                    plan,
+                    runtime_rows,
+                )
+            finally:
+                await self._close_cognitive_tab_best_effort(bootstrap_tab)
 
         deadline = time.monotonic() + max(1.0, float(request.timeout_seconds))
 
@@ -3816,7 +3963,7 @@ class CognitiveRouter:
                     "accepted": True,
                 }
             )
-            return CognitiveResult(
+            result = CognitiveResult(
                 schema=COGNITIVE_RESULT_SCHEMA,
                 request_id=request.request_id,
                 status="success",
@@ -3838,8 +3985,10 @@ class CognitiveRouter:
                     plan.get("semantic_authority_changed")
                 ),
             )
+            await self._close_cognitive_tab_best_effort(bootstrap_tab)
+            return result
 
-        return CognitiveResult(
+        result = CognitiveResult(
             schema=COGNITIVE_RESULT_SCHEMA,
             request_id=request.request_id,
             status="failed",
@@ -3862,3 +4011,5 @@ class CognitiveRouter:
             ),
             error="all_cognitive_runtimes_failed",
         )
+        await self._close_cognitive_tab_best_effort(bootstrap_tab)
+        return result
