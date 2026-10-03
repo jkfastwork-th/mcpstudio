@@ -64,6 +64,7 @@ DYNAMIC_ACTION_HANDLERS = {
     "data-agent-check": "closest('[data-agent-check]')",
     "data-agent-details": "closest('[data-agent-details]')",
     "data-pstack-trace": "closest('[data-pstack-trace]')",
+    "data-pstack-resume": "closest('[data-pstack-resume]')",
     "data-go-view": "closest('[data-go-view]')",
     "data-managed-resume": "closest('[data-managed-resume]')",
     "data-managed-restart": "closest('[data-managed-restart]')",
