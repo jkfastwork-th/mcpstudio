@@ -66,7 +66,9 @@ async def test_pstack_workflows_route_without_pinning_runtime(goal, expected):
     assert result["workflow"] == expected
     assert result["runtime_authority"] == "hirda"
     assert result["model_selection"] == "deferred"
+    assert result["principles_authority"] == "methodology_only"
     assert result["methodology"]
+    assert result["principles"] == result["coordinator"]["principles"]
     request = result["coordinator"]["hirda_request"]
     assert "preferred_runtime" not in request
 
@@ -76,6 +78,36 @@ async def test_pstack_workflows_route_without_pinning_runtime(goal, expected):
     assert normalized.preferred_depth == "deep"
     assert normalized.context["workflow_provider"] == "pstack"
     assert normalized.context["workflow"] == expected
+    assert normalized.context["principles_authority"] == "methodology_only"
+    assert normalized.context["pstack_principles"] == result["principles"]
+
+
+@pytest.mark.asyncio
+async def test_pstack_principles_are_derived_from_pinned_methodology_and_are_advisory_only():
+    module = _load_module()
+    adapter = module.PstackIntegration(repository_root=ROOT)
+
+    loaded = await adapter.call_tool(
+        "load_workflow",
+        {"workflow": "feature"},
+        context={"managed_session_id": "principles-cert"},
+    )
+    assert "principle-model-the-domain" in loaded["principles"]
+    assert "principle-sequence-verifiable-units" in loaded["principles"]
+    assert "principle-separate-before-serializing-shared-state" in loaded["principles"]
+
+    routed = await adapter.call_tool(
+        "route_task",
+        {"goal": "Add a bounded feature with verifiable units.", "workflow": "feature"},
+        context={"managed_session_id": "principles-cert"},
+    )
+    request = routed["coordinator"]["hirda_request"]
+    assert routed["principles"] == loaded["principles"]
+    assert routed["principles_authority"] == "methodology_only"
+    assert request["context"]["pstack_principles"] == loaded["principles"]
+    assert request["context"]["principles_authority"] == "methodology_only"
+    assert request["context"]["runtime_authority"] == "hirda"
+    assert "preferred_runtime" not in request
 
 
 @pytest.mark.asyncio

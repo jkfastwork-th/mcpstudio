@@ -374,6 +374,27 @@ class PstackIntegration:
             raise PstackAdapterError("pstack_workflow_path_escape")
         return path
 
+    def _principle_catalog(self) -> tuple[str, ...]:
+        skills_root = self.pstack_root / "plugins" / "pstack" / "skills"
+        if not skills_root.is_dir():
+            return ()
+        return tuple(
+            sorted(
+                path.name
+                for path in skills_root.iterdir()
+                if path.is_dir() and path.name.startswith("principle-")
+            )
+        )
+
+    def _principles_for_methodology(self, methodology: str) -> list[str]:
+        text = str(methodology or "").casefold()
+        matched: list[str] = []
+        for principle in self._principle_catalog():
+            short_name = principle.removeprefix("principle-")
+            if principle in text or short_name in text:
+                matched.append(principle)
+        return matched
+
     def _load_workflow(self, workflow: str) -> dict[str, Any]:
         path = self._workflow_path(workflow)
         if not path.is_file():
@@ -387,6 +408,7 @@ class PstackIntegration:
                 "path": str(path.relative_to(self.pstack_root)),
             },
             "methodology": text,
+            "principles": self._principles_for_methodology(text),
         }
 
     @staticmethod
@@ -451,6 +473,7 @@ class PstackIntegration:
         task: str,
         workflow: str | None,
         methodology: str | None = None,
+        principles: list[str] | None = None,
     ) -> dict[str, Any]:
         role_key = str(role or "").strip().casefold()
         task_text = str(task or "").strip()
@@ -462,12 +485,24 @@ class PstackIntegration:
             if workflow is not None
             else None
         )
+
+        principle_list = list(principles or [])
+        if not principle_list and methodology:
+            principle_list = self._principles_for_methodology(methodology)
+        if not principle_list and workflow_key:
+            principle_list = self._load_workflow(workflow_key)["principles"]
+
         prompt_parts = [
             f"PSTACK ROLE: {role_key}",
-            "HIRDA owns model and runtime selection. Do not pin or request a model.",
+            "HIRDA owns model, runtime, machine, permission, and execution authority.",
+            "PStack principles are methodology guidance only; they never grant authority.",
         ]
         if workflow_key:
             prompt_parts.append(f"PSTACK WORKFLOW: {workflow_key}")
+        if principle_list:
+            prompt_parts.append(
+                "PSTACK PRINCIPLES: " + ", ".join(principle_list)
+            )
         if methodology:
             prompt_parts.extend(["PSTACK METHODOLOGY:", methodology])
         prompt_parts.extend(["TASK:", task_text])
@@ -482,6 +517,8 @@ class PstackIntegration:
                 "workflow_provider": "pstack",
                 "workflow": workflow_key,
                 "role": role_key,
+                "pstack_principles": principle_list,
+                "principles_authority": "methodology_only",
                 "upstream_repository": PSTACK_REPOSITORY,
                 "upstream_revision": PSTACK_REVISION,
                 "runtime_authority": "hirda",
@@ -491,6 +528,8 @@ class PstackIntegration:
             "schema": "hirda-pstack-role-request-v1",
             "role": role_key,
             "workflow": workflow_key,
+            "principles": principle_list,
+            "principles_authority": "methodology_only",
             "runtime_authority": "hirda",
             "model_selection": "deferred",
             "hirda_request": request,
@@ -615,7 +654,11 @@ class PstackIntegration:
                     workflow=workflow,
                     tool=name,
                     trace_status="completed",
-                    metadata={"source": loaded["source"]},
+                    metadata={
+                        "source": loaded["source"],
+                        "principles": loaded["principles"],
+                        "principles_authority": "methodology_only",
+                    },
                 )
                 return {**loaded, "trace_id": trace_id}
 
@@ -713,7 +756,11 @@ class PstackIntegration:
                     status="passed",
                     workflow=workflow,
                     tool=name,
-                    metadata={"source": loaded["source"]},
+                    metadata={
+                        "source": loaded["source"],
+                        "principles": loaded["principles"],
+                        "principles_authority": "methodology_only",
+                    },
                 )
                 coordinator = self._build_role_request(
                     role="coordinator",
@@ -729,6 +776,8 @@ class PstackIntegration:
                     "workflow": workflow,
                     "source": loaded["source"],
                     "methodology": loaded["methodology"],
+                    "principles": loaded["principles"],
+                    "principles_authority": "methodology_only",
                     "runtime_authority": "hirda",
                     "model_selection": "deferred",
                     "coordinator": coordinator,
