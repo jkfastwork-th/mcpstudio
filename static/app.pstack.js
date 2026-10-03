@@ -9,6 +9,11 @@ function pstackTime(value){
 function pstackCanonicalState(trace){
   if(trace&&typeof trace==='object'){
     const lifecycle=trace.lifecycle||{};
+    const traceStatus=String(trace.status||'').toLowerCase();
+    const terminalDisposition=String(
+      lifecycle.terminal_disposition||trace.terminal_disposition||''
+    ).toLowerCase();
+    if(traceStatus==='expired'||terminalDisposition==='expired')return 'expired';
     const lifecycleStatus=String(lifecycle.status||'').toLowerCase();
     if(['completed','blocked'].includes(lifecycleStatus))return lifecycleStatus;
     if(lifecycleStatus==='active'){
@@ -16,7 +21,7 @@ function pstackCanonicalState(trace){
       if(phase)return phase;
       return 'active';
     }
-    return String(trace.status||'idle').toLowerCase();
+    return traceStatus||'idle';
   }
   return String(trace||'idle').toLowerCase();
 }
@@ -25,6 +30,7 @@ function pstackTraceStatus(trace){
   const normalized=pstackCanonicalState(trace);
   if(normalized==='ready_for_hirda')return ['READY FOR HIRDA','ready'];
   if(normalized==='completed')return ['COMPLETED','passed'];
+  if(normalized==='expired')return ['EXPIRED','idle'];
   if(normalized==='failed')return ['FAILED','failed'];
   if(normalized==='blocked')return ['BLOCKED','failed'];
   if(normalized==='executing')return ['HIRDA EXECUTING','running'];
@@ -178,7 +184,7 @@ function renderPstackActivity(snapshot){
   const methodologyEvents=traceEvents.filter(event=>String(event.actor||'').toLowerCase()==='pstack');
   const total=totalByTool[trace&&trace.tool]||Math.max(1,methodologyEvents.length);
   const done=methodologyEvents.filter(event=>['passed','ready'].includes(String(event.status||'').toLowerCase())).length;
-  const terminal=traceEvents.some(event=>String(event.phase||'').toLowerCase()==='handoff_ready')||pstackCanonicalState(trace)==='completed';
+  const terminal=traceEvents.some(event=>String(event.phase||'').toLowerCase()==='handoff_ready')||['completed','expired'].includes(pstackCanonicalState(trace));
   const progress=terminal?100:Math.max(0,Math.min(100,Math.round((done/total)*100)));
   const identity=trace&&trace.identity||{};
   const identityText=Object.entries(identity).map(([key,value])=>key+': '+value).join(' · ')||'No external task identity';

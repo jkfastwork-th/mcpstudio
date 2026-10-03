@@ -1019,9 +1019,14 @@ async def _pstack_activity_snapshot(
                     "actor": memory_event.get("actor"),
                 }
 
-    logical_rows = await db.list_sessions(limit=500)
+    canonical_rows = list(await db.list_sessions(limit=500))
+    for lister_name in ("list_gateway_sessions", "list_managed_sessions"):
+        lister = getattr(db, lister_name, None)
+        if callable(lister):
+            canonical_rows.extend(await lister(limit=500))
+
     canonical_tasks: dict[str, tuple[tuple[int, float, str], dict[str, Any]]] = {}
-    for logical in logical_rows:
+    for logical in canonical_rows:
         metadata = logical.get("metadata")
         metadata = metadata if isinstance(metadata, dict) else {}
         task = metadata.get("active_pstack_task")
@@ -1102,11 +1107,19 @@ async def _pstack_activity_snapshot(
             continue
         lifecycle_status = str(lifecycle.get("status") or "").casefold()
         current_phase = str(lifecycle.get("current_phase") or "").casefold()
-        if lifecycle_status == "completed":
+        trace_status = str(trace.get("status") or "").casefold()
+        terminal_disposition = str(
+            lifecycle.get("terminal_disposition")
+            or trace.get("terminal_disposition")
+            or ""
+        ).casefold()
+        if trace_status == "expired" or terminal_disposition == "expired":
+            trace["status"] = "expired"
+        elif lifecycle_status == "completed":
             trace["status"] = "completed"
         elif lifecycle_status == "blocked":
             trace["status"] = "blocked"
-        elif lifecycle_status == "active" and str(trace.get("status") or "").casefold() != "failed":
+        elif lifecycle_status == "active" and trace_status != "failed":
             trace["status"] = "active"
         if current_phase:
             stages = lifecycle.get("stages")
@@ -1141,7 +1154,17 @@ async def _pstack_activity_snapshot(
         key=lambda item: str(item.get("updated_at") or item.get("started_at") or ""),
         reverse=True,
     )
-    active_trace = ordered_traces[0] if ordered_traces else None
+    terminal_trace_states = {"completed", "expired", "failed", "blocked"}
+    active_trace = next(
+        (
+            item
+            for item in ordered_traces
+            if str(item.get("status") or "").casefold() not in terminal_trace_states
+            and str((item.get("lifecycle") or {}).get("status") or "").casefold()
+            not in {"completed", "blocked"}
+        ),
+        None,
+    )
     cursor = max(0, int(since or 0))
     bounded_limit = max(1, min(int(limit or 100), 500))
     visible_events = [

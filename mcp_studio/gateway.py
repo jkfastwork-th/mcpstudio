@@ -849,7 +849,7 @@ class GatewaySessionManager:
             },
             {
                 "name": "mcpstudio_create_session",
-                "description": "Create a dedicated Serena process pinned to one registered workspace and attach this MCP transport by default. Attached engineering sessions are admitted through Pstack; follow the returned workflow directive.",
+                "description": "Create a dedicated Serena process pinned to one registered workspace and attach this MCP transport by default. Passing request opens/adopts a Pstack engineering task; omitting request only creates/attaches the session.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -863,7 +863,7 @@ class GatewaySessionManager:
             },
             {
                 "name": "mcpstudio_use_workspace",
-                "description": "Production-safe shortcut: use a registered workspace key or an approved absolute project path, create/resume its isolated session, attach this transport, and admit engineering work through Pstack. Pass request for the concrete task and follow the returned workflow directive.",
+                "description": "Production-safe shortcut: use a registered workspace key or an approved absolute project path, create/resume its isolated session, and attach this transport. Passing request opens/adopts a Pstack engineering task; omitting request only attaches/resumes the workspace.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -877,7 +877,7 @@ class GatewaySessionManager:
             },
             {
                 "name": "mcpstudio_use_session",
-                "description": "Attach this MCP transport to an existing managed session and rebind engineering work to Pstack. Accepts an id/name or plain-language continuation request. Conversation-local binding and explicit names take precedence; ambiguous cross-session requests fail closed and return candidates. Follow the returned Pstack workflow directive.",
+                "description": "Attach this MCP transport to an existing managed session. Accepts an id/name or plain-language continuation request for resolution. A concrete request may open/adopt a Pstack engineering task; attaching by session alone never creates a task. Conversation-local binding and explicit names take precedence; ambiguous cross-session requests fail closed and return candidates.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -3826,14 +3826,18 @@ class GatewaySessionManager:
                     gateway_session_id, created["id"], actor="chatgpt/mcp"
                 )
                 task_goal = str(args.get("request") or "").strip()
-                if not task_goal:
-                    task_goal = f"Engineering work in {created.get('workspace_key') or created.get('name') or 'workspace'}"
-                pstack_task = await self._open_pstack_gateway_task(
-                    gateway_session_id,
-                    managed_session=attached["managed_session"],
-                    goal=task_goal,
-                )
-                pstack_task = self._require_pstack_admission(pstack_task)
+                if task_goal:
+                    pstack_task = await self._open_pstack_gateway_task(
+                        gateway_session_id,
+                        managed_session=attached["managed_session"],
+                        goal=task_goal,
+                    )
+                    pstack_task = self._require_pstack_admission(pstack_task)
+                else:
+                    pstack_task = await self._active_pstack_gateway_task(
+                        gateway_session_id,
+                        managed_session=attached["managed_session"],
+                    )
             return {
                 "session": created,
                 "attached": bool(attached),
@@ -3856,14 +3860,18 @@ class GatewaySessionManager:
                 actor="chatgpt/mcp",
             )
             task_goal = str(args.get("request") or "").strip()
-            if not task_goal:
-                task_goal = f"Engineering work in {target.get('workspace_key') or target.get('name') or 'workspace'}"
-            pstack_task = await self._open_pstack_gateway_task(
-                gateway_session_id,
-                managed_session=attached["managed_session"],
-                goal=task_goal,
-            )
-            pstack_task = self._require_pstack_admission(pstack_task)
+            if task_goal:
+                pstack_task = await self._open_pstack_gateway_task(
+                    gateway_session_id,
+                    managed_session=attached["managed_session"],
+                    goal=task_goal,
+                )
+                pstack_task = self._require_pstack_admission(pstack_task)
+            else:
+                pstack_task = await self._active_pstack_gateway_task(
+                    gateway_session_id,
+                    managed_session=attached["managed_session"],
+                )
             return {
                 **attached,
                 "pstack_task": pstack_task,
@@ -3900,14 +3908,18 @@ class GatewaySessionManager:
                     actor="chatgpt/mcp",
                 )
             task_goal = natural_request
-            if not task_goal:
-                task_goal = f"Continue engineering work in {target.get('workspace_key') or target.get('name') or 'workspace'}"
-            pstack_task = await self._open_pstack_gateway_task(
-                gateway_session_id,
-                managed_session=attached["managed_session"],
-                goal=task_goal,
-            )
-            pstack_task = self._require_pstack_admission(pstack_task)
+            if task_goal:
+                pstack_task = await self._open_pstack_gateway_task(
+                    gateway_session_id,
+                    managed_session=attached["managed_session"],
+                    goal=task_goal,
+                )
+                pstack_task = self._require_pstack_admission(pstack_task)
+            else:
+                pstack_task = await self._active_pstack_gateway_task(
+                    gateway_session_id,
+                    managed_session=attached["managed_session"],
+                )
             return {
                 **attached,
                 "resolution": {

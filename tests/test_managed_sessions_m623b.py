@@ -1323,8 +1323,43 @@ async def test_phase_c_use_workspace_routes_and_pins_logical_session(tmp_path: P
     async def fake_close(url, upstream): return None
     monkeypatch.setattr(manager, "_open_upstream_session", fake_open)
     monkeypatch.setattr(manager, "_close_upstream_session", fake_close)
-    result = await manager._handle_management_tool(gw["id"], "mcpstudio_use_workspace", {"workspace":"alpha"})
+
+    opened_tasks = []
+
+    async def fake_open_pstack(*_args, **kwargs):
+        opened_tasks.append(dict(kwargs))
+        return {
+            "task_id": "TASK-EXPLICIT",
+            "trace_id": "TRACE-EXPLICIT",
+            "status": "ready_for_hirda",
+        }
+
+    monkeypatch.setattr(manager, "_open_pstack_gateway_task", fake_open_pstack)
+
+    result = await manager._handle_management_tool(
+        gw["id"], "mcpstudio_use_workspace", {"workspace": "alpha"}
+    )
     assert result["managed_session"]["id"] == "ms-alpha"
+    assert result["pstack_task"] is None
+    assert opened_tasks == []
+
+    resumed = await manager._handle_management_tool(
+        gw["id"],
+        "mcpstudio_use_session",
+        {"session": "ms-alpha", "record_handoff": False},
+    )
+    assert resumed["managed_session"]["id"] == "ms-alpha"
+    assert resumed["pstack_task"] is None
+    assert opened_tasks == []
+
+    explicit = await manager._handle_management_tool(
+        gw["id"],
+        "mcpstudio_use_workspace",
+        {"workspace": "alpha", "request": "Fix scheduler ordering"},
+    )
+    assert explicit["pstack_task"]["task_id"] == "TASK-EXPLICIT"
+    assert [item["goal"] for item in opened_tasks] == ["Fix scheduler ordering"]
+
     updated = await db.get_gateway_session(gw["id"])
     logical = await db.get_session(studio["id"])
     assert updated["managed_session_id"] == "ms-alpha"

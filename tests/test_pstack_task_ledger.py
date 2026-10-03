@@ -244,6 +244,33 @@ class _CanonicalSessionSnapshotDb:
         ]
 
 
+class _ExpiredSessionSnapshotDb(_CanonicalSessionSnapshotDb):
+    async def list_sessions(self, limit=500):
+        rows = await super().list_sessions(limit=limit)
+        task = rows[0]["metadata"]["active_pstack_task"]
+        task["task_id"] = "TASK-EXPIRED"
+        task["trace_id"] = "TRACE-EXPIRED"
+        task["goal"] = "Expired task must stay terminal"
+        task["status"] = "expired"
+        task["terminal_disposition"] = "expired"
+        task["lifecycle"]["terminal_disposition"] = "expired"
+        return rows
+
+
+class _GatewayOnlyExpiredSnapshotDb(_ExpiredSessionSnapshotDb):
+    async def list_sessions(self, limit=500):
+        assert limit == 500
+        return []
+
+    async def list_gateway_sessions(self, limit=500):
+        assert limit == 500
+        return await super().list_sessions(limit=limit)
+
+    async def list_managed_sessions(self, limit=500):
+        assert limit == 500
+        return []
+
+
 class _WritableSnapshotDb:
     def __init__(self):
         self.rows = []
@@ -388,6 +415,34 @@ async def test_pstack_snapshot_merges_canonical_gateway_task_when_ledger_has_no_
     assert trace["identity"]["gateway_session_id"] == "gws-canonical"
     assert trace["herdr_tab"]["status"] == "closed"
     assert trace["herdr_tab"]["tab_id"] == "wH:t7"
+
+
+@pytest.mark.asyncio
+async def test_pstack_snapshot_preserves_expired_terminal_state(monkeypatch):
+    database = _ExpiredSessionSnapshotDb()
+    monkeypatch.setattr(main, "db", database)
+    monkeypatch.setattr(main, "_pstack_activity_adapter", lambda: _MemorylessAdapter())
+
+    snapshot = await main._pstack_activity_snapshot(limit=100)
+
+    trace = next(item for item in snapshot["traces"] if item["trace_id"] == "TRACE-EXPIRED")
+    assert trace["task_id"] == "TASK-EXPIRED"
+    assert trace["status"] == "expired"
+    assert trace["lifecycle"]["status"] == "completed"
+    assert snapshot["active_trace"] is None
+
+
+@pytest.mark.asyncio
+async def test_pstack_snapshot_uses_gateway_terminal_state_when_logical_copy_is_missing(monkeypatch):
+    database = _GatewayOnlyExpiredSnapshotDb()
+    monkeypatch.setattr(main, "db", database)
+    monkeypatch.setattr(main, "_pstack_activity_adapter", lambda: _MemorylessAdapter())
+
+    snapshot = await main._pstack_activity_snapshot(limit=100)
+
+    trace = next(item for item in snapshot["traces"] if item["trace_id"] == "TRACE-EXPIRED")
+    assert trace["status"] == "expired"
+    assert snapshot["active_trace"] is None
 
 
 @pytest.mark.asyncio
@@ -1063,6 +1118,8 @@ def test_pstack_ui_exposes_multi_task_ledger():
     assert "HERDR tab" in app
     assert "lifecycleRevision" in app
     assert "BLOCKED" in app
+    assert "EXPIRED" in app
+    assert "terminalDisposition" in app
     assert ".pstack-flow-step.skipped" in css
     assert ".pstack-jev-advisory" in css
     assert "repeat(6,minmax(88px,1fr))" in css
