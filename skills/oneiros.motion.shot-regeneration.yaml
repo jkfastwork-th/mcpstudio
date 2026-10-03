@@ -7,7 +7,7 @@ scope:
   kind: workspace
   value: nova-oracle-desktop
 triggers:
-  - regenerate shot
+  - regenerate this shot
   - regenerate from here
   - regenerate selected shot
   - regenerate only selected shot
@@ -27,6 +27,7 @@ required_capabilities:
   - oneiros.shot_video.generate
   - oneiros.provenance_evidence.record
 policy_hints:
+  - Trigger resolution is advisory; regeneration proceeds only after an affirmative shot-regeneration or anchor-change request.
   - Preserve the exact Character Library and Character Bible identity, outfit, and reference constraints for every affected shot.
   - The anchor is per-shot and user-changeable; resolve the latest anchor selected by the user for the target shot.
   - Regenerate-from-here requires explicit acknowledgement of the affected-shot impact set before generation.

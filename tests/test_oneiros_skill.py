@@ -79,6 +79,18 @@ def test_skill_does_not_apply_outside_its_workspace(registry):
     assert _selected(resolution) == []
 
 
+def test_explanatory_request_does_not_select_regeneration_skill(registry):
+    resolution = registry.resolve(
+        "Explain how to regenerate shot in Oneiros",
+        workspace="nova-oracle-desktop",
+    )
+    # The registry returns workspace-applicable candidates even without a
+    # trigger match; this request must not activate this skill by trigger.
+    matches = _selected(resolution)
+    assert len(matches) == 1
+    assert matches[0].trigger_matches == ()
+
+
 def test_explicit_skill_in_wrong_workspace_is_unresolved(registry):
     resolution = registry.resolve(
         "Regenerate from here",
