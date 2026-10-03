@@ -362,6 +362,8 @@ class SkillRegistry:
             )
             is_explicit = skill.id in explicit_set
             is_advisory = skill.id in advisory
+            if skill.triggers and not trigger_matches and not is_explicit and not is_advisory:
+                continue
             scope_rank = _SCOPE_RANK[skill.scope.kind]
             # The explicit and scope tiers are stronger than advisory hints.
             rank = (int(is_explicit), scope_rank, int(bool(trigger_matches)), len(trigger_matches), int(is_advisory))

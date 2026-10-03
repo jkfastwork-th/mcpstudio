@@ -255,6 +255,63 @@ def test_scope_specific_variant_shadows_less_specific_variant(tmp_path):
     assert domain_result.matches[0].skill.scope == SkillScope("domain", "coding")
 
 
+def test_triggered_skill_requires_matching_trigger_unless_explicit_or_advisory(tmp_path):
+    registry = SkillRegistry()
+    write_manifest(tmp_path, manifest(id="targeted", triggers=["special phrase"]))
+    registry.load_directory(tmp_path)
+
+    unmatched = registry.resolve("ordinary request")
+    assert unmatched.matches == ()
+    assert unmatched.required_capabilities == ()
+
+    explicit = registry.resolve("ordinary request", explicit_skill_ids=["targeted"])
+    assert [match.skill.id for match in explicit.matches] == ["targeted"]
+    assert explicit.matches[0].explicit is True
+    assert explicit.matches[0].trigger_matches == ()
+
+    advisory = registry.resolve("ordinary request", advisory_skill_ids=["targeted"])
+    assert [match.skill.id for match in advisory.matches] == ["targeted"]
+    assert advisory.matches[0].advisory is True
+    assert advisory.matches[0].trigger_matches == ()
+
+
+def test_triggerless_scope_default_is_always_included(tmp_path):
+    registry = SkillRegistry()
+    write_manifest(tmp_path, manifest(id="default", triggers=[]))
+    registry.load_directory(tmp_path)
+
+    result = registry.resolve("ordinary request")
+    assert [match.skill.id for match in result.matches] == ["default"]
+
+
+def test_wrong_scope_explicit_and_advisory_do_not_activate_variant(tmp_path):
+    registry = SkillRegistry()
+    write_manifest(tmp_path, manifest(
+        id="workspace-only", scope={"kind": "workspace", "value": "repo-b"},
+    ))
+    registry.load_directory(tmp_path)
+
+    result = registry.resolve(
+        "ordinary request", workspace="repo-a",
+        explicit_skill_ids=["workspace-only"], advisory_skill_ids=["workspace-only"],
+    )
+    assert result.matches == ()
+    assert result.unresolved_explicit_ids == ("workspace-only",)
+
+
+def test_more_specific_variant_shadows_default_before_activation_filtering(tmp_path):
+    registry = SkillRegistry()
+    write_manifest(tmp_path, manifest(id="same", triggers=[]), filename="global.yaml")
+    write_manifest(tmp_path, manifest(
+        id="same", scope={"kind": "workspace", "value": "repo-a"},
+        triggers=["special phrase"],
+    ), filename="workspace.yaml")
+    registry.load_directory(tmp_path)
+
+    result = registry.resolve("ordinary request", workspace="repo-a")
+    assert result.matches == ()
+
+
 def test_explicit_precedence_and_nonapplicable_explicit_ids_are_reported(tmp_path):
     registry = SkillRegistry()
     write_manifest(tmp_path, manifest(id="global-review"), filename="global.yaml")
@@ -316,11 +373,13 @@ def test_aggregates_unique_capabilities_tools_hints_and_steps_stably(tmp_path):
     registry = SkillRegistry()
     write_manifest(tmp_path, manifest(
         id="alpha", required_capabilities=["read", "write"], required_tools=["git", "tests"],
+        triggers=[],
         policy_hints=["preserve state"], workflow_steps=["inspect", "change"],
         verification_checks=["tests pass"],
     ), filename="alpha.yaml")
     write_manifest(tmp_path, manifest(
         id="beta", required_capabilities=["write", "review"], required_tools=["tests", "lint"],
+        triggers=[],
         policy_hints=["preserve state", "ask first"], workflow_steps=["change", "verify"],
         verification_checks=["tests pass", "lint pass"],
     ), filename="beta.yaml")
