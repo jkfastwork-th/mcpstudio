@@ -141,6 +141,12 @@ def test_rejects_bad_id_scope_and_non_mapping_root(tmp_path):
         SkillRegistry().load_directory(tmp_path)
 
 
+def test_scope_kind_trims_and_casefolds_before_literal_construction(tmp_path):
+    write_manifest(tmp_path, manifest(scope={"kind": " Workspace ", "value": "repo-a"}))
+    loaded, = SkillRegistry().load_directory(tmp_path)
+    assert loaded.scope == SkillScope("workspace", "repo-a")
+
+
 def test_rejects_symlink_manifest_and_oversized_manifest(tmp_path):
     target = write_manifest(tmp_path / "source", manifest())
     link_dir = tmp_path / "links"

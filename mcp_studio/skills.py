@@ -222,12 +222,12 @@ def _parse_manifest(raw: Any, *, source: str) -> SkillDefinition:
     scope_raw = raw.get("scope")
     if not isinstance(scope_raw, Mapping) or set(scope_raw) - {"kind", "value"}:
         raise SkillManifestError("skill_scope_invalid")
-    raw_scope_kind = scope_raw.get("kind")
-    if raw_scope_kind == "global":
+    normalized_scope_kind = str(scope_raw.get("kind") or "").strip().casefold()
+    if normalized_scope_kind == "global":
         scope_kind: Literal["global", "domain", "workspace"] = "global"
-    elif raw_scope_kind == "domain":
+    elif normalized_scope_kind == "domain":
         scope_kind = "domain"
-    elif raw_scope_kind == "workspace":
+    elif normalized_scope_kind == "workspace":
         scope_kind = "workspace"
     else:
         raise SkillManifestError("skill_scope_invalid")
