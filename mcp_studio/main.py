@@ -672,6 +672,38 @@ async def reflex_metrics_status(window: str = "24h", recent: int = 20):
     return reflex_metrics.snapshot(window=window, recent=recent)
 
 
+@app.get("/api/skills")
+async def skills_registry_status():
+    """Return read-only, declarative skill registry data for the Skills page."""
+    state = skill_runtime._snapshot()
+    skills = []
+    for skill in state.registry.snapshot():
+        skills.append({
+            "id": skill.id,
+            "name": skill.name,
+            "version": skill.version,
+            "description": skill.description,
+            "scope": {"kind": skill.scope.kind, "value": skill.scope.value},
+            "triggers": list(skill.triggers),
+            "required_capabilities": list(skill.required_capabilities),
+            "required_tools": list(skill.required_tools),
+            "policy_hints": list(skill.policy_hints),
+            "workflow_steps": list(skill.workflow_steps),
+            "verification_checks": list(skill.verification_checks),
+            "source": "in-memory" if skill.source == "memory" else "manifest",
+            "activation_mode": "scope-default" if not skill.triggers else "triggered",
+        })
+    return {
+        "schema": "hirda-skill-registry-status-v1",
+        "enabled": bool(skill_runtime.enabled),
+        "registry_status": state.status,
+        "error_code": state.error_code,
+        "configured_path": Path(str(skill_runtime.path)).name or ".",
+        "loaded_skill_count": state.loaded_skill_count,
+        "skills": skills,
+    }
+
+
 @app.get("/api/integrations")
 async def integration_registry_status(reconcile: bool = False):
     return await integration_manager.snapshot(reconcile=reconcile)

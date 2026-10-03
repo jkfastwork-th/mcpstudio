@@ -314,6 +314,12 @@ const I18N_TH={
   'No open operational alerts.':'ไม่มีการแจ้งเตือนระบบที่เปิดอยู่'
 
 };
+Object.assign(I18N_TH,{
+  'Skills':'ทักษะ','DECLARATIVE REGISTRY':'ทะเบียนคำแนะนำ','Browse procedural guidance available to HIRDA work resolution.':'ดูคำแนะนำเชิงขั้นตอนที่ HIRDA ใช้ประกอบการแก้ไขงาน',
+  'Refresh skills':'รีเฟรชทักษะ','AVAILABLE SKILLS':'ทักษะที่มี','Registry':'ทะเบียน','Search name, id, or description':'ค้นหาชื่อ ID หรือคำอธิบาย','All scopes':'ทุกขอบเขต','Global':'ส่วนกลาง','Domain':'โดเมน','Workspace':'เวิร์กสเปซ',
+  'Read-only · no execution authority':'อ่านอย่างเดียว · ไม่มีอำนาจสั่งทำงาน','Skills provide declarative context only. HIRDA retains runtime, model, machine, permission, and execution authority. Nothing on this page installs or runs a skill.':'ทักษะให้เฉพาะบริบทแบบประกาศไว้ HIRDA ยังคงมีอำนาจกำหนด runtime, model, machine, permission และการทำงาน หน้านี้ไม่ติดตั้งหรือเรียกใช้ทักษะ',
+  'Loading Skills registry…':'กำลังโหลดทะเบียนทักษะ…','Select a skill to inspect its declared guidance.':'เลือกทักษะเพื่อดูคำแนะนำที่ประกาศไว้','None declared':'ไม่ได้ระบุ','Description':'คำอธิบาย','Triggers':'ตัวกระตุ้น','Capabilities':'ความสามารถ','Tools':'เครื่องมือ','Policy hints':'แนวทางนโยบาย','Workflow':'ขั้นตอนงาน','Verification':'การตรวจสอบ','Activation':'การเปิดใช้','Scope':'ขอบเขต','Source':'แหล่งที่มา','Version':'เวอร์ชัน','Search':'ค้นหา','SKILL DETAILS':'รายละเอียดทักษะ','Unavailable':'ไม่พร้อมใช้งาน','Registry status':'สถานะทะเบียน','Skills could not be loaded. Refresh to try again.':'โหลดทักษะไม่สำเร็จ กดรีเฟรชเพื่อลองอีกครั้ง','No skills match these filters.':'ไม่มีทักษะที่ตรงกับตัวกรอง','No Skills are loaded.':'ไม่มีทักษะที่โหลดไว้','Enabled':'เปิดใช้','Disabled':'ปิดใช้','Loaded':'โหลดแล้ว','Configured path':'พาธที่ตั้งค่า','Scope default':'ค่าเริ่มต้นตามขอบเขต','Scope-default':'ค่าเริ่มต้นตามขอบเขต','Triggered':'ตามตัวกระตุ้น'
+});
 let currentLanguage='en';
 const i18nTextNodes=new WeakMap();
 const i18nAttrs=new WeakMap();
@@ -607,6 +613,7 @@ const viewMeta = {
   sessions:['Capsule Lanes','Capsule Lanes','Inspect capsule state, routing, handoffs, and session history.'],
   agents:['Agents','Agents','Monitor runtime availability, authentication health, rate limits, and active capsule load.'],
   pstack:['Pstack','Pstack Activity','Watch methodology selection and live workflow trace events before HIRDA execution.'],
+  skills:['Skills','Skills','Browse procedural guidance available to HIRDA work resolution.'],
   reflex:['Reflex','Reflex','Observe HIRDA Reflex decisions, JEV teacher agreement, latency, risk, and dataset growth.'],
   actions:['Actions','JEV Action Adapter','Test one shared action schema across Browser, World, and Finance without executing candidates.'],
   workspaces:['Workspaces','Workspaces','Manage approved projects, managed sessions, and workspace safety.'],
@@ -636,6 +643,7 @@ function setView(view, updateHash=true){
     stopPstackActivityStream();
   }
   if(view==='reflex') setTimeout(()=>uiAction(refreshReflexMetrics),0);
+  if(view==='skills') setTimeout(refreshSkillsRegistry,0);
   if(view==='actions') setTimeout(()=>uiAction(refreshActionPlayground),0);
   if(view==='connections') setTimeout(()=>uiAction(refreshOAuthClients),0);
   window.scrollTo({top:0,behavior:'smooth'});
@@ -1043,6 +1051,92 @@ async function refreshReflexMetrics(){
   latestData.reflexMetricsData=metrics;
   renderReflexMetrics(latestData);
   captureAndTranslateText(document.getElementById('reflexMetricsPanel')||document);
+}
+
+let skillsRegistryData=null;
+let skillsSelectedId='';
+let skillsSearchText='';
+let skillsScopeValue='all';
+let skillsRegistryError=false;
+function skillsArray(values){return Array.isArray(values)?values:[];}
+function renderSkillsRegistry(){
+  const summary=document.getElementById('skillsSummary');
+  const list=document.getElementById('skillsList');
+  const detail=document.getElementById('skillsDetailPanel');
+  const count=document.getElementById('skillsResultCount');
+  if(!summary||!list||!detail)return;
+  if(skillsRegistryError){
+    summary.innerHTML=`<article class="skills-summary-card"><span>${esc(tr('Registry'))}</span><strong class="skills-state-error">${esc(tr('Unavailable'))}</strong></article>`;
+    list.innerHTML=`<div class="empty skills-error-state">${esc(tr('Skills could not be loaded. Refresh to try again.'))}</div>`;
+    detail.innerHTML=`<div class="empty">${esc(tr('Skills could not be loaded. Refresh to try again.'))}</div>`;
+    if(count)count.textContent='—';
+    return;
+  }
+  if(!skillsRegistryData){
+    list.innerHTML=`<div class="empty">${esc(tr('Loading Skills registry…'))}</div>`;
+    return;
+  }
+  const skills=skillsArray(skillsRegistryData.skills);
+  const status=String(skillsRegistryData.registry_status||'unknown');
+  const enabled=skillsRegistryData.enabled===true;
+  const triggeredCount=skills.filter(skill=>skill.activation_mode==='triggered').length;
+  const defaultCount=skills.length-triggeredCount;
+  summary.innerHTML=`
+    <article class="skills-summary-card"><span>${esc(tr('Registry status'))}</span><strong class="skills-status-${esc(status)}">${esc(status)}</strong><small>${enabled?esc(tr('Enabled')):esc(tr('Disabled'))}</small></article>
+    <article class="skills-summary-card"><span>${esc(tr('Loaded'))}</span><strong>${esc(skillsRegistryData.loaded_skill_count??skills.length)}</strong></article>
+    <article class="skills-summary-card"><span>${esc(tr('Triggered'))}</span><strong>${esc(triggeredCount)}</strong></article>
+    <article class="skills-summary-card"><span>${esc(tr('Scope-default'))}</span><strong>${esc(defaultCount)}</strong></article>`;
+  const configuredPath=document.getElementById('skillsConfiguredPath');
+  if(configuredPath){
+    const errorSuffix=skillsRegistryData.error_code?` · ${esc(tr('Error'))}: <code>${esc(skillsRegistryData.error_code)}</code>`:'';
+    configuredPath.innerHTML=`${esc(tr('Configured path'))}: <code>${esc(skillsRegistryData.configured_path||'—')}</code>${errorSuffix}`;
+  }
+  const query=skillsSearchText.trim().toLowerCase();
+  const filtered=skills.filter(skill=>{
+    const scope=String(skill.scope?.kind||'');
+    if(skillsScopeValue!=='all'&&scope!==skillsScopeValue)return false;
+    return !query||[skill.id,skill.name,skill.description,skill.version,scope,skill.scope?.value,...skillsArray(skill.triggers)].some(value=>String(value||'').toLowerCase().includes(query));
+  });
+  if(filtered.length && !filtered.some(skill=>skill.id===skillsSelectedId))skillsSelectedId=filtered[0].id;
+  if(!filtered.length)skillsSelectedId='';
+  if(count)count.textContent=`${filtered.length} / ${skills.length}`;
+  if(!skills.length){
+    list.innerHTML=`<div class="empty">${esc(tr('No Skills are loaded.'))}</div>`;
+  }else if(!filtered.length){
+    list.innerHTML=`<div class="empty">${esc(tr('No skills match these filters.'))}</div>`;
+  }else{
+    list.innerHTML=filtered.map(skill=>`<button type="button" class="skills-list-item${skill.id===skillsSelectedId?' selected':''}" data-skill-id="${esc(skill.id)}" aria-pressed="${skill.id===skillsSelectedId?'true':'false'}"><span class="skills-item-heading"><strong>${esc(skill.name)}</strong><small>${esc(skill.version)}</small></span><code>${esc(skill.id)}</code><span class="skills-item-meta">${esc(skill.scope?.kind||'—')}${skill.scope?.value?` · ${esc(skill.scope.value)}`:''} · ${esc(skill.activation_mode||'—')}</span></button>`).join('');
+    list.querySelectorAll('[data-skill-id]').forEach(button=>button.addEventListener('click',()=>{skillsSelectedId=button.dataset.skillId||'';renderSkillsRegistry();}));
+  }
+  const selected=filtered.find(skill=>skill.id===skillsSelectedId);
+  if(!selected){
+    skillsSelectedId='';
+    detail.innerHTML=`<div class="empty">${esc(tr('Select a skill to inspect its declared guidance.'))}</div>`;
+    return;
+  }
+  skillsSelectedId=selected.id;
+  const section=(title,values)=>`<section class="skills-detail-section"><h4>${esc(tr(title))}</h4>${values.length?`<ul>${values.map(value=>`<li>${esc(value)}</li>`).join('')}</ul>`:`<p class="skills-none">${esc(tr('None declared'))}</p>`}</section>`;
+  detail.innerHTML=`<div class="skills-detail-head"><span class="eyebrow">${esc(tr('SKILL DETAILS'))}</span><h3>${esc(selected.name)}</h3><code>${esc(selected.id)}</code></div>
+    <div class="skills-detail-facts"><span><small>${esc(tr('Version'))}</small><strong>${esc(selected.version)}</strong></span><span><small>${esc(tr('Scope'))}</small><strong>${esc(selected.scope?.kind||'—')}${selected.scope?.value?` · ${esc(selected.scope.value)}`:''}</strong></span><span><small>${esc(tr('Activation'))}</small><strong>${esc(tr(selected.activation_mode==='scope-default'?'Scope default':'Triggered'))}</strong></span><span><small>${esc(tr('Source'))}</small><strong>${esc(selected.source||'—')}</strong></span></div>
+    <section class="skills-detail-section"><h4>${esc(tr('Description'))}</h4><p>${esc(selected.description||'')}</p></section>
+    ${section('Triggers',skillsArray(selected.triggers))}${section('Capabilities',skillsArray(selected.required_capabilities))}${section('Tools',skillsArray(selected.required_tools))}${section('Policy hints',skillsArray(selected.policy_hints))}${section('Workflow',skillsArray(selected.workflow_steps))}${section('Verification',skillsArray(selected.verification_checks))}`;
+}
+async function refreshSkillsRegistry(){
+  const list=document.getElementById('skillsList');
+  if(!list)return;
+  skillsRegistryError=false;
+  if(!skillsRegistryData)list.innerHTML=`<div class="empty">${esc(tr('Loading Skills registry…'))}</div>`;
+  try{
+    const data=await getJson('/api/skills');
+    skillsRegistryData=data;
+    skillsRegistryError=false;
+    if(!skillsArray(data.skills).some(skill=>skill.id===skillsSelectedId))skillsSelectedId='';
+    renderSkillsRegistry();
+    captureAndTranslateText(document.querySelector('[data-page="skills"]'));
+  }catch(_error){
+    skillsRegistryError=true;
+    renderSkillsRegistry();
+  }
 }
 
 
@@ -1840,6 +1934,7 @@ async function runGlobalSearch(raw){
     [/(dashboard|home|overview)/,'home'],
     [/(capsule|session|handoff)/,'sessions'],
     [/(agent|claude|codex|hermes)/,'agents'],
+    [/(skill|skills|registry|manifest)/,'skills'],
     [/(action adapter|action schema|action provider|action playground)/,'actions'],
     [/(reflex|jev|decision engine|risk|teacher|agreement)/,'reflex'],
     [/(workspace|project)/,'workspaces'],
@@ -2171,6 +2266,9 @@ document.getElementById('sessionTunnelFilter').addEventListener('change',e=>{ses
 document.getElementById('sessionHistoryToggle').addEventListener('click',()=>{showSessionHistory=!showSessionHistory;if(latestData)renderSessions(latestData);});
 document.getElementById('reflexWindowSelect')?.addEventListener('change',e=>uiAction(async()=>{reflexWindow=e.target.value||'24h';await refreshReflexMetrics();}));
 document.getElementById('reflexRefreshBtn')?.addEventListener('click',()=>uiAction(async()=>{const b=document.getElementById('reflexRefreshBtn');b.disabled=true;b.textContent=tr('Refreshing…');try{await refreshReflexMetrics();}finally{b.disabled=false;b.textContent=tr('Refresh metrics');}}));
+document.getElementById('skillsRefreshBtn')?.addEventListener('click',async e=>{const button=e.currentTarget;button.disabled=true;button.textContent=tr('Refreshing…');try{await refreshSkillsRegistry();}finally{button.disabled=false;button.textContent=tr('Refresh skills');}});
+document.getElementById('skillsSearch')?.addEventListener('input',e=>{skillsSearchText=e.currentTarget.value||'';renderSkillsRegistry();});
+document.getElementById('skillsScopeFilter')?.addEventListener('change',e=>{skillsScopeValue=e.currentTarget.value||'all';renderSkillsRegistry();});
 document.getElementById('actionProviderSelect')?.addEventListener('change',e=>uiAction(()=>loadActionProvider(e.target.value)));
 document.getElementById('actionLoadBtn')?.addEventListener('click',()=>uiAction(async()=>{const b=document.getElementById('actionLoadBtn');b.disabled=true;try{await loadActionProvider();}finally{b.disabled=false;}}));
 document.getElementById('actionEvaluateBtn')?.addEventListener('click',()=>uiAction(async()=>{const b=document.getElementById('actionEvaluateBtn');b.disabled=true;b.textContent='Evaluating…';try{await evaluateActionProvider();}finally{b.disabled=false;b.textContent='Evaluate with JEV';}}));
