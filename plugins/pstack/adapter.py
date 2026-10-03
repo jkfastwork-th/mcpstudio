@@ -14,11 +14,60 @@ from mcp_studio.integrations import IntegrationManifest
 PSTACK_REVISION = "c02fd4922b25ee005f42042463d741d236c2c35e"
 PSTACK_REPOSITORY = "michael-denyer/pstack-claude"
 
+_PLAYBOOK_WORKFLOWS = (
+    "authoring-a-skill",
+    "autonomous-run",
+    "autopilot-full",
+    "autopilot-stack",
+    "babysit",
+    "bug-fix",
+    "eval",
+    "feature",
+    "hillclimb",
+    "investigation",
+    "multi-phase-plan",
+    "opening-a-pr",
+    "orchestrate",
+    "pause-safely",
+    "perf-issue",
+    "prototype",
+    "refactoring",
+    "runtime-forensics",
+    "session-pickup",
+    "shipping",
+    "trace-forensics",
+    "visual-parity",
+    "worktree-cleanup",
+)
 _WORKFLOW_SOURCES = {
-    "bug-fix": "plugins/pstack/skills/poteto-mode/playbooks/bug-fix.md",
-    "feature": "plugins/pstack/skills/poteto-mode/playbooks/feature.md",
-    "review": "plugins/pstack/skills/interrogate/SKILL.md",
+    workflow: f"plugins/pstack/skills/poteto-mode/playbooks/{workflow}.md"
+    for workflow in _PLAYBOOK_WORKFLOWS
 }
+# Review is an interrogation skill upstream rather than a poteto playbook.
+_WORKFLOW_SOURCES["review"] = "plugins/pstack/skills/interrogate/SKILL.md"
+_WORKFLOW_NAMES = tuple(sorted(_WORKFLOW_SOURCES))
+
+_AUTO_ROUTE_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("pause-safely", r"\b(?:pause safely|pause this|park this|safe stop|stop safely|handoff checkpoint)\b"),
+    ("session-pickup", r"\b(?:session pickup|resume(?: this| the)? work|continue from|pick up where|prior session|previous session)\b"),
+    ("worktree-cleanup", r"\b(?:worktree cleanup|clean up (?:the )?worktree|remove stale worktree)\b"),
+    ("visual-parity", r"\b(?:visual parity|pixel[- ]perfect|match (?:the )?screenshot|screenshot parity)\b"),
+    ("perf-issue", r"\b(?:performance|latency|slow(?:down)?|throughput|perf issue|bottleneck)\b"),
+    ("runtime-forensics", r"\b(?:runtime forensics|process forensics|runtime state|live process|service logs?)\b"),
+    ("trace-forensics", r"\b(?:trace forensics|event trace|correlation id|distributed trace|event ledger)\b"),
+    ("prototype", r"\b(?:prototype|proof of concept|poc|spike)\b"),
+    ("refactoring", r"\b(?:refactor|refactoring|restructure|technical debt)\b"),
+    ("investigation", r"\b(?:investigate|investigation|root cause analysis|explain how|understand why)\b"),
+    ("eval", r"\b(?:eval|evaluation|benchmark|scorecard)\b"),
+    ("orchestrate", r"\b(?:orchestrate|orchestration|multi[- ]agent|parallel agents?)\b"),
+    ("opening-a-pr", r"\b(?:open|create|prepare) (?:a )?(?:pull request|pr)\b"),
+    ("shipping", r"\b(?:ship|shipping|release|deploy to production)\b"),
+    ("authoring-a-skill", r"\b(?:author|create|write|build) (?:a )?(?:new )?skill\b"),
+    ("multi-phase-plan", r"\b(?:multi[- ]phase plan|phased plan|implementation roadmap)\b"),
+    ("hillclimb", r"\b(?:hillclimb|hill climb|iterative improvement)\b"),
+    ("babysit", r"\b(?:babysit|watch until|monitor until)\b"),
+    ("autonomous-run", r"\b(?:autonomous run|run autonomously)\b"),
+)
 
 _ROLE_PROFILES = {
     "coordinator": ("coding", "deep"),
@@ -66,7 +115,7 @@ _TOOL_CATALOG = {
             "goal": {"type": "string", "minLength": 1, "maxLength": 120000},
             "workflow": {
                 "type": ["string", "null"],
-                "enum": ["bug-fix", "feature", "review", None],
+                "enum": [*_WORKFLOW_NAMES, None],
                 "default": None,
             },
             "workflow_hint": {
@@ -83,7 +132,7 @@ _TOOL_CATALOG = {
         {
             "workflow": {
                 "type": "string",
-                "enum": ["bug-fix", "feature", "review"],
+                "enum": list(_WORKFLOW_NAMES),
             }
         },
         ["workflow"],
@@ -99,7 +148,7 @@ _TOOL_CATALOG = {
             "task": {"type": "string", "minLength": 1, "maxLength": 120000},
             "workflow": {
                 "type": ["string", "null"],
-                "enum": ["bug-fix", "feature", "review", None],
+                "enum": [*_WORKFLOW_NAMES, None],
                 "default": None,
             },
         },
@@ -351,7 +400,9 @@ class PstackIntegration:
             if explicit not in _WORKFLOW_SOURCES:
                 raise PstackAdapterError("pstack_workflow_invalid")
             return explicit
-        lowered = goal.casefold()
+
+        lowered = str(goal or "").casefold()
+
         review_intent = re.search(
             r"\binterrogate\b|\b(?:review|audit)\s+(?:(?:this|the|my|our|these)\s+)?"
             r"(?:diff|patch|code|changes?|implementation|pull request|pr|design|architecture)\b"
@@ -360,8 +411,27 @@ class PstackIntegration:
         )
         if review_intent:
             return "review"
-        if re.search(r"\b(bug|fix|broken|regression|error|crash|defect)\b", lowered):
+
+        # Specific methodology intents take precedence over generic verbs such
+        # as "build" or "create". This lets "build a prototype" remain a
+        # prototype while ambiguous build/add requests still fall back to feature.
+        for workflow, pattern in _AUTO_ROUTE_PATTERNS:
+            if re.search(pattern, lowered):
+                return workflow
+
+        if re.search(
+            r"\b(?:add|build|create|implement|introduce|expand|extend)\b",
+            lowered,
+        ):
+            return "feature"
+
+        if re.search(
+            r"\b(?:fix|repair|resolve)\b.{0,50}\b(?:bug|crash|error|defect|regression|failure|broken)\b"
+            r"|\b(?:bug|crash|error|defect|regression|failure|broken)\b.{0,50}\b(?:fix|repair|resolve)\b",
+            lowered,
+        ):
             return "bug-fix"
+
         if str(workflow_hint or "").strip().casefold() == "engineering_task":
             return "feature"
         return "feature"
@@ -443,14 +513,23 @@ class PstackIntegration:
             "expected_revision": PSTACK_REVISION,
             "observed_revision": revision,
             "missing_workflows": missing,
+            "supported_workflows": list(_WORKFLOW_NAMES),
+            "playbook_count": len(_PLAYBOOK_WORKFLOWS),
             "runtime_authority": "hirda",
         }
 
     async def certify(self) -> dict[str, Any]:
         samples = {
-            "bug-fix": "Fix the crash when a managed session reconnects.",
-            "feature": "Add a bounded workflow adapter for engineering tasks.",
+            "bug-fix": "Resolve the crash regression in session reconnect.",
+            "feature": "Expand the workflow adapter with a registry.",
             "review": "Review this diff for correctness and maintainability.",
+            "investigation": "Investigate why task ownership drifts across sessions.",
+            "perf-issue": "Diagnose the latency bottleneck in task dispatch.",
+            "refactoring": "Refactor the scheduler ranking module without behavior changes.",
+            "prototype": "Build a prototype for a new routing strategy.",
+            "session-pickup": "Resume this work from the previous session.",
+            "pause-safely": "Pause this task safely and leave a handoff checkpoint.",
+            "visual-parity": "Match the screenshot with pixel-perfect visual parity.",
         }
         routes = {}
         for workflow, goal in samples.items():
@@ -465,12 +544,23 @@ class PstackIntegration:
                 "runtime_neutral": "preferred_runtime"
                 not in request["hirda_request"],
             }
+
+        explicit_loadable = all(
+            self._workflow_path(workflow).is_file()
+            for workflow in _WORKFLOW_NAMES
+        )
         return {
-            "ok": all(
-                item["selected"] == workflow and item["runtime_neutral"]
-                for workflow, item in routes.items()
+            "ok": (
+                explicit_loadable
+                and all(
+                    item["selected"] == workflow and item["runtime_neutral"]
+                    for workflow, item in routes.items()
+                )
             ),
             "routes": routes,
+            "supported_workflows": list(_WORKFLOW_NAMES),
+            "playbook_count": len(_PLAYBOOK_WORKFLOWS),
+            "explicit_loadable": explicit_loadable,
         }
 
     async def status(self) -> dict[str, Any]:

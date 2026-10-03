@@ -40,9 +40,20 @@ def test_pstack_plugin_manifest_is_runtime_neutral_and_preflight_safe():
         ("Fix the reconnect crash regression.", "bug-fix"),
         ("Add a workflow adapter for coding tasks.", "feature"),
         ("Review this PR diff for subtle bugs.", "review"),
+        ("Investigate why session ownership drifts.", "investigation"),
+        ("Diagnose the latency bottleneck in dispatch.", "perf-issue"),
+        ("Refactor the scheduler module without behavior changes.", "refactoring"),
+        ("Build a prototype for a routing strategy.", "prototype"),
+        ("Resume this work from the previous session.", "session-pickup"),
+        ("Pause this task safely and leave a checkpoint.", "pause-safely"),
+        ("Match the screenshot with pixel-perfect visual parity.", "visual-parity"),
+        (
+            "Expand routing beyond bug-fix/feature/review without changing runtime authority.",
+            "feature",
+        ),
     ],
 )
-async def test_three_pstack_workflows_route_without_pinning_runtime(goal, expected):
+async def test_pstack_workflows_route_without_pinning_runtime(goal, expected):
     module = _load_module()
     adapter = module.PstackIntegration(repository_root=ROOT)
 
@@ -99,7 +110,7 @@ async def test_role_translation_delegates_runtime_authority_to_hirda(
 
 
 @pytest.mark.asyncio
-async def test_pstack_adapter_validates_pinned_upstream_and_certifies_three_routes():
+async def test_pstack_adapter_validates_pinned_upstream_and_certifies_registry_routes():
     module = _load_module()
     adapter = module.PstackIntegration(repository_root=ROOT)
 
@@ -109,8 +120,42 @@ async def test_pstack_adapter_validates_pinned_upstream_and_certifies_three_rout
     assert validation["ok"] is True
     assert validation["observed_revision"] == module.PSTACK_REVISION
     assert validation["missing_workflows"] == []
+    assert validation["playbook_count"] == 23
+    assert set(validation["supported_workflows"]) == set(module._WORKFLOW_NAMES)
     assert certification["ok"] is True
-    assert set(certification["routes"]) == {"bug-fix", "feature", "review"}
+    assert certification["explicit_loadable"] is True
+    assert certification["playbook_count"] == 23
+    assert set(certification["supported_workflows"]) == set(module._WORKFLOW_NAMES)
+    assert {
+        "bug-fix",
+        "feature",
+        "review",
+        "investigation",
+        "perf-issue",
+        "refactoring",
+        "prototype",
+        "session-pickup",
+        "pause-safely",
+        "visual-parity",
+    } <= set(certification["routes"])
+
+
+@pytest.mark.asyncio
+async def test_every_registered_pstack_workflow_loads_from_pinned_upstream():
+    module = _load_module()
+    adapter = module.PstackIntegration(repository_root=ROOT)
+
+    for workflow in module._WORKFLOW_NAMES:
+        loaded = await adapter.call_tool(
+            "load_workflow",
+            {"workflow": workflow},
+            context={"managed_session_id": "registry-cert"},
+        )
+        assert loaded["workflow"] == workflow
+        assert loaded["methodology"].strip()
+        assert loaded["source"]["repository"] == module.PSTACK_REPOSITORY
+        assert loaded["source"]["revision"] == module.PSTACK_REVISION
+        assert loaded["source"]["path"] == module._WORKFLOW_SOURCES[workflow]
 
 
 @pytest.mark.asyncio
