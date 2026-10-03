@@ -405,6 +405,22 @@ class IntegrationManager:
                 names[prefix + raw_name] = (integration_id, raw_name)
         self._backend_name_map = names
 
+    @staticmethod
+    def _provider_precedence(item: dict[str, Any]) -> tuple[bool, bool, int, str]:
+        routing = item.get("routing")
+        routing = routing if isinstance(routing, dict) else {}
+        fallback_only = bool(routing.get("fallback_only"))
+        try:
+            priority = int(routing.get("priority", 50))
+        except (TypeError, ValueError):
+            priority = 50
+        return (
+            not bool(item.get("available")),
+            fallback_only,
+            priority,
+            str(item.get("id") or ""),
+        )
+
     def capability_providers(self, capability: str) -> list[dict[str, Any]]:
         """Return every integration declaring a provider-neutral capability.
 
@@ -449,7 +465,7 @@ class IntegrationManager:
                 "routing": dict(manifest.routing),
                 "metadata": dict(manifest.metadata),
             })
-        providers.sort(key=lambda item: (not bool(item["available"]), str(item["id"])))
+        providers.sort(key=self._provider_precedence)
         return providers
 
     def tool_providers(self, tool_name: str) -> list[dict[str, Any]]:
@@ -483,8 +499,9 @@ class IntegrationManager:
                         "raw_name": raw_name,
                         "permission": manifest.permissions.get(raw_name),
                     },
+                    "routing": dict(manifest.routing),
                 })
-        matches.sort(key=lambda item: (not bool(item["available"]), str(item["id"])))
+        matches.sort(key=self._provider_precedence)
         return matches
 
     def backend_tools(self) -> list[dict[str, Any]]:
@@ -1056,6 +1073,8 @@ class DesktopCommanderIntegrationAdapter:
                 "routing": {
                     "mode": "machine-control-backend",
                     "preferred_lanes": ["hermes", "codex", "claude"],
+                    "priority": 100,
+                    "fallback_only": True,
                 },
                 "metadata": {
                     "backend_capability": True,
@@ -1127,7 +1146,11 @@ class HirdaNativeComputerIntegrationAdapter:
                 "tools": list(NATIVE_COMPUTER_PERMISSIONS),
                 "permissions": dict(NATIVE_COMPUTER_PERMISSIONS),
                 "health": {"type": "native-provider"},
-                "routing": {"mode": "machine-control-backend", "preferred_lanes": ["hermes", "codex", "claude"]},
+                "routing": {
+                    "mode": "machine-control-backend",
+                    "preferred_lanes": ["hermes", "codex", "claude"],
+                    "priority": 10,
+                },
                 "metadata": {"backend_capability": True, "workspace_scope_enforced": True, "process_ownership_enforced": True, "permission_router": "hirda"},
             }
         )

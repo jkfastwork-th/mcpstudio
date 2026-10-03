@@ -106,6 +106,34 @@ async def test_manager_collapses_integration_into_single_ready_lifecycle():
     assert snapshot["blocked_count"] == 0
 
 
+def test_provider_precedence_prefers_primary_before_fallback():
+    providers = [
+        {
+            "id": "desktop-commander",
+            "available": True,
+            "routing": {"priority": 100, "fallback_only": True},
+        },
+        {
+            "id": "hirda-native-computer",
+            "available": True,
+            "routing": {"priority": 10},
+        },
+        {
+            "id": "unavailable-primary",
+            "available": False,
+            "routing": {"priority": 1},
+        },
+    ]
+
+    ordered = sorted(providers, key=IntegrationManager._provider_precedence)
+
+    assert [item["id"] for item in ordered] == [
+        "hirda-native-computer",
+        "desktop-commander",
+        "unavailable-primary",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_manager_reports_exact_validation_failure_stage():
     manager = IntegrationManager()
