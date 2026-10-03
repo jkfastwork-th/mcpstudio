@@ -405,6 +405,88 @@ class IntegrationManager:
                 names[prefix + raw_name] = (integration_id, raw_name)
         self._backend_name_map = names
 
+    def capability_providers(self, capability: str) -> list[dict[str, Any]]:
+        """Return every integration declaring a provider-neutral capability.
+
+        This is discovery only: actual invocation still passes through HIRDA's
+        existing permission and backend routing gates.
+        """
+        capability_key = str(capability or "").strip().casefold()
+        if not capability_key:
+            return []
+        self._rebuild_backend_name_map()
+        providers: list[dict[str, Any]] = []
+        for integration_id in sorted(self._integrations):
+            registration = self._integrations[integration_id]
+            manifest = registration.adapter.manifest
+            declared = {str(item).strip().casefold() for item in manifest.capabilities}
+            if capability_key not in declared:
+                continue
+            prefix = self._backend_prefix(integration_id)
+            tools: list[dict[str, Any]] = []
+            for raw_name in manifest.tools:
+                exposed_name = prefix + raw_name
+                tools.append({
+                    "name": exposed_name,
+                    "raw_name": raw_name,
+                    "permission": manifest.permissions.get(raw_name),
+                    "available": exposed_name in self._backend_name_map,
+                })
+            available = bool(
+                registration.stage == "ready"
+                and not registration.blocked
+                and any(item["available"] for item in tools)
+            )
+            providers.append({
+                "id": integration_id,
+                "name": manifest.name,
+                "source": registration.source,
+                "stage": registration.stage,
+                "blocked": bool(registration.blocked),
+                "available": available,
+                "capabilities": list(manifest.capabilities),
+                "tools": tools,
+                "routing": dict(manifest.routing),
+                "metadata": dict(manifest.metadata),
+            })
+        providers.sort(key=lambda item: (not bool(item["available"]), str(item["id"])))
+        return providers
+
+    def tool_providers(self, tool_name: str) -> list[dict[str, Any]]:
+        """Resolve an exposed or legacy raw tool name to provider candidates."""
+        requested = str(tool_name or "").strip()
+        if not requested:
+            return []
+        self._rebuild_backend_name_map()
+        matches: list[dict[str, Any]] = []
+        for integration_id in sorted(self._integrations):
+            registration = self._integrations[integration_id]
+            manifest = registration.adapter.manifest
+            prefix = self._backend_prefix(integration_id)
+            for raw_name in manifest.tools:
+                exposed_name = prefix + raw_name
+                if requested not in {raw_name, exposed_name}:
+                    continue
+                matches.append({
+                    "id": integration_id,
+                    "name": manifest.name,
+                    "source": registration.source,
+                    "stage": registration.stage,
+                    "blocked": bool(registration.blocked),
+                    "available": bool(
+                        registration.stage == "ready"
+                        and not registration.blocked
+                        and exposed_name in self._backend_name_map
+                    ),
+                    "tool": {
+                        "name": exposed_name,
+                        "raw_name": raw_name,
+                        "permission": manifest.permissions.get(raw_name),
+                    },
+                })
+        matches.sort(key=lambda item: (not bool(item["available"]), str(item["id"])))
+        return matches
+
     def backend_tools(self) -> list[dict[str, Any]]:
         self._rebuild_backend_name_map()
         output: list[dict[str, Any]] = []

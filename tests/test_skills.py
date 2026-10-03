@@ -373,13 +373,13 @@ def test_aggregates_unique_capabilities_tools_hints_and_steps_stably(tmp_path):
     registry = SkillRegistry()
     write_manifest(tmp_path, manifest(
         id="alpha", required_capabilities=["read", "write"], required_tools=["git", "tests"],
-        triggers=[],
+        runtime_constraints=["computer.team", "gpu.optional"], triggers=[],
         policy_hints=["preserve state"], workflow_steps=["inspect", "change"],
         verification_checks=["tests pass"],
     ), filename="alpha.yaml")
     write_manifest(tmp_path, manifest(
         id="beta", required_capabilities=["write", "review"], required_tools=["tests", "lint"],
-        triggers=[],
+        runtime_constraints=["gpu.optional", "network.egress"], triggers=[],
         policy_hints=["preserve state", "ask first"], workflow_steps=["change", "verify"],
         verification_checks=["tests pass", "lint pass"],
     ), filename="beta.yaml")
@@ -388,6 +388,7 @@ def test_aggregates_unique_capabilities_tools_hints_and_steps_stably(tmp_path):
 
     assert result.required_capabilities == ("read", "write", "review")
     assert result.required_tools == ("git", "tests", "lint")
+    assert result.runtime_constraints == ("computer.team", "gpu.optional", "network.egress")
     assert result.policy_hints == ("preserve state", "ask first")
     assert result.workflow_steps == ("inspect", "change", "verify")
     assert result.verification_checks == ("tests pass", "lint pass")

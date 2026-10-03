@@ -20,8 +20,8 @@ _EXECUTABLE_KEYS = {"code", "executable", "adapter", "command", "commands", "scr
 _SECRET_KEY = re.compile(r"(?:secret|token|password|credential|authorization|api[_-]?key|private[_-]?key)", re.I)
 _TOP_LEVEL_KEYS = {
     "schema", "id", "name", "version", "description", "scope", "triggers",
-    "required_capabilities", "required_tools", "policy_hints", "workflow_steps",
-    "verification_checks", "metadata",
+    "required_capabilities", "required_tools", "runtime_constraints", "policy_hints",
+    "workflow_steps", "verification_checks", "metadata",
 }
 _SCOPE_RANK = {"global": 0, "domain": 1, "workspace": 2}
 _GLOBAL_STOP_WORDS = {
@@ -66,6 +66,7 @@ class SkillDefinition:
     triggers: tuple[str, ...] = ()
     required_capabilities: tuple[str, ...] = ()
     required_tools: tuple[str, ...] = ()
+    runtime_constraints: tuple[str, ...] = ()
     policy_hints: tuple[str, ...] = ()
     workflow_steps: tuple[str, ...] = ()
     verification_checks: tuple[str, ...] = ()
@@ -81,8 +82,8 @@ class SkillDefinition:
             if not str(getattr(self, name) or "").strip():
                 raise ValueError(f"{name}_required")
         for name in (
-            "triggers", "required_capabilities", "required_tools", "policy_hints",
-            "workflow_steps", "verification_checks",
+            "triggers", "required_capabilities", "required_tools", "runtime_constraints",
+            "policy_hints", "workflow_steps", "verification_checks",
         ):
             values = tuple(getattr(self, name))
             normalized = [normalize_goal(value) for value in values]
@@ -113,6 +114,7 @@ class SkillResolution:
     unresolved_explicit_ids: tuple[str, ...]
     required_capabilities: tuple[str, ...]
     required_tools: tuple[str, ...]
+    runtime_constraints: tuple[str, ...]
     policy_hints: tuple[str, ...]
     workflow_steps: tuple[str, ...]
     verification_checks: tuple[str, ...]
@@ -247,6 +249,7 @@ def _parse_manifest(raw: Any, *, source: str) -> SkillDefinition:
         triggers=_string_list(raw.get("triggers"), "triggers"),
         required_capabilities=_string_list(raw.get("required_capabilities"), "required_capabilities"),
         required_tools=_string_list(raw.get("required_tools"), "required_tools"),
+        runtime_constraints=_string_list(raw.get("runtime_constraints"), "runtime_constraints"),
         policy_hints=_string_list(raw.get("policy_hints"), "policy_hints"),
         workflow_steps=_string_list(raw.get("workflow_steps"), "workflow_steps"),
         verification_checks=_string_list(raw.get("verification_checks"), "verification_checks"),
@@ -378,6 +381,7 @@ class SkillRegistry:
             unresolved_explicit_ids=unresolved,
             required_capabilities=_aggregate(matches, "required_capabilities"),
             required_tools=_aggregate(matches, "required_tools"),
+            runtime_constraints=_aggregate(matches, "runtime_constraints"),
             policy_hints=_aggregate(matches, "policy_hints"),
             workflow_steps=_aggregate(matches, "workflow_steps"),
             verification_checks=_aggregate(matches, "verification_checks"),
