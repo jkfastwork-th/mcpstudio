@@ -848,7 +848,7 @@ async def test_rejected_pstack_dispatch_is_retired_and_requeued():
         "task_id": "TASK-OLD",
         "trace_id": "TRACE-OLD",
         "goal": "Continue existing work",
-        "status": "running",
+        "status": "blocked",
         "work_id": old["id"],
         "workflow_directive": {"prompt": "continue"},
         "managed_session_id": "ms-1",

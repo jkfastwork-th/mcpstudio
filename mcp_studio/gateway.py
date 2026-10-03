@@ -3294,8 +3294,14 @@ class GatewaySessionManager:
         if not task_id or not trace_id:
             return task_value
 
-        terminal = {"completed", "expired", "failed", "blocked", "cancelled"}
-        if str(task_value.get("status") or "").strip().casefold() in terminal:
+        lifecycle = task_value.get("lifecycle")
+        lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+        terminal = {"completed", "expired", "failed", "cancelled"}
+        if (
+            str(task_value.get("status") or "").strip().casefold() in terminal
+            or str(lifecycle.get("status") or "").strip().casefold()
+            in {"completed", "blocked"}
+        ):
             return task_value
 
         existing_work_id = str(task_value.get("work_id") or "").strip()
@@ -3466,7 +3472,7 @@ class GatewaySessionManager:
             lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
             task_status = str(task.get("status") or "").strip().casefold()
             if (
-                task_status in {"completed", "expired", "failed", "blocked", "cancelled"}
+                task_status in {"completed", "expired", "failed", "cancelled"}
                 or str(lifecycle.get("status") or "").strip().casefold()
                 in {"completed", "blocked"}
             ):
