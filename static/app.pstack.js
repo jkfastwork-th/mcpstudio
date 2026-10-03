@@ -35,7 +35,7 @@ function pstackTraceStatus(trace){
   if(normalized==='blocked')return ['BLOCKED','failed'];
   if(normalized==='executing')return ['HIRDA EXECUTING','running'];
   if(normalized==='planned')return ['HIRDA PLANNED','ready'];
-  if(['analyze','plan','implement','review','verify','done'].includes(normalized))return [normalized.toUpperCase(),normalized==='done'?'passed':'running'];
+  if(['analyze','plan','implement','review','verify','done','admitted','working','verified','terminal'].includes(normalized))return [normalized.toUpperCase(),normalized==='done'?'passed':'running'];
   if(normalized==='active')return ['ACTIVE','running'];
   if(normalized==='running')return ['RUNNING','running'];
   return [normalized.toUpperCase(),'idle'];
@@ -78,22 +78,55 @@ function pstackFlowSteps(trace, events){
     .filter(stage=>stage&&stage.phase)
     .map(stage=>[String(stage.phase).toLowerCase(),String(stage.status||'pending').toLowerCase()]));
   const lifecycleStatus=String(lifecycle.status||'').toLowerCase();
+  const lifecycleSchema=String(lifecycle.schema||'').toLowerCase();
   const currentPhase=String(lifecycle.current_phase||'').toLowerCase();
   const canonicalCompleted=lifecycleStatus==='completed'||pstackCanonicalState(trace)==='completed';
   const failed=events.some(event=>String(event.status||'').toLowerCase()==='failed')
     ||pstackCanonicalState(trace)==='failed';
-  const pstackDone=phases.has('handoff_ready');
   const pstackSeen=actors.has('pstack');
-
-  const hirdaDone=phases.has('hirda_execution_completed')||canonicalCompleted;
-  const hirdaSeen=actors.has('hirda')||lifecycleStages.length>0;
   const toolStarted=phases.has('tool_started')
-    ||['implement','review','verify','done'].includes(currentPhase);
+    ||['implement','review','verify','done','working','verified','terminal'].includes(currentPhase);
   const toolDone=phases.has('tool_completed')
     ||phases.has('hirda_execution_completed')
     ||['passed','failed'].includes(stageByPhase.implement)
-    ||['review','verify','done'].includes(currentPhase)
+    ||['passed','failed'].includes(stageByPhase.working)
+    ||['review','verify','done','verified','terminal'].includes(currentPhase)
     ||canonicalCompleted;
+
+  const isMinimalV2=lifecycleSchema==='hirda-pstack-lifecycle-v2'
+    ||lifecycleStages.some(stage=>['admitted','working','verified','terminal'].includes(String(stage&&stage.phase||'').toLowerCase()));
+  if(isMinimalV2){
+    const admittedDone=stageByPhase.admitted==='passed'
+      ||['working','verified','terminal'].includes(currentPhase)
+      ||canonicalCompleted;
+    const admittedActive=stageByPhase.admitted==='active'||currentPhase==='admitted';
+    const workingDone=stageByPhase.working==='passed'
+      ||['verified','terminal'].includes(currentPhase)
+      ||canonicalCompleted;
+    const workingActive=stageByPhase.working==='active'||currentPhase==='working';
+    const verifiedDone=stageByPhase.verified==='passed'||currentPhase==='terminal'||canonicalCompleted;
+    const verifiedActive=stageByPhase.verified==='active'||currentPhase==='verified';
+    const terminalDone=stageByPhase.terminal==='passed'||canonicalCompleted;
+    const terminalActive=stageByPhase.terminal==='active'||currentPhase==='terminal';
+    const steps=[
+      {label:'Task',state:trace?'done':'waiting'},
+      {label:'Admitted',state:admittedDone?'done':(admittedActive?'active':'waiting')},
+      {label:'PStack / Working',state:workingDone?'done':((workingActive||pstackSeen)?'active':'waiting')},
+      {label:'Runtime / Tools',state:toolDone?'done':(toolStarted?'active':'waiting')},
+      {label:'Verified',state:verifiedDone?'done':(verifiedActive?'active':'waiting')},
+      {label:'Terminal',state:terminalDone?'done':(terminalActive?'active':'waiting')},
+    ];
+    if(failed&&!canonicalCompleted){
+      const activeIndex=[...steps].reverse().findIndex(step=>step.state!=='waiting');
+      const index=activeIndex<0?0:steps.length-1-activeIndex;
+      steps[index]={...steps[index],state:'failed'};
+    }
+    return steps;
+  }
+
+  const pstackDone=phases.has('handoff_ready');
+  const hirdaDone=phases.has('hirda_execution_completed')||canonicalCompleted;
+  const hirdaSeen=actors.has('hirda')||lifecycleStages.length>0;
   const downstreamSeen=hirdaSeen||hirdaDone||toolStarted||toolDone;
   const hirdaReached=hirdaSeen||hirdaDone||toolStarted||toolDone;
   const verifyStatus=stageByPhase.verify||'pending';
@@ -106,7 +139,6 @@ function pstackFlowSteps(trace, events){
   const steps=[
     {label:'Task',state:trace?'done':'waiting'},
     {label:'Pstack',state:pstackDone?'done':(pstackSeen?'active':(downstreamSeen?'skipped':'waiting'))},
-
     {label:'HIRDA',state:hirdaDone?'done':(hirdaReached?'active':'waiting')},
     {label:'Runtime / Tools',state:toolDone?'done':(toolStarted?'active':'waiting')},
     {label:'Verify',state:verifyDone?'done':(verifyActive?'active':'waiting')},

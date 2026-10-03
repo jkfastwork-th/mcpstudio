@@ -774,13 +774,17 @@ async def test_gateway_task_envelope_persists_trace_and_tool_activity():
     assert task["trace_id"] == "TRACE-GW"
     assert task["workspace_key"] == "mcp-studio"
     assert task["status"] == "ready_for_hirda"
-    assert task["lifecycle"]["current_phase"] == "analyze"
+    assert task["lifecycle"]["schema"] == "hirda-pstack-lifecycle-v2"
+    assert task["lifecycle"]["current_phase"] == "admitted"
     assert task["lifecycle"]["status"] == "active"
+    assert task["lifecycle"]["orchestration_owner"] == "hirda"
+    assert task["lifecycle"]["methodology_owner"] == "pstack"
     assert task["workflow_directive"]["capability"] == "coding"
     assert task["workflow_directive"]["context"]["workflow_provider"] == "pstack"
     assert gateway.integrations.calls[0][1]["workflow_hint"] == "engineering_task"
-    assert "HIRDA PSTACK LIFECYCLE CONTROL" in task["workflow_directive"]["prompt"]
-    assert "mcpstudio_pstack_checkpoint" in task["workflow_directive"]["prompt"]
+    assert "HIRDA PSTACK ORCHESTRATION CONTROL" in task["workflow_directive"]["prompt"]
+    assert "PStack owns the engineering methodology" in task["workflow_directive"]["prompt"]
+    assert "Admitted -> Working -> Verified -> Terminal" in task["workflow_directive"]["prompt"]
     assert "PSTACK METHODOLOGY" in task["workflow_directive"]["prompt"]
     assert gateway.db.metadata["active_pstack_task"]["task_id"] == task["task_id"]
     assert gateway.db.logical_metadata["active_pstack_task"]["trace_id"] == "TRACE-GW"
@@ -853,13 +857,10 @@ async def test_pstack_task_owns_disposable_herdr_tab_until_done():
         tool_name="find_symbol",
         tool_class="read",
         status="passed",
-        detail="Analyzed HERDR task-tab ownership.",
+        detail="Inspected HERDR task-tab ownership before admission.",
     )
     task = await gateway._checkpoint_active_pstack_task(
-        "gws-1", phase="analyze", status="passed", evidence="Analyze complete"
-    )
-    task = await gateway._checkpoint_active_pstack_task(
-        "gws-1", phase="plan", status="passed", evidence="Plan complete"
+        "gws-1", phase="admitted", status="passed", evidence="Admission complete"
     )
     task = await gateway._record_pstack_lifecycle_tool_evidence(
         "gws-1",
@@ -867,21 +868,10 @@ async def test_pstack_task_owns_disposable_herdr_tab_until_done():
         tool_name="replace_content",
         tool_class="write",
         status="passed",
-        detail="Implemented HERDR task-tab lifecycle.",
+        detail="PStack methodology implemented HERDR task-tab lifecycle.",
     )
     task = await gateway._checkpoint_active_pstack_task(
-        "gws-1", phase="implement", status="passed", evidence="Implement complete"
-    )
-    task = await gateway._record_pstack_lifecycle_tool_evidence(
-        "gws-1",
-        managed_session={"id": "ms-1", "workspace_key": "mcp-studio"},
-        tool_name="find_symbol",
-        tool_class="read",
-        status="passed",
-        detail="Reviewed HERDR task-tab lifecycle.",
-    )
-    task = await gateway._checkpoint_active_pstack_task(
-        "gws-1", phase="review", status="passed", evidence="Review complete"
+        "gws-1", phase="working", status="passed", evidence="Working complete"
     )
     task = await gateway._record_pstack_lifecycle_tool_evidence(
         "gws-1",
@@ -892,10 +882,10 @@ async def test_pstack_task_owns_disposable_herdr_tab_until_done():
         detail="Verified HERDR task-tab lifecycle.",
     )
     task = await gateway._checkpoint_active_pstack_task(
-        "gws-1", phase="verify", status="passed", evidence="Verify complete"
+        "gws-1", phase="verified", status="passed", evidence="Verification complete"
     )
     task = await gateway._checkpoint_active_pstack_task(
-        "gws-1", phase="done", status="passed", evidence="Done"
+        "gws-1", phase="terminal", status="passed", evidence="Terminal"
     )
 
     assert task["status"] == "completed"
@@ -1002,33 +992,41 @@ async def test_gateway_pstack_checkpoint_persists_enforced_lifecycle():
         detail="Inspected the affected subsystem.",
     )
     assert task is not None
-    assert task["lifecycle"]["current_phase"] == "analyze"
+    assert task["lifecycle"]["current_phase"] == "admitted"
 
     task = await gateway._checkpoint_active_pstack_task(
         "gws-1",
-        phase="analyze",
+        phase="admitted",
         status="passed",
-        evidence="Inspected the gateway and identified the workflow boundary.",
+        evidence="HIRDA admitted the task after inspection.",
     )
-    assert task["lifecycle"]["current_phase"] == "plan"
+    assert task["lifecycle"]["current_phase"] == "working"
 
+    task = await gateway._record_pstack_lifecycle_tool_evidence(
+        "gws-1",
+        managed_session={"id": "ms-1", "workspace_key": "mcp-studio"},
+        tool_name="replace_content",
+        tool_class="write",
+        status="passed",
+        detail="PStack methodology produced implementation evidence.",
+    )
     task = await gateway._checkpoint_active_pstack_task(
         "gws-1",
-        phase="plan",
+        phase="working",
         status="passed",
-        evidence="Plan the lifecycle state, gateway enforcement, and regression tests.",
+        evidence="PStack methodology work completed.",
     )
-    assert task["lifecycle"]["current_phase"] == "implement"
-    assert gateway.db.metadata["active_pstack_task"]["lifecycle"]["current_phase"] == "implement"
-    assert gateway.db.logical_metadata["active_pstack_task"]["lifecycle"]["current_phase"] == "implement"
+    assert task["lifecycle"]["current_phase"] == "verified"
+    assert gateway.db.metadata["active_pstack_task"]["lifecycle"]["current_phase"] == "verified"
+    assert gateway.db.logical_metadata["active_pstack_task"]["lifecycle"]["current_phase"] == "verified"
 
     checkpoint_events = [
         item for item in gateway.db.events
         if item[0] == "pstack.lifecycle.checkpoint"
     ]
     assert [item[2]["data"]["phase"] for item in checkpoint_events] == [
-        "lifecycle_analyze_passed",
-        "lifecycle_plan_passed",
+        "lifecycle_admitted_passed",
+        "lifecycle_working_passed",
     ]
 
 
@@ -1143,7 +1141,8 @@ async def test_gateway_opens_new_task_after_completed_same_goal():
     assert task is not None
     assert task["task_id"] != "TASK-DONE"
     assert task["trace_id"] == "TRACE-GW"
-    assert task["lifecycle"]["current_phase"] == "analyze"
+    assert task["lifecycle"]["schema"] == "hirda-pstack-lifecycle-v2"
+    assert task["lifecycle"]["current_phase"] == "admitted"
 
 
 @pytest.mark.asyncio
@@ -1170,7 +1169,8 @@ async def test_gateway_resumed_task_creates_new_lineage_without_reusing_lifecycl
     assert task["resumed_from_trace_id"] == "TRACE-OLD"
     assert task["resume_context"]["last_phase"] == "verify"
     assert task["lifecycle"]["status"] == "active"
-    assert task["lifecycle"]["current_phase"] == "analyze"
+    assert task["lifecycle"]["schema"] == "hirda-pstack-lifecycle-v2"
+    assert task["lifecycle"]["current_phase"] == "admitted"
     assert gateway.integrations.calls[0][2]["resume_context"]["task_id"] == "TASK-OLD"
     assert task["workflow_directive"]["context"]["resume_context"]["trace_id"] == "TRACE-OLD"
     assert "HIRDA PSTACK RESUME CONTEXT" in task["workflow_directive"]["prompt"]
@@ -1358,14 +1358,14 @@ def test_pstack_ui_exposes_multi_task_ledger():
     assert "historyTraces" in app
     assert "HIRDA STACK FLOW" in app
     assert "Task flow overview" in app
-    for label in ("Task", "Pstack", "HIRDA", "Runtime / Tools", "Verify", "Done"):
+    for label in ("Task", "Admitted", "PStack / Working", "Runtime / Tools", "Verified", "Terminal"):
         assert label in app
+    for legacy_label in ("Pstack", "HIRDA", "Verify", "Done"):
+        assert legacy_label in app
+    assert "hirda-pstack-lifecycle-v2" in app
     assert "{label:'JEV'" not in app
     assert "JEV advisory" in app
     assert "HIRDA remains routing and action authority" in app
-    assert "downstreamSeen?'skipped':'waiting'" in app
-    assert "const hirdaReached=hirdaSeen||hirdaDone||toolStarted||toolDone" in app
-    assert "hirdaDone?'done':(hirdaReached?'active':'waiting')" in app
     assert "lifecycleStages" in app
     assert "stage&&stage.phase" in app
     assert "pstackCanonicalState" in app

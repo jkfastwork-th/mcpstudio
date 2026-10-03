@@ -1,15 +1,19 @@
 import pytest
 
 from mcp_studio.pstack_lifecycle import (
+    PSTACK_LIFECYCLE_SCHEMA,
+    PSTACK_LIFECYCLE_SCHEMA_V1,
     PstackLifecycleError,
     checkpoint,
+    ensure_lifecycle,
+    legacy_lifecycle_for_workflow,
     lifecycle_for_workflow,
     record_tool_evidence,
     workflow_gate,
 )
 
 
-def _pass_analyze(lifecycle):
+def _pass_admitted(lifecycle):
     lifecycle = record_tool_evidence(
         lifecycle,
         tool="find_symbol",
@@ -19,91 +23,60 @@ def _pass_analyze(lifecycle):
     )
     return checkpoint(
         lifecycle,
-        phase="analyze",
+        phase="admitted",
         status="passed",
-        evidence="Inspected the affected subsystem and identified the change boundary.",
+        evidence="HIRDA admitted the task after inspecting the affected subsystem.",
     )
 
 
-def test_feature_lifecycle_enforces_plan_before_writes_and_verify_before_done():
+def test_v2_lifecycle_delegates_methodology_to_pstack_inside_working():
     lifecycle = lifecycle_for_workflow("feature")
-    assert lifecycle["current_phase"] == "analyze"
+    assert lifecycle["schema"] == PSTACK_LIFECYCLE_SCHEMA
+    assert lifecycle["orchestration_owner"] == "hirda"
+    assert lifecycle["methodology_owner"] == "pstack"
+    assert lifecycle["current_phase"] == "admitted"
     assert [stage["phase"] for stage in lifecycle["stages"]] == [
-        "analyze",
-        "plan",
-        "implement",
-        "review",
-        "verify",
-        "done",
+        "admitted",
+        "working",
+        "verified",
+        "terminal",
     ]
-    assert workflow_gate(lifecycle, tool_class="write")["code"] == "PSTACK_PLAN_REQUIRED"
+    assert workflow_gate(lifecycle, tool_class="write")["code"] == "PSTACK_WORKING_REQUIRED"
 
-    with pytest.raises(PstackLifecycleError, match="Analyze requires"):
+    with pytest.raises(PstackLifecycleError, match="Admitted requires"):
         checkpoint(
             lifecycle,
-            phase="analyze",
+            phase="admitted",
             status="passed",
-            evidence="analysis complete",
+            evidence="admission complete",
         )
 
-    lifecycle = _pass_analyze(lifecycle)
-    assert lifecycle["current_phase"] == "plan"
-    assert workflow_gate(lifecycle, tool_class="write")["code"] == "PSTACK_PLAN_REQUIRED"
-
-    lifecycle = checkpoint(
-        lifecycle,
-        phase="plan",
-        status="passed",
-        evidence="Plan: update the lifecycle gate, persist checkpoints, then add regression tests.",
-    )
-    assert lifecycle["current_phase"] == "implement"
+    lifecycle = _pass_admitted(lifecycle)
+    assert lifecycle["current_phase"] == "working"
     assert workflow_gate(lifecycle, tool_class="write")["allowed"] is True
-
-    with pytest.raises(PstackLifecycleError, match="successful write evidence"):
-        checkpoint(
-            lifecycle,
-            phase="implement",
-            status="passed",
-            evidence="implementation complete",
-        )
 
     lifecycle = record_tool_evidence(
         lifecycle,
         tool="replace_content",
         tool_class="write",
         status="passed",
-        detail="Applied the implementation patch.",
+        detail="Applied the methodology-selected implementation change.",
     )
     lifecycle = checkpoint(
         lifecycle,
-        phase="implement",
+        phase="working",
         status="passed",
-        evidence="Implemented the planned lifecycle gate.",
+        evidence="PStack methodology work completed with concrete implementation evidence.",
     )
-    assert lifecycle["current_phase"] == "review"
-    assert workflow_gate(lifecycle, tool_class="write")["code"] == "PSTACK_IMPLEMENTATION_GATE_CLOSED"
+    assert lifecycle["current_phase"] == "verified"
+    assert workflow_gate(lifecycle, tool_class="write")["code"] == "PSTACK_WORKING_REQUIRED"
 
-    lifecycle = record_tool_evidence(
-        lifecycle,
-        tool="execute_shell_command",
-        tool_class="read",
-        status="passed",
-        detail="Reviewed the targeted git diff.",
-    )
-    lifecycle = checkpoint(
-        lifecycle,
-        phase="review",
-        status="passed",
-        evidence="Reviewed the diff for correctness, regressions, and authority boundaries.",
-    )
-    assert lifecycle["current_phase"] == "verify"
-
-    with pytest.raises(PstackLifecycleError, match="Verify requires"):
+    with pytest.raises(PstackLifecycleError, match="Verified requires"):
         checkpoint(
             lifecycle,
-            phase="verify",
+            phase="verified",
             status="passed",
-            evidence="tests passed",
+            evidence="verification complete",
         )
 
     lifecycle = record_tool_evidence(
@@ -111,21 +84,21 @@ def test_feature_lifecycle_enforces_plan_before_writes_and_verify_before_done():
         tool="execute_shell_command",
         tool_class="execute",
         status="passed",
-        detail="pytest passed.",
+        detail="Regression tests passed.",
     )
     lifecycle = checkpoint(
         lifecycle,
-        phase="verify",
+        phase="verified",
         status="passed",
         evidence="Regression suite and syntax checks passed.",
     )
-    assert lifecycle["current_phase"] == "done"
+    assert lifecycle["current_phase"] == "terminal"
 
     lifecycle = checkpoint(
         lifecycle,
-        phase="done",
+        phase="terminal",
         status="passed",
-        evidence="All required Pstack gates passed.",
+        evidence="HIRDA orchestration can close after successful verification.",
     )
     assert lifecycle["status"] == "completed"
     assert workflow_gate(lifecycle, tool_class="write")["code"] == "PSTACK_WORKFLOW_COMPLETED"
@@ -138,106 +111,153 @@ def test_unknown_tool_class_is_fail_closed_by_pstack_gate():
     assert gate["code"] == "PSTACK_TOOL_CLASS_UNKNOWN"
 
 
-def test_checkpoint_order_is_fail_closed():
+def test_v2_checkpoint_order_is_fail_closed():
     lifecycle = lifecycle_for_workflow("bug-fix")
     with pytest.raises(PstackLifecycleError) as exc:
         checkpoint(
             lifecycle,
-            phase="plan",
+            phase="working",
             status="passed",
-            evidence="Plan before analysis.",
+            evidence="Working before admission.",
         )
     assert exc.value.code == "PSTACK_PHASE_ORDER_VIOLATION"
 
 
-def test_review_workflow_is_read_only_and_shorter():
+def test_v2_review_workflow_remains_read_only():
     lifecycle = lifecycle_for_workflow("review")
     assert [stage["phase"] for stage in lifecycle["stages"]] == [
-        "analyze",
-        "review",
-        "done",
+        "admitted",
+        "working",
+        "verified",
+        "terminal",
     ]
     assert workflow_gate(lifecycle, tool_class="write")["code"] == "PSTACK_REVIEW_WORKFLOW_READ_ONLY"
 
-    lifecycle = _pass_analyze(lifecycle)
+    lifecycle = _pass_admitted(lifecycle)
     lifecycle = record_tool_evidence(
         lifecycle,
         tool="find_symbol",
         tool_class="read",
         status="passed",
-        detail="Inspected the review scope.",
+        detail="PStack review methodology inspected the requested scope.",
     )
     lifecycle = checkpoint(
         lifecycle,
-        phase="review",
+        phase="working",
         status="passed",
-        evidence="Reviewed the requested scope and recorded findings.",
+        evidence="Review methodology completed without mutation.",
+    )
+    lifecycle = record_tool_evidence(
+        lifecycle,
+        tool="get_diagnostics_for_file",
+        tool_class="read",
+        status="passed",
+        detail="Diagnostics inspection completed.",
     )
     lifecycle = checkpoint(
         lifecycle,
-        phase="done",
+        phase="verified",
         status="passed",
-        evidence="Review workflow complete.",
+        evidence="Diagnostics provided verification evidence.",
+    )
+    lifecycle = checkpoint(
+        lifecycle,
+        phase="terminal",
+        status="passed",
+        evidence="Review orchestration complete.",
     )
     assert lifecycle["status"] == "completed"
 
 
-def test_failed_checkpoint_blocks_without_skipping_phase():
-    lifecycle = _pass_analyze(lifecycle_for_workflow("feature"))
+def test_v2_failed_admission_blocks_without_skipping_phase():
+    lifecycle = lifecycle_for_workflow("feature")
     lifecycle = checkpoint(
         lifecycle,
-        phase="plan",
+        phase="admitted",
         status="failed",
-        evidence="Plan is blocked on missing acceptance criteria.",
+        evidence="Admission is blocked on missing workspace evidence.",
     )
     assert lifecycle["status"] == "blocked"
-    assert lifecycle["current_phase"] == "plan"
+    assert lifecycle["current_phase"] == "admitted"
+    assert workflow_gate(lifecycle, tool_class="write")["code"] == "PSTACK_WORKFLOW_BLOCKED"
 
+    lifecycle = record_tool_evidence(
+        lifecycle,
+        tool="find_symbol",
+        tool_class="read",
+        status="passed",
+        detail="Recovered the missing workspace evidence.",
+    )
     lifecycle = checkpoint(
         lifecycle,
-        phase="plan",
+        phase="admitted",
         status="passed",
-        evidence="Acceptance criteria recovered; plan is now complete.",
+        evidence="Workspace evidence recovered; admission can proceed.",
     )
     assert lifecycle["status"] == "active"
-    assert lifecycle["current_phase"] == "implement"
+    assert lifecycle["current_phase"] == "working"
 
 
-def test_review_failure_reopens_implementation_for_rework():
-    lifecycle = _pass_analyze(lifecycle_for_workflow("feature"))
-    lifecycle = checkpoint(
-        lifecycle,
-        phase="plan",
-        status="passed",
-        evidence="Plan is complete.",
-    )
+def test_v2_verified_failure_reopens_working_for_rework():
+    lifecycle = _pass_admitted(lifecycle_for_workflow("feature"))
     lifecycle = record_tool_evidence(
         lifecycle,
         tool="replace_content",
         tool_class="write",
         status="passed",
-        detail="Implemented the planned change.",
+        detail="PStack methodology produced an implementation candidate.",
     )
     lifecycle = checkpoint(
         lifecycle,
-        phase="implement",
+        phase="working",
         status="passed",
-        evidence="Implementation completed.",
-    )
-    lifecycle = record_tool_evidence(
-        lifecycle,
-        tool="execute_shell_command",
-        tool_class="read",
-        status="passed",
-        detail="Reviewed the diff and found a lifecycle gap.",
+        evidence="Methodology work is ready for verification.",
     )
     lifecycle = checkpoint(
         lifecycle,
-        phase="review",
+        phase="verified",
         status="failed",
-        evidence="Review found a correctness issue that requires implementation rework.",
+        evidence="Verification found a correctness issue requiring rework.",
     )
     assert lifecycle["status"] == "active"
+    assert lifecycle["current_phase"] == "working"
+    assert lifecycle["rework_from"] == "verified"
+    assert workflow_gate(lifecycle, tool_class="write")["allowed"] is True
+
+
+def test_v1_lifecycle_remains_compatible_for_existing_tasks():
+    lifecycle = legacy_lifecycle_for_workflow("feature")
+    assert lifecycle["schema"] == PSTACK_LIFECYCLE_SCHEMA_V1
+    assert [stage["phase"] for stage in lifecycle["stages"]] == [
+        "analyze",
+        "plan",
+        "implement",
+        "review",
+        "verify",
+        "done",
+    ]
+    lifecycle = ensure_lifecycle(lifecycle, workflow="feature")
+    assert lifecycle["schema"] == PSTACK_LIFECYCLE_SCHEMA_V1
+    assert workflow_gate(lifecycle, tool_class="write")["code"] == "PSTACK_PLAN_REQUIRED"
+
+    lifecycle = record_tool_evidence(
+        lifecycle,
+        tool="find_symbol",
+        tool_class="read",
+        status="passed",
+        detail="Inspected the legacy task scope.",
+    )
+    lifecycle = checkpoint(
+        lifecycle,
+        phase="analyze",
+        status="passed",
+        evidence="Legacy Analyze checkpoint remains valid.",
+    )
+    lifecycle = checkpoint(
+        lifecycle,
+        phase="plan",
+        status="passed",
+        evidence="Legacy Plan checkpoint remains valid.",
+    )
     assert lifecycle["current_phase"] == "implement"
-    assert lifecycle["rework_from"] == "review"
     assert workflow_gate(lifecycle, tool_class="write")["allowed"] is True

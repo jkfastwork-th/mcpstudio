@@ -895,13 +895,13 @@ class GatewaySessionManager:
             },
             {
                 "name": "mcpstudio_pstack_checkpoint",
-                "description": "Advance or block the active Pstack workflow checkpoint. Phases are enforced in order; implementation writes remain blocked until Analyze and Plan pass, and Done cannot pass before required Review/Verify gates.",
+                "description": "Advance or block the active HIRDA orchestration checkpoint. New tasks use Admitted -> Working -> Verified -> Terminal while legacy v1 tasks continue to accept Analyze/Plan/Implement/Review/Verify/Done. PStack owns methodology steps inside Working.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "phase": {
                             "type": "string",
-                            "enum": ["analyze", "plan", "implement", "review", "verify", "done"],
+                            "enum": ["admitted", "working", "verified", "terminal", "analyze", "plan", "implement", "review", "verify", "done"],
                         },
                         "status": {
                             "type": "string",
@@ -3319,14 +3319,19 @@ class GatewaySessionManager:
                     "- The expired task remains immutable history; do not reactivate or overwrite its lifecycle.\n\n"
                 )
             lifecycle_prompt = (
-                "HIRDA PSTACK LIFECYCLE CONTROL:\n"
-                "- Before any file write, complete Analyze then Plan by calling "
-                "mcpstudio_pstack_checkpoint with status=passed and concrete evidence.\n"
-                "- Perform writes only while the lifecycle is in Implement.\n"
-                "- After implementation, advance Review, Verify, then Done with evidence.\n"
-                "- If a write is blocked by PSTACK_PLAN_REQUIRED or "
-                "PSTACK_IMPLEMENTATION_GATE_CLOSED, checkpoint the required phase; do not "
-                "work around the gate.\n\n"
+                "HIRDA PSTACK ORCHESTRATION CONTROL:\n"
+                "- HIRDA owns only Admitted -> Working -> Verified -> Terminal.\n"
+                "- PStack owns the engineering methodology and internal steps inside Working; "
+                "do not invent a universal Analyze/Plan/Implement sequence for new tasks.\n"
+                "- Before mutating files, pass Admitted with concrete inspection evidence so "
+                "the lifecycle enters Working.\n"
+                "- Keep the task in Working while following the selected PStack playbook.\n"
+                "- Pass Verified only with successful test/execution or diagnostics evidence, "
+                "then pass Terminal when the task is ready to close.\n"
+                "- Legacy lifecycle-v1 tasks keep their existing six-stage checkpoints; do not "
+                "rewrite their history.\n"
+                "- If a mutation is blocked by PSTACK_WORKING_REQUIRED, advance the HIRDA "
+                "orchestration checkpoint; do not work around the gate.\n\n"
             )
             directive = {
                 "schema": "hirda-pstack-workflow-directive-v1",
