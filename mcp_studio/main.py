@@ -1101,6 +1101,35 @@ async def _pstack_activity_snapshot(
         if task_updated_at and task_updated_at >= str(trace.get("updated_at") or ""):
             trace["updated_at"] = task_updated_at
 
+    canonical_trace_ids = set(canonical_tasks)
+    terminal_trace_states = {"completed", "expired", "failed", "blocked"}
+    for trace_id, trace in traces.items():
+        if trace_id in canonical_trace_ids:
+            continue
+        identity = trace.get("identity")
+        identity = identity if isinstance(identity, dict) else {}
+        has_canonical_owner = bool(
+            identity.get("managed_session_id") or identity.get("gateway_session_id")
+        )
+        lifecycle = trace.get("lifecycle")
+        lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+        trace_status = str(trace.get("status") or "").casefold()
+        lifecycle_status = str(lifecycle.get("status") or "").casefold()
+        if (
+            has_canonical_owner
+            and trace_status not in terminal_trace_states
+            and lifecycle_status not in {"completed", "blocked"}
+        ):
+            trace["status"] = "expired"
+            trace["terminal_disposition"] = "expired"
+            trace["projection_reason"] = "canonical_owner_missing"
+            if lifecycle:
+                lifecycle = dict(lifecycle)
+                lifecycle["status"] = "completed"
+                lifecycle["current_phase"] = "done"
+                lifecycle["terminal_disposition"] = "expired"
+                trace["lifecycle"] = lifecycle
+
     for trace in traces.values():
         lifecycle = trace.get("lifecycle")
         if not isinstance(lifecycle, dict) or not lifecycle:

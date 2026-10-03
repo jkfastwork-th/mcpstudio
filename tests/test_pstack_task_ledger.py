@@ -271,6 +271,53 @@ class _GatewayOnlyExpiredSnapshotDb(_ExpiredSessionSnapshotDb):
         return []
 
 
+class _OrphanOwnedSnapshotDb:
+    async def list_events(self, **kwargs):
+        row = {
+            "id": 901,
+            "created_at": "2026-10-03T05:03:12+00:00",
+            "kind": "pstack.task.opened",
+            "message": "Orphaned task opened",
+            "data": {
+                "task_id": "TASK-ORPHAN",
+                "trace_id": "TRACE-ORPHAN",
+                "workspace_key": "mcp-studio",
+                "managed_session_id": "ms-orphan",
+                "gateway_session_id": "gws-orphan",
+                "goal": "Old managed task with no canonical owner",
+                "workflow": "feature",
+                "actor": "hirda",
+                "phase": "task_opened",
+                "title": "HIRDA task envelope opened",
+                "status": "running",
+                "trace_status": "active",
+                "lifecycle": {
+                    "schema": "hirda-pstack-lifecycle-v1",
+                    "workflow": "feature",
+                    "status": "active",
+                    "current_phase": "analyze",
+                    "stages": [{"phase": "analyze", "status": "active", "evidence": []}],
+                },
+            },
+        }
+        prefix = kwargs.get("kind_prefix")
+        if prefix and not row["kind"].startswith(prefix):
+            return []
+        return [row]
+
+    async def list_sessions(self, limit=500):
+        assert limit == 500
+        return []
+
+    async def list_gateway_sessions(self, limit=500):
+        assert limit == 500
+        return []
+
+    async def list_managed_sessions(self, limit=500):
+        assert limit == 500
+        return []
+
+
 class _WritableSnapshotDb:
     def __init__(self):
         self.rows = []
@@ -442,6 +489,23 @@ async def test_pstack_snapshot_uses_gateway_terminal_state_when_logical_copy_is_
 
     trace = next(item for item in snapshot["traces"] if item["trace_id"] == "TRACE-EXPIRED")
     assert trace["status"] == "expired"
+    assert snapshot["active_trace"] is None
+
+
+@pytest.mark.asyncio
+async def test_pstack_snapshot_expires_orphaned_managed_trace(monkeypatch):
+    database = _OrphanOwnedSnapshotDb()
+    monkeypatch.setattr(main, "db", database)
+    monkeypatch.setattr(main, "_pstack_activity_adapter", lambda: _MemorylessAdapter())
+
+    snapshot = await main._pstack_activity_snapshot(limit=100)
+
+    trace = next(item for item in snapshot["traces"] if item["trace_id"] == "TRACE-ORPHAN")
+    assert trace["status"] == "expired"
+    assert trace["terminal_disposition"] == "expired"
+    assert trace["projection_reason"] == "canonical_owner_missing"
+    assert trace["lifecycle"]["status"] == "completed"
+    assert trace["lifecycle"]["current_phase"] == "done"
     assert snapshot["active_trace"] is None
 
 
