@@ -38,8 +38,9 @@ from .models import (
     CapsuleHandoffValidation, CapsuleHandoffApproval, CapsuleHandoffCompletion, LaneStateUpdate, CapsuleComplete,
 )
 from .settings import Settings, load_settings
-from .capabilities import build_capability_registry
+from .capabilities import CapabilityResolver, build_capability_registry
 from .skill_runtime import SkillRequestError, SkillRuntime
+from .execution_environments import plan_execution_environment
 from .workers import WorkerManager
 from .scheduler import Scheduler
 from .execution import ExecutionSupervisor
@@ -121,6 +122,7 @@ integration_manager = build_integration_manager(
     base_dir=settings.config_path.parent,
     pixel_art_studio=pixel_art_studio,
 )
+capability_resolver = CapabilityResolver(integration_manager)
 visual_assets = VisualAssetOrchestrator(
     pixel_art_studio,
     earth_validator_url=earth_world_validator_url,
@@ -685,6 +687,40 @@ async def capability_registry_status():
     return build_capability_registry(integration_manager, skill_runtime)
 
 
+@app.post("/api/capabilities/resolve")
+async def capability_resolve(payload: dict[str, Any]):
+    required_capabilities = payload.get("required_capabilities") or []
+    required_tools = payload.get("required_tools") or []
+    if not isinstance(required_capabilities, list) or not all(
+        isinstance(item, str) for item in required_capabilities
+    ):
+        raise HTTPException(status_code=400, detail="required_capabilities must be a string array")
+    if not isinstance(required_tools, list) or not all(
+        isinstance(item, str) for item in required_tools
+    ):
+        raise HTTPException(status_code=400, detail="required_tools must be a string array")
+    return capability_resolver.resolve(
+        required_capabilities=required_capabilities,
+        required_tools=required_tools,
+    )
+
+
+@app.post("/api/execution-environments/plan")
+async def execution_environment_plan(payload: dict[str, Any]):
+    constraints = payload.get("runtime_constraints") or []
+    if not isinstance(constraints, list):
+        raise HTTPException(status_code=400, detail="runtime_constraints must be an array")
+    try:
+        return plan_execution_environment(
+            workspace=str(payload.get("workspace") or "") or None,
+            task_id=str(payload.get("task_id") or "") or None,
+            runtime_constraints=constraints,
+            pstack_task=bool(payload.get("pstack_task")),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.get("/api/skills")
 async def skills_registry_status():
     """Return read-only, declarative skill registry data for the Skills page."""
@@ -700,6 +736,7 @@ async def skills_registry_status():
             "triggers": list(skill.triggers),
             "required_capabilities": list(skill.required_capabilities),
             "required_tools": list(skill.required_tools),
+            "runtime_constraints": list(skill.runtime_constraints),
             "policy_hints": list(skill.policy_hints),
             "workflow_steps": list(skill.workflow_steps),
             "verification_checks": list(skill.verification_checks),
@@ -1145,6 +1182,9 @@ async def _pstack_activity_snapshot(
         herdr_tab = task.get("herdr_tab")
         if isinstance(herdr_tab, dict) and herdr_tab:
             trace["herdr_tab"] = dict(herdr_tab)
+        execution_environment = task.get("execution_environment")
+        if isinstance(execution_environment, dict) and execution_environment:
+            trace["execution_environment"] = dict(execution_environment)
         identity_fields = {
             key: task.get(key)
             for key in (
@@ -3735,6 +3775,27 @@ async def submit_work(payload: WorkSubmit):
         work_payload = skill_runtime.enrich_work_payload(payload.model_dump())
     except SkillRequestError as exc:
         raise HTTPException(status_code=400, detail="skill_request_invalid") from exc
+    metadata = work_payload.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    work_payload["metadata"] = metadata
+    metadata["capability_resolution"] = capability_resolver.resolve_skill_metadata(metadata)
+    skill_resolution = metadata.get("skill_resolution")
+    skill_resolution = skill_resolution if isinstance(skill_resolution, dict) else {}
+    try:
+        environment = plan_execution_environment(
+            workspace=str(work_payload.get("workspace") or "") or None,
+            task_id=str(metadata.get("pstack_task_id") or "") or None,
+            runtime_constraints=skill_resolution.get("runtime_constraints") or (),
+            pstack_task=bool(metadata.get("pstack_task_id")),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if environment.get("status") == "requires_pstack":
+        raise HTTPException(
+            status_code=409,
+            detail="private execution environment requires PStack task isolation",
+        )
+    metadata["execution_environment"] = environment
     item = await db.create_work(work_payload, settings.studio.worker_server_id or server_id)
     await db.add_event(
         "work.queued",

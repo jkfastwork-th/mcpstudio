@@ -11,6 +11,7 @@ import httpx
 from .db import Database
 from .herdr import HerdrManager, _decode_text_content
 from .settings import Settings
+from .execution_environments import close_execution_environment
 
 
 TERMINAL_AGENT_STATES = {"idle", "done"}
@@ -497,6 +498,18 @@ class ExecutionSupervisor:
                             correlation_id=trace_id,
                         )
                 patch["herdr_tab"] = closed_tab
+                environment = metadata.get("pstack_execution_environment")
+                environment = dict(environment) if isinstance(environment, dict) else {}
+                if str(closed_tab.get("status") or "").casefold() == "closed":
+                    environment = close_execution_environment(environment, closed_tab)
+                elif environment and str(closed_tab.get("status") or "").casefold() == "close_failed":
+                    environment = {
+                        **environment,
+                        "status": "close_failed",
+                        "error": closed_tab.get("close_error"),
+                    }
+                if environment:
+                    patch["execution_environment"] = environment
 
         await self.db.patch_pstack_task(task_id, patch)
         if trace_id:

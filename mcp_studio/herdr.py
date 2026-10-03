@@ -592,10 +592,15 @@ class HerdrManager:
         cwd_text = str(cwd or "").strip()
         if cwd_text:
             args.extend(["--cwd", cwd_text])
+        environment = task.get("execution_environment")
+        environment = environment if isinstance(environment, dict) else {}
         identity_env = {
             "PSTACK_TASK_ID": task.get("task_id"),
             "PSTACK_TRACE_ID": task.get("trace_id"),
             "HIRDA_WORKSPACE_KEY": task.get("workspace_key"),
+            "HIRDA_EXECUTION_ENVIRONMENT_ID": environment.get("environment_id"),
+            "HIRDA_COMPUTER_MODE": environment.get("mode"),
+            "HIRDA_ISOLATION_LEVEL": environment.get("isolation_level"),
         }
         for key, value in identity_env.items():
             value_text = str(value or "").strip()

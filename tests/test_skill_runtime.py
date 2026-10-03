@@ -374,6 +374,9 @@ async def test_submit_work_persists_resolution_before_scheduler_kick(monkeypatch
     await main.submit_work(payload)
     assert events.index("create_work") < events.index("scheduler_kick")
     assert database.item["metadata"]["skill_resolution"]["selected"][0]["id"] == "review.skill"
+    assert database.item["metadata"]["capability_resolution"]["schema"] == "hirda-capability-resolution-v1"
+    assert database.item["metadata"]["execution_environment"]["mode"] == "team"
+    assert database.item["metadata"]["execution_environment"]["status"] == "active"
     assert database.item["metadata"]["project"] == "alpha"
     assert "skill_resolution" not in payload.metadata
 

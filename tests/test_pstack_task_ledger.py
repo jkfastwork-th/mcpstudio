@@ -974,6 +974,9 @@ async def test_gateway_task_envelope_persists_trace_and_tool_activity():
     assert task["lifecycle"]["methodology_owner"] == "pstack"
     assert task["work_id"] == "work-1"
     assert gateway.db.work_items["work-1"]["metadata"]["pstack_auto_dispatch"] is True
+    assert task["execution_environment"]["mode"] == "private"
+    assert task["execution_environment"]["status"] == "planned"
+    assert gateway.db.work_items["work-1"]["metadata"]["pstack_execution_environment"]["environment_id"] == task["execution_environment"]["environment_id"]
     assert task["workflow_directive"]["capability"] == "coding"
     assert task["workflow_directive"]["context"]["workflow_provider"] == "pstack"
     assert gateway.integrations.calls[0][1]["workflow_hint"] == "engineering_task"
@@ -1047,6 +1050,10 @@ async def test_pstack_task_owns_disposable_herdr_tab_until_done():
     assert task["herdr_tab"]["status"] == "open"
     assert task["herdr_tab"]["tab_id"] == "wH:t9"
     assert task["herdr_tab"]["persistent"] is False
+    assert task["execution_environment"]["mode"] == "private"
+    assert task["execution_environment"]["status"] == "active"
+    assert task["execution_environment"]["isolation_level"] == "task_tab"
+    assert task["execution_environment"]["binding"]["tab_id"] == "wH:t9"
     assert gateway.herdr.created[0][1] == "/work/mcp-studio"
 
     task = await gateway._record_pstack_lifecycle_tool_evidence(
@@ -1089,6 +1096,7 @@ async def test_pstack_task_owns_disposable_herdr_tab_until_done():
     assert task["status"] == "completed"
     assert task["lifecycle"]["status"] == "completed"
     assert task["herdr_tab"]["status"] == "closed"
+    assert task["execution_environment"]["status"] == "closed"
     assert len(gateway.herdr.closed) == 1
     assert gateway.herdr.closed[0]["tab_id"] == "wH:t9"
     persisted = gateway.db.metadata["active_pstack_task"]

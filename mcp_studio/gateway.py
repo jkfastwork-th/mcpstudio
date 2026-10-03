@@ -43,6 +43,11 @@ from .capsules import CapsuleService, CapsuleNotFound
 from .world_authoring import WorldAuthoringManager, WorldAuthoringError
 from .integrations import IntegrationManager, IntegrationError
 from .machine_router import MachineCapabilityRouter
+from .execution_environments import (
+    bind_private_task_tab,
+    close_execution_environment,
+    plan_execution_environment,
+)
 from .machine_registry import MachineRegistryError
 from .machine_enrollment import MachineEnrollmentManager, MachineEnrollmentError
 from .mcp_events import (
@@ -3026,7 +3031,16 @@ class GatewaySessionManager:
                 stream_id=f"pstack:{task.get('trace_id')}",
                 correlation_id=str(task.get("trace_id") or ""),
             )
-        return {**task, "herdr_tab": tab}
+        environment = dict(task.get("execution_environment") or {})
+        if str(tab.get("status") or "").casefold() == "open":
+            environment = bind_private_task_tab(environment, tab)
+        elif environment and str(tab.get("status") or "").casefold() == "unavailable":
+            environment = {
+                **environment,
+                "status": "unavailable",
+                "error": tab.get("error"),
+            }
+        return {**task, "herdr_tab": tab, "execution_environment": environment}
 
     async def _close_pstack_herdr_tab(
         self,
@@ -3077,7 +3091,20 @@ class GatewaySessionManager:
                 stream_id=f"pstack:{task.get('trace_id')}",
                 correlation_id=str(task.get("trace_id") or ""),
             )
-        return {**task, "herdr_tab": closed}
+        environment = dict(task.get("execution_environment") or {})
+        if str(closed.get("status") or "").casefold() == "closed":
+            environment = close_execution_environment(environment, closed)
+        elif environment and str(closed.get("status") or "").casefold() == "close_failed":
+            environment = {
+                **environment,
+                "status": "close_failed",
+                "error": closed.get("close_error"),
+            }
+        return {
+            **task,
+            "herdr_tab": closed,
+            "execution_environment": environment,
+        }
 
 
     @staticmethod
@@ -3145,10 +3172,14 @@ class GatewaySessionManager:
                 before_status = str(tab.get("status") or "").casefold()
                 closed_task = await self._close_pstack_herdr_tab(task)
                 closed_tab = dict(closed_task.get("herdr_tab") or {})
-                if closed_tab != tab:
+                closed_environment = dict(closed_task.get("execution_environment") or {})
+                if closed_tab != tab or closed_environment != dict(task.get("execution_environment") or {}):
                     patched += await self.db.patch_pstack_task(
                         task_id,
-                        {"herdr_tab": closed_tab},
+                        {
+                            "herdr_tab": closed_tab,
+                            "execution_environment": closed_environment,
+                        },
                     )
                 if (
                     before_status not in {"closed", "unavailable"}
@@ -3631,6 +3662,7 @@ class GatewaySessionManager:
                     "gateway_session_id": gateway_session_id,
                     "pstack_auto_dispatch": True,
                     "pstack_herdr_tab": tab,
+                    "pstack_execution_environment": dict(task_value.get("execution_environment") or {}),
                     "pstack_runtime": runtime_id,
                     "runtime_authority": "hirda",
                     "runtime_selection": runtime_plan,
@@ -3867,6 +3899,13 @@ class GatewaySessionManager:
                 "lifecycle": lifecycle_for_workflow(routed.get("workflow")),
                 "opened_at": time.time(),
             }
+            task["execution_environment"] = plan_execution_environment(
+                workspace=str(managed_session.get("project_path") or "").strip() or None,
+                managed_session=managed_session,
+                task_id=task_id,
+                runtime_constraints=(),
+                pstack_task=True,
+            )
             task = await self._open_pstack_herdr_tab(
                 task,
                 managed_session=managed_session,
