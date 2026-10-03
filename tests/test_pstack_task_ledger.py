@@ -688,6 +688,15 @@ class _GatewayDb:
             raise KeyError(work_id)
         return dict(self.work_items[work_id])
 
+    async def finish_work(self, work_id, *, state, result=None, error=None):
+        if work_id not in self.work_items:
+            raise KeyError(work_id)
+        item = self.work_items[work_id]
+        item["state"] = state
+        item["execution_state"] = state
+        item["error"] = error
+        return dict(item)
+
 
 class _GatewayPstackAdapter:
     def activity_snapshot(self, *, since=0, limit=250):
@@ -777,6 +786,89 @@ class _GatewayHerdr:
             "status": "closed",
             "closed_at": "2026-10-02T10:00:00+00:00",
         }
+
+
+def test_pstack_running_projection_requires_confirmed_agent_dispatch():
+    assert GatewaySessionManager._pstack_status_from_work(
+        {"state": "running", "execution_state": "assigned"}
+    ) == ("waiting", "assigned")
+    assert GatewaySessionManager._pstack_status_from_work(
+        {"state": "running", "execution_state": "dispatching"}
+    ) == ("waiting", "dispatching")
+    assert GatewaySessionManager._pstack_status_from_work(
+        {"state": "running", "execution_state": "waiting_agent"}
+    ) == ("running", "waiting_agent")
+    assert GatewaySessionManager._pstack_status_from_work(
+        {"state": "running", "execution_state": "reconnecting"}
+    ) == ("blocked", "reconnecting")
+
+
+@pytest.mark.asyncio
+async def test_rejected_pstack_dispatch_is_retired_and_requeued():
+    gateway = object.__new__(GatewaySessionManager)
+    gateway.settings = SimpleNamespace(
+        studio=SimpleNamespace(worker_server_id="serena-8001")
+    )
+    gateway.db = _GatewayDb()
+
+    old = await gateway.db.create_work(
+        {
+            "label": "old rejected work",
+            "workspace": "/work/mcp-studio",
+            "priority": 50,
+            "lease_mode": "write",
+            "dispatch_mode": "herdr",
+            "instruction": "continue",
+            "metadata": {
+                "pstack_task_id": "TASK-OLD",
+                "pstack_trace_id": "TRACE-OLD",
+            },
+        },
+        "serena-8001",
+    )
+    gateway.db.work_items[old["id"]].update(
+        {
+            "state": "running",
+            "execution_state": "waiting_agent",
+            "execution": {
+                "dispatch_result": {
+                    "error": "HERDR_COMMAND_FAILED",
+                    "stderr": {
+                        "error": {
+                            "code": "agent_not_found",
+                            "message": "stale pane",
+                        }
+                    },
+                }
+            },
+        }
+    )
+
+    task = {
+        "task_id": "TASK-OLD",
+        "trace_id": "TRACE-OLD",
+        "goal": "Continue existing work",
+        "status": "running",
+        "work_id": old["id"],
+        "workflow_directive": {"prompt": "continue"},
+        "managed_session_id": "ms-1",
+        "workspace_key": "mcp-studio",
+    }
+    reconciled = await gateway._ensure_pstack_execution_work(
+        "gws-1",
+        task,
+        managed_session={
+            "id": "ms-1",
+            "workspace_key": "mcp-studio",
+            "project_path": "/work/mcp-studio",
+        },
+    )
+
+    assert gateway.db.work_items[old["id"]]["state"] == "failed"
+    assert reconciled["status"] == "queued"
+    assert reconciled["work_id"] != old["id"]
+    assert gateway.db.work_items[reconciled["work_id"]]["state"] == "queued"
+    assert any(kind == "pstack.execution.requeue" for kind, _, _ in gateway.db.events)
 
 
 @pytest.mark.asyncio

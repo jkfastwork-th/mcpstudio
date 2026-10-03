@@ -375,6 +375,54 @@ class ExecutionSupervisor:
             return {}
         return metadata
 
+
+    @staticmethod
+    def _decoded_dispatch_failure(decoded: Any) -> tuple[str, str, str] | None:
+        """Return (failure_class, execution_state, message) for rejected HERDR calls."""
+
+        def find_error(value: Any) -> tuple[str, str] | None:
+            if isinstance(value, dict):
+                # Prefer nested machine-readable errors (for example
+                # stderr.error.code=agent_not_found) over a generic wrapper.
+                for key in ("stderr", "details", "data", "result"):
+                    if key in value:
+                        nested = find_error(value.get(key))
+                        if nested is not None:
+                            return nested
+                error = value.get("error")
+                if isinstance(error, dict):
+                    code = str(error.get("code") or error.get("error") or "").strip()
+                    message = str(
+                        error.get("message")
+                        or value.get("message")
+                        or code
+                    ).strip()
+                    if code:
+                        return code, message
+                elif error:
+                    code = str(error).strip()
+                    message = str(value.get("message") or code).strip()
+                    return code, message
+                for child in value.values():
+                    nested = find_error(child)
+                    if nested is not None:
+                        return nested
+            elif isinstance(value, list):
+                for child in value:
+                    nested = find_error(child)
+                    if nested is not None:
+                        return nested
+            return None
+
+        found = find_error(decoded)
+        if found is None:
+            return None
+        code, message = found
+        normalized = code.casefold()
+        if normalized in {"agent_not_found", "pane_not_found"}:
+            return "pane_missing", "reconnecting", message
+        return "herdr_command_failed", "recovering", message
+
     async def _patch_pstack_from_work(
         self,
         work: dict[str, Any],
@@ -538,6 +586,42 @@ class ExecutionSupervisor:
                 raise
 
             decoded = _decode_text_content(result)
+            rejected = self._decoded_dispatch_failure(decoded)
+            if rejected is not None:
+                failure_class, execution_state, message = rejected
+                item = await self.db.update_work_execution(
+                    work_id,
+                    execution_state=execution_state,
+                    last_agent_status=str(pane.get("agent_status") or "unknown"),
+                    failure_class=failure_class,
+                    execution_patch={
+                        "dispatch_result": decoded,
+                        "dispatch_rejected": True,
+                        "safe_redispatch": failure_class == "pane_missing",
+                    },
+                )
+                await self.db.mark_worker_degraded_for_work(work_id)
+                await self._patch_pstack_from_work(
+                    item,
+                    status="blocked",
+                    execution_state=execution_state,
+                )
+                await self.db.add_event(
+                    "execution.dispatch_failed",
+                    f"{work_id} dispatch rejected ({failure_class}): {message}",
+                    severity="warning",
+                    server_id=work["server_id"],
+                    data={
+                        "work_id": work_id,
+                        "failure_class": failure_class,
+                        "pane": pane.get("pane_id"),
+                        "decoded": decoded,
+                    },
+                )
+                raise RuntimeError(
+                    f"HERDR rejected dispatch ({failure_class}): {message}"
+                )
+
             item = await self.db.update_work_execution(
                 work_id,
                 execution_state="waiting_agent",
@@ -750,6 +834,8 @@ class ExecutionSupervisor:
             return
         already_dispatched = bool(work.get("dispatched_at"))
         attempts = int(work.get("dispatch_attempts") or 0)
+        execution = dict(work.get("execution") or {})
+        safe_redispatch = execution.get("safe_redispatch") is True
         if already_dispatched:
             next_state = "waiting_agent"
             message = f"{work['id']} rebound to {pane.get('pane_id')} without redispatch"
@@ -757,6 +843,13 @@ class ExecutionSupervisor:
         elif attempts == 0:
             next_state = "assigned"
             message = f"{work['id']} target recovered before first dispatch"
+            failure_class = None
+        elif safe_redispatch:
+            next_state = "assigned"
+            message = (
+                f"{work['id']} target recovered after a confirmed rejected dispatch; "
+                "safe redispatch is allowed"
+            )
             failure_class = None
         else:
             next_state = "stalled"
@@ -783,7 +876,13 @@ class ExecutionSupervisor:
         )
         await self._patch_pstack_from_work(
             item,
-            status="blocked" if next_state == "stalled" else "running",
+            status=(
+                "blocked"
+                if next_state == "stalled"
+                else "running"
+                if next_state == "waiting_agent"
+                else "waiting"
+            ),
             execution_state=next_state,
         )
 
@@ -816,11 +915,16 @@ class ExecutionSupervisor:
             metadata = self._pstack_execution_metadata(work)
             pstack_auto_dispatch = metadata.get("pstack_auto_dispatch") is True
             if self.settings.studio.execution_enabled or pstack_auto_dispatch:
+                execution = dict(work.get("execution") or {})
                 await self.dispatch(
                     work["id"],
                     explicit=(
                         pstack_auto_dispatch
                         and not self.settings.studio.execution_enabled
+                    ),
+                    allow_redispatch=(
+                        int(work.get("dispatch_attempts") or 0) > 0
+                        and execution.get("safe_redispatch") is True
                     ),
                     refresh=False,
                 )

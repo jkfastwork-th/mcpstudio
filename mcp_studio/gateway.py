@@ -3252,9 +3252,17 @@ class GatewaySessionManager:
         if work_state == "queued":
             return "queued", execution_state or "queued"
         if work_state == "running":
-            if execution_state in {"stalled", "dispatch_uncertain"}:
+            if execution_state == "waiting_agent":
+                return "running", execution_state
+            if execution_state in {
+                "stalled",
+                "dispatch_uncertain",
+                "reconnecting",
+                "recovering",
+            }:
                 return "blocked", execution_state
-            return "running", execution_state or "running"
+            # Scheduler assignment/reservation is not proof of live execution.
+            return "waiting", execution_state or "assigned"
         if work_state == "completed":
             return "waiting", execution_state or "completed"
         if work_state == "failed":
@@ -3262,6 +3270,16 @@ class GatewaySessionManager:
         if work_state in {"cancelled", "detached"}:
             return "waiting", execution_state or work_state
         return "waiting", execution_state or work_state or "unknown"
+
+
+    @staticmethod
+    def _pstack_work_has_rejected_dispatch(work: dict[str, Any]) -> bool:
+        execution = work.get("execution")
+        execution = execution if isinstance(execution, dict) else {}
+        result = execution.get("dispatch_result")
+        if isinstance(result, dict) and result.get("error"):
+            return True
+        return execution.get("dispatch_rejected") is True
 
     async def _ensure_pstack_execution_work(
         self,
@@ -3287,12 +3305,50 @@ class GatewaySessionManager:
             except KeyError:
                 work = None
             if work is not None:
-                task_status, execution_state = self._pstack_status_from_work(work)
-                return {
-                    **task_value,
-                    "status": task_status,
-                    "execution_state": execution_state,
-                }
+                if self._pstack_work_has_rejected_dispatch(work):
+                    if str(work.get("state") or "").casefold() == "running":
+                        try:
+                            await self.db.finish_work(
+                                existing_work_id,
+                                state="failed",
+                                error="HERDR rejected dispatch; safe PStack requeue",
+                            )
+                        except (KeyError, ValueError):
+                            pass
+                    await self.db.add_event(
+                        "pstack.execution.requeue",
+                        f"PStack task {task_id} requeued after rejected dispatch",
+                        severity="warning",
+                        data={
+                            "task_id": task_id,
+                            "trace_id": trace_id,
+                            "work_id": existing_work_id,
+                            "actor": "hirda",
+                            "phase": "execution_requeue",
+                            "title": "Rejected dispatch requeued",
+                            "detail": (
+                                "HIRDA received a definitive dispatch rejection, "
+                                "so the old work item was retired and may be safely retried."
+                            ),
+                            "status": "waiting",
+                            "trace_status": "waiting",
+                        },
+                        stream_id=f"pstack:{trace_id}",
+                        correlation_id=trace_id,
+                    )
+                    task_value = {
+                        **task_value,
+                        "work_id": None,
+                        "status": "waiting",
+                        "execution_state": "dispatch_rejected",
+                    }
+                else:
+                    task_status, execution_state = self._pstack_status_from_work(work)
+                    return {
+                        **task_value,
+                        "status": task_status,
+                        "execution_state": execution_state,
+                    }
 
         directive = dict(task_value.get("workflow_directive") or {})
         instruction = str(directive.get("prompt") or "").strip()
@@ -3312,6 +3368,18 @@ class GatewaySessionManager:
                 "status": "waiting",
                 "execution_state": "workspace_missing",
             }
+        pane_finder = getattr(getattr(self, "herdr", None), "find_pane", None)
+        if pane_id and callable(pane_finder):
+            rebound = pane_finder(
+                pane_id=pane_id,
+                workspace=project_path,
+                agent=None,
+            )
+            rebound = rebound if isinstance(rebound, dict) else {}
+            pane_id = (
+                str(rebound.get("pane_id") or "").strip()
+                or None
+            )
 
         studio_session_id: str | None = None
         try:

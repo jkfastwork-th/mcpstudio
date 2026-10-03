@@ -235,6 +235,63 @@ async def test_pre_dispatch_recovery_returns_to_assigned_without_sending_prompt(
 
 
 @pytest.mark.asyncio
+async def test_confirmed_agent_not_found_is_not_running_and_safe_redispatches(tmp_path):
+    db = Database(str(tmp_path / "studio.sqlite3"))
+    await db.init()
+    running = await create_running_herdr_work(db)
+
+    class RejectOnceClient(FakeClient):
+        async def call_tool(self, name, arguments, client_name="test"):
+            self.calls.append((name, arguments, client_name))
+            if name == "herdr_prompt_agent" and len(
+                [call for call in self.calls if call[0] == "herdr_prompt_agent"]
+            ) == 1:
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": (
+                            '{"error":"HERDR_COMMAND_FAILED","message":"Herdr exited with 1",'
+                            '"stderr":{"error":{"code":"agent_not_found",'
+                            '"message":"agent target stale-pane not found"}}}'
+                        ),
+                    }]
+                }
+            return {"content": [{"type": "text", "text": '{"accepted":true}'}]}
+
+    class RejectOnceHerdr(FakeHerdr):
+        def client(self):
+            return RejectOnceClient(self.calls)
+
+    herdr = RejectOnceHerdr()
+    supervisor = ExecutionSupervisor(
+        studio_settings(automatic=True),
+        db,
+        herdr,
+        FakeScheduler(),
+    )
+
+    with pytest.raises(RuntimeError, match="pane_missing"):
+        await supervisor.dispatch(running["id"], explicit=True)
+
+    rejected = await db.get_work(running["id"])
+    assert rejected["execution_state"] == "reconnecting"
+    assert rejected["failure_class"] == "pane_missing"
+    assert rejected["dispatched_at"] is None
+    assert rejected["dispatch_attempts"] == 1
+    assert rejected["execution"]["safe_redispatch"] is True
+
+    await supervisor.recover_work(running["id"])
+    recovered = await db.get_work(running["id"])
+    assert recovered["execution_state"] == "assigned"
+
+    await supervisor._process_one(recovered, herdr.snapshot)
+    redispatched = await db.get_work(running["id"])
+    assert redispatched["execution_state"] == "waiting_agent"
+    assert redispatched["dispatch_attempts"] == 2
+    assert redispatched["dispatched_at"] is not None
+
+
+@pytest.mark.asyncio
 async def test_uncertain_redispatch_requires_acknowledgement(tmp_path):
     db = Database(str(tmp_path / "studio.sqlite3"))
     await db.init()

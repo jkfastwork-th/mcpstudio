@@ -158,31 +158,34 @@ class Scheduler:
                     metadata.get("pstack_trace_id") or ""
                 ).strip()
                 if pstack_task_id:
+                    # Worker assignment proves capacity reservation, not that an
+                    # agent is actually executing. PStack becomes RUNNING only
+                    # after ExecutionSupervisor confirms a successful dispatch.
                     await self.db.patch_pstack_task(
                         pstack_task_id,
                         {
                             "work_id": assigned["id"],
-                            "status": "running",
+                            "status": "waiting",
                             "execution_state": "assigned",
                         },
                     )
                     if pstack_trace_id:
                         await self.db.add_event(
-                            "pstack.execution.running",
+                            "pstack.execution.assigned",
                             f"PStack task {pstack_task_id} assigned to Scheduler worker",
                             data={
                                 "task_id": pstack_task_id,
                                 "trace_id": pstack_trace_id,
                                 "work_id": assigned["id"],
                                 "actor": "hirda",
-                                "phase": "scheduler_running",
-                                "title": "Scheduler running",
+                                "phase": "scheduler_assigned",
+                                "title": "Scheduler assigned",
                                 "detail": (
                                     f"Work {assigned['id']} was assigned to "
-                                    f"{worker['id']}."
+                                    f"{worker['id']}; execution has not started yet."
                                 ),
-                                "status": "running",
-                                "trace_status": "running",
+                                "status": "waiting",
+                                "trace_status": "waiting",
                                 "metadata": {
                                     "worker_id": worker["id"],
                                     "pane": assigned.get("pane"),
