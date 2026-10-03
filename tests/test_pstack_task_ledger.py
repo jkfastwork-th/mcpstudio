@@ -1156,6 +1156,15 @@ def test_gateway_requires_pstack_admission_when_integration_is_configured():
     assert exc.value.code == "PSTACK_WORKFLOW_REQUIRED"
 
 
+def test_gateway_tool_dispatch_requires_existing_pstack_task():
+    import inspect
+
+    source = inspect.getsource(GatewaySessionManager.proxy_existing)
+    dispatch = source[source.index("pstack_task = await self._active_pstack_gateway_task"):]
+    assert '"PSTACK_TASK_REQUIRED"' in dispatch
+    assert 'goal=f"Engineering work in' not in dispatch
+
+
 def test_pstack_ui_exposes_multi_task_ledger():
     root = main.ROOT
     app = (root / "static" / "app.pstack.js").read_text(encoding="utf-8")

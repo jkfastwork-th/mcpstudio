@@ -5175,18 +5175,13 @@ class GatewaySessionManager:
                     ):
                         pstack_task = None
                 if not pstack_task:
-                    pstack_task = await self._open_pstack_gateway_task(
-                        gateway_session_id,
-                        managed_session=pstack_managed,
-                        goal=f"Engineering work in {pstack_managed.get('workspace_key') or pstack_managed.get('name') or 'workspace'}",
-                    )
-                if not pstack_task:
                     return local_tool_response(
                         {
-                            "error": "PSTACK_WORKFLOW_REQUIRED",
+                            "error": "PSTACK_TASK_REQUIRED",
                             "message": (
-                                "Engineering tool dispatch is fail-closed because HIRDA could not "
-                                "establish the required Pstack workflow admission."
+                                "Engineering tool dispatch is fail-closed because no active Pstack task "
+                                "is bound to this workspace. Attach the workspace/session with a concrete "
+                                "request before calling engineering tools."
                             ),
                             "tool": tool_name,
                             "managed_session_id": session.get("managed_session_id"),
