@@ -127,14 +127,34 @@ def normalize_goal(value: Any) -> str:
     return " ".join("".join(char if char.isalnum() else " " for char in value).split())
 
 
-def _freeze(value: Any) -> Any:
+def _freeze(
+    value: Any,
+    memo: dict[int, Any] | None = None,
+    active: set[int] | None = None,
+) -> Any:
+    if memo is None:
+        memo = {}
+    if active is None:
+        active = set()
+    is_container = isinstance(value, (Mapping, list, tuple, set, frozenset))
+    object_id = id(value)
+    if is_container and object_id in memo:
+        return memo[object_id]
+    if is_container and object_id in active:
+        raise SkillManifestError("manifest_recursive_alias_forbidden")
+    if is_container:
+        active.add(object_id)
     if isinstance(value, Mapping):
-        return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
-    if isinstance(value, list):
-        return tuple(_freeze(item) for item in value)
-    if isinstance(value, tuple):
-        return tuple(_freeze(item) for item in value)
-    return value
+        frozen = MappingProxyType({str(key): _freeze(item, memo, active) for key, item in value.items()})
+    elif isinstance(value, (list, tuple)):
+        frozen = tuple(_freeze(item, memo, active) for item in value)
+    elif isinstance(value, (set, frozenset)):
+        frozen = frozenset(_freeze(item, memo, active) for item in value)
+    else:
+        return value
+    active.remove(object_id)
+    memo[object_id] = frozen
+    return frozen
 
 
 def _normalized_key(value: Any) -> str:
@@ -144,10 +164,10 @@ def _normalized_key(value: Any) -> str:
 def _check_forbidden_keys(value: Any, path: str = "", seen: set[int] | None = None) -> None:
     if seen is None:
         seen = set()
-    if isinstance(value, (Mapping, list)):
+    if isinstance(value, (Mapping, list, tuple, set, frozenset)):
         object_id = id(value)
         if object_id in seen:
-            raise SkillManifestError("manifest_recursive_alias_forbidden")
+            return
         seen.add(object_id)
     if isinstance(value, Mapping):
         for key, item in value.items():
@@ -160,11 +180,9 @@ def _check_forbidden_keys(value: Any, path: str = "", seen: set[int] | None = No
             if _SECRET_KEY.search(normalized):
                 raise SkillManifestError(f"secret_like_field_forbidden:{key_path}")
             _check_forbidden_keys(item, key_path, seen)
-    elif isinstance(value, list):
+    elif isinstance(value, (list, tuple, set, frozenset)):
         for index, item in enumerate(value):
             _check_forbidden_keys(item, f"{path}[{index}]", seen)
-    if isinstance(value, (Mapping, list)):
-        seen.remove(id(value))
 
 
 def _string_list(value: Any, field_name: str) -> tuple[str, ...]:
@@ -246,6 +264,8 @@ class SkillRegistry:
         max_manifest_bytes: int = _MAX_MANIFEST_BYTES,
     ) -> tuple[SkillDefinition, ...]:
         root = Path(directory)
+        if root.is_symlink():
+            raise SkillManifestError("symlink_directory_forbidden")
         if not root.is_dir():
             raise SkillManifestError("skill_directory_not_found")
         paths = sorted(
@@ -258,12 +278,15 @@ class SkillRegistry:
                 raise SkillManifestError("symlink_manifest_forbidden")
             if not path.is_file():
                 continue
-            size = path.stat().st_size
-            if size > max_manifest_bytes:
-                raise SkillManifestError("manifest_too_large")
             try:
-                text = path.read_text(encoding="utf-8")
+                with path.open("rb") as manifest_file:
+                    payload = manifest_file.read(max_manifest_bytes + 1)
+                if len(payload) > max_manifest_bytes:
+                    raise SkillManifestError("manifest_too_large")
+                text = payload.decode("utf-8")
                 raw = yaml.safe_load(text)
+            except SkillManifestError:
+                raise
             except (OSError, UnicodeError, yaml.YAMLError) as exc:
                 raise SkillManifestError("manifest_parse_failed") from exc
             loaded.append(_parse_manifest(raw, source=str(path)))

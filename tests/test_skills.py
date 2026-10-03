@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
-
+import mcp_studio.skills as skills_module
 from mcp_studio.skills import (
     SkillDefinition,
     SkillManifestError,
@@ -58,6 +58,36 @@ def test_load_directory_validates_and_freezes_skill_definition(tmp_path):
         skill.name = "Changed"
     with pytest.raises(TypeError):
         skill.metadata["team"] = "changed"
+
+
+def test_metadata_freezes_nested_mappings_sequences_and_yaml_sets(tmp_path):
+    (tmp_path / "skill.yaml").write_text(
+        """schema: hirda-skill-v1
+id: engineering.review
+name: Engineering Review
+version: '1'
+description: Review software changes.
+scope: {kind: global}
+metadata:
+  nested:
+    values: [one, two]
+    labels: !!set
+      alpha: null
+      beta: null
+""",
+        encoding="utf-8",
+    )
+    skill, = SkillRegistry().load_directory(tmp_path)
+    nested = skill.metadata["nested"]
+    assert isinstance(nested["values"], tuple)
+    assert isinstance(nested["labels"], frozenset)
+    assert nested["labels"] == frozenset({"alpha", "beta"})
+    with pytest.raises(TypeError):
+        nested["new"] = "value"
+    with pytest.raises(TypeError):
+        nested["values"][0] = "changed"
+    with pytest.raises(AttributeError):
+        nested["labels"].add("gamma")
 
 
 @pytest.mark.parametrize("field,value", [
@@ -119,11 +149,85 @@ def test_rejects_symlink_manifest_and_oversized_manifest(tmp_path):
     with pytest.raises(SkillManifestError, match="symlink_manifest_forbidden"):
         SkillRegistry().load_directory(link_dir)
 
+    root_link = tmp_path / "root-link"
+    try:
+        root_link.symlink_to(target.parent, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("directory symlinks are not available")
+    with pytest.raises(SkillManifestError, match="symlink_directory_forbidden"):
+        SkillRegistry().load_directory(root_link)
+
     oversized_dir = tmp_path / "oversized"
     oversized_dir.mkdir()
     (oversized_dir / "large.yaml").write_text("x" * 20, encoding="utf-8")
     with pytest.raises(SkillManifestError, match="manifest_too_large"):
         SkillRegistry().load_directory(oversized_dir, max_manifest_bytes=10)
+
+
+def test_repeated_yaml_aliases_are_traversed_once_per_validation_pass(tmp_path, monkeypatch):
+    levels = ["base: &base {leaf: value}"]
+    previous = "base"
+    for index in range(8):
+        name = f"level{index}"
+        levels.append(f"{name}: &{name} [*{previous}, *{previous}]")
+        previous = name
+    (tmp_path / "aliases.yaml").write_text(
+        """schema: hirda-skill-v1
+id: engineering.review
+name: Engineering Review
+version: '1'
+description: Review software changes.
+scope: {kind: global}
+metadata:
+""" + "\n".join("  " + line for line in levels) + "\n",
+        encoding="utf-8",
+    )
+
+    original = skills_module._normalized_key
+    visits = 0
+
+    def count_leaf_visits(value):
+        nonlocal visits
+        if value == "leaf":
+            visits += 1
+        return original(value)
+
+    monkeypatch.setattr(skills_module, "_normalized_key", count_leaf_visits)
+    loaded = SkillRegistry().load_directory(tmp_path)
+    assert len(loaded) == 1
+    # The manifest is checked once as a whole and once for frozen SkillDefinition metadata.
+    assert visits == 2
+
+
+def test_oversized_manifest_is_rejected_after_only_bounded_read(tmp_path, monkeypatch):
+    path = tmp_path / "large.yaml"
+    path.write_bytes(b"x" * 100)
+    original_open = Path.open
+    read_sizes = []
+
+    class ReadSpy:
+        def __init__(self, file):
+            self.file = file
+
+        def __enter__(self):
+            self.file.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.file.__exit__(*args)
+
+        def read(self, size=-1):
+            read_sizes.append(size)
+            return self.file.read(size)
+
+    def spy_open(candidate, *args, **kwargs):
+        file = original_open(candidate, *args, **kwargs)
+        return ReadSpy(file) if candidate == path else file
+
+    monkeypatch.setattr(Path, "open", spy_open)
+    with pytest.raises(SkillManifestError, match="manifest_too_large"):
+        SkillRegistry().load_directory(tmp_path, max_manifest_bytes=10)
+    assert read_sizes == [11]
 
 
 def test_scope_specific_variant_shadows_less_specific_variant(tmp_path):
