@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 
-CAPABILITY_REGISTRY_SCHEMA = "hirda-capability-registry-v2"
+CAPABILITY_REGISTRY_SCHEMA = "hirda-capability-registry-v1"
 CAPABILITY_RESOLUTION_SCHEMA = "hirda-capability-resolution-v1"
 
 
