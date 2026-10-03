@@ -16,11 +16,9 @@ function pstackCanonicalState(trace){
     if(traceStatus==='expired'||terminalDisposition==='expired')return 'expired';
     const lifecycleStatus=String(lifecycle.status||'').toLowerCase();
     if(['completed','blocked'].includes(lifecycleStatus))return lifecycleStatus;
-    if(lifecycleStatus==='active'){
-      const phase=String(lifecycle.current_phase||'').toLowerCase();
-      if(phase)return phase;
-      return 'active';
-    }
+    if(['queued','running','waiting','executing','failed'].includes(traceStatus))return traceStatus;
+    if(traceStatus==='ready_for_hirda')return 'queued';
+    if(lifecycleStatus==='active')return 'waiting';
     return traceStatus||'idle';
   }
   return String(trace||'idle').toLowerCase();
@@ -33,11 +31,13 @@ function pstackTraceStatus(trace){
   if(normalized==='expired')return ['EXPIRED','idle'];
   if(normalized==='failed')return ['FAILED','failed'];
   if(normalized==='blocked')return ['BLOCKED','failed'];
-  if(normalized==='executing')return ['HIRDA EXECUTING','running'];
-  if(normalized==='planned')return ['HIRDA PLANNED','ready'];
-  if(['analyze','plan','implement','review','verify','done','admitted','working','verified','terminal'].includes(normalized))return [normalized.toUpperCase(),normalized==='done'?'passed':'running'];
-  if(normalized==='active')return ['ACTIVE','running'];
+  if(normalized==='queued')return ['QUEUED','ready'];
   if(normalized==='running')return ['RUNNING','running'];
+  if(normalized==='waiting')return ['WAITING','idle'];
+  if(normalized==='executing')return ['RUNNING','running'];
+  if(normalized==='planned')return ['QUEUED','ready'];
+  if(['analyze','plan','implement','review','verify','done','admitted','working','verified','terminal'].includes(normalized))return [normalized.toUpperCase(),normalized==='done'?'passed':'idle'];
+  if(normalized==='active')return ['WAITING','idle'];
   return [normalized.toUpperCase(),'idle'];
 }
 

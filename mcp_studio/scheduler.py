@@ -27,6 +27,7 @@ class Scheduler:
         self.db = db
         self.health = health
         self.herdr = herdr
+        self.execution: Any | None = None
         self._task: asyncio.Task | None = None
         self._stopping = asyncio.Event()
         self._wake = asyncio.Event()
@@ -148,6 +149,51 @@ class Scheduler:
 
                 free_workers.pop(0)
                 started += 1
+                metadata = assigned.get("metadata")
+                metadata = metadata if isinstance(metadata, dict) else {}
+                pstack_task_id = str(
+                    metadata.get("pstack_task_id") or ""
+                ).strip()
+                pstack_trace_id = str(
+                    metadata.get("pstack_trace_id") or ""
+                ).strip()
+                if pstack_task_id:
+                    await self.db.patch_pstack_task(
+                        pstack_task_id,
+                        {
+                            "work_id": assigned["id"],
+                            "status": "running",
+                            "execution_state": "assigned",
+                        },
+                    )
+                    if pstack_trace_id:
+                        await self.db.add_event(
+                            "pstack.execution.running",
+                            f"PStack task {pstack_task_id} assigned to Scheduler worker",
+                            data={
+                                "task_id": pstack_task_id,
+                                "trace_id": pstack_trace_id,
+                                "work_id": assigned["id"],
+                                "actor": "hirda",
+                                "phase": "scheduler_running",
+                                "title": "Scheduler running",
+                                "detail": (
+                                    f"Work {assigned['id']} was assigned to "
+                                    f"{worker['id']}."
+                                ),
+                                "status": "running",
+                                "trace_status": "running",
+                                "metadata": {
+                                    "worker_id": worker["id"],
+                                    "pane": assigned.get("pane"),
+                                },
+                            },
+                            stream_id=f"pstack:{pstack_trace_id}",
+                            correlation_id=pstack_trace_id,
+                        )
+                execution = getattr(self, "execution", None)
+                if execution is not None:
+                    execution.kick()
                 await self.db.add_event(
                     "work.started",
                     f"{assigned['id']} -> {worker['id']} ({assigned['workspace']})",

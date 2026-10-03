@@ -366,6 +366,60 @@ class ExecutionSupervisor:
             self._faults.pop(work_id, None)
         return kind
 
+    @staticmethod
+    def _pstack_execution_metadata(work: dict[str, Any]) -> dict[str, Any]:
+        metadata = work.get("metadata")
+        if not isinstance(metadata, dict):
+            return {}
+        if not str(metadata.get("pstack_task_id") or "").strip():
+            return {}
+        return metadata
+
+    async def _patch_pstack_from_work(
+        self,
+        work: dict[str, Any],
+        *,
+        status: str,
+        execution_state: str,
+    ) -> None:
+        metadata = self._pstack_execution_metadata(work)
+        task_id = str(metadata.get("pstack_task_id") or "").strip()
+        trace_id = str(metadata.get("pstack_trace_id") or "").strip()
+        if not task_id:
+            return
+        await self.db.patch_pstack_task(
+            task_id,
+            {
+                "work_id": work.get("id"),
+                "status": status,
+                "execution_state": execution_state,
+            },
+        )
+        if trace_id:
+            await self.db.add_event(
+                "pstack.execution.state",
+                f"PStack task {task_id} execution state: {status}",
+                data={
+                    "task_id": task_id,
+                    "trace_id": trace_id,
+                    "work_id": work.get("id"),
+                    "actor": "hirda",
+                    "phase": f"execution_{status}",
+                    "title": f"Execution {status}",
+                    "detail": (
+                        f"Scheduler work {work.get('id')} is {status} "
+                        f"({execution_state})."
+                    ),
+                    "status": status,
+                    "trace_status": status,
+                    "metadata": {
+                        "execution_state": execution_state,
+                    },
+                },
+                stream_id=f"pstack:{trace_id}",
+                correlation_id=trace_id,
+            )
+
     async def dispatch(
         self,
         work_id: str,
@@ -405,6 +459,11 @@ class ExecutionSupervisor:
                     execution_state="stalled",
                     failure_class="tool_missing",
                 )
+                await self._patch_pstack_from_work(
+                    work,
+                    status="blocked",
+                    execution_state="stalled",
+                )
                 raise RuntimeError("herdr_prompt_agent is not available")
 
             pane = self._pane_for_work(work)
@@ -415,6 +474,11 @@ class ExecutionSupervisor:
                     failure_class="pane_missing",
                 )
                 await self.db.mark_worker_degraded_for_work(work_id)
+                await self._patch_pstack_from_work(
+                    work,
+                    status="blocked",
+                    execution_state="reconnecting",
+                )
                 raise RuntimeError("target pane is not currently discoverable")
 
             args = build_tool_arguments(
@@ -466,6 +530,11 @@ class ExecutionSupervisor:
                     server_id=work["server_id"],
                     data={"work_id": work_id, "failure_class": failure},
                 )
+                await self._patch_pstack_from_work(
+                    work,
+                    status="blocked",
+                    execution_state=state,
+                )
                 raise
 
             decoded = _decode_text_content(result)
@@ -478,6 +547,11 @@ class ExecutionSupervisor:
                 mark_dispatched=True,
             )
             self.snapshot["dispatches"] += 1
+            await self._patch_pstack_from_work(
+                item,
+                status="running",
+                execution_state="waiting_agent",
+            )
             await self.db.add_event(
                 "execution.dispatched",
                 f"{work_id} dispatched to {pane.get('pane_id')}",
@@ -559,6 +633,11 @@ class ExecutionSupervisor:
             "output": output,
         }
         item = await self.db.finish_work(work["id"], state="completed", result=result)
+        await self._patch_pstack_from_work(
+            item,
+            status="waiting",
+            execution_state="completed",
+        )
         self.snapshot["completed"] += 1
         await self.db.add_event(
             "execution.completed",
@@ -584,6 +663,11 @@ class ExecutionSupervisor:
                 severity="warning",
                 server_id=work["server_id"],
                 data={"work_id": work["id"], "pane": work.get("pane")},
+            )
+            await self._patch_pstack_from_work(
+                work,
+                status="blocked",
+                execution_state="reconnecting",
             )
             return
 
@@ -641,6 +725,11 @@ class ExecutionSupervisor:
                     server_id=work["server_id"],
                     data={"work_id": work["id"], "pane": pane.get("pane_id")},
                 )
+                await self._patch_pstack_from_work(
+                    work,
+                    status="blocked",
+                    execution_state="stalled",
+                )
 
     async def _recover(self, work: dict[str, Any]) -> None:
         if int(work.get("recovery_count") or 0) >= self.settings.studio.execution_max_recoveries:
@@ -648,6 +737,11 @@ class ExecutionSupervisor:
                 work["id"], execution_state="stalled", failure_class="recovery_exhausted"
             )
             await self.db.mark_worker_degraded_for_work(work["id"])
+            await self._patch_pstack_from_work(
+                work,
+                status="blocked",
+                execution_state="stalled",
+            )
             return
         if self.herdr.snapshot.get("status") == "down":
             return
@@ -687,6 +781,11 @@ class ExecutionSupervisor:
             server_id=work["server_id"],
             data={"work_id": work["id"], "pane": pane.get("pane_id"), "recovery_count": item.get("recovery_count"), "execution_state": next_state},
         )
+        await self._patch_pstack_from_work(
+            item,
+            status="blocked" if next_state == "stalled" else "running",
+            execution_state=next_state,
+        )
 
     async def _process_one(self, work: dict[str, Any], upstream_snapshot: dict[str, Any]) -> bool:
         state = work.get("execution_state") or "none"
@@ -706,11 +805,25 @@ class ExecutionSupervisor:
                 server_id=work["server_id"],
                 data={"work_id": work["id"], "kind": fault},
             )
+            await self._patch_pstack_from_work(
+                work,
+                status="blocked",
+                execution_state="reconnecting",
+            )
             return True
 
         if state in {"none", "assigned"}:
-            if self.settings.studio.execution_enabled:
-                await self.dispatch(work["id"], explicit=False, refresh=False)
+            metadata = self._pstack_execution_metadata(work)
+            pstack_auto_dispatch = metadata.get("pstack_auto_dispatch") is True
+            if self.settings.studio.execution_enabled or pstack_auto_dispatch:
+                await self.dispatch(
+                    work["id"],
+                    explicit=(
+                        pstack_auto_dispatch
+                        and not self.settings.studio.execution_enabled
+                    ),
+                    refresh=False,
+                )
                 return True
             return False
         if state == "waiting_agent":
@@ -719,6 +832,11 @@ class ExecutionSupervisor:
                     work["id"], execution_state="reconnecting", failure_class="mcp_transport"
                 )
                 await self.db.mark_worker_degraded_for_work(work["id"])
+                await self._patch_pstack_from_work(
+                    work,
+                    status="blocked",
+                    execution_state="reconnecting",
+                )
             else:
                 await self._monitor_waiting(work)
             return True

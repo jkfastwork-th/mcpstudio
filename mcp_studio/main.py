@@ -100,6 +100,7 @@ capsules = CapsuleService(
 agent_runtimes = AgentRuntimeInventory(herdr)
 scheduler = Scheduler(settings, db, health, herdr)
 execution = ExecutionSupervisor(settings, db, herdr, scheduler)
+scheduler.execution = execution
 connectivity = ConnectivityManager(settings, db)
 oauth = OAuthManager(settings, db)
 managed_sessions = ManagedSessionManager(settings, db)
@@ -174,6 +175,8 @@ gateway_sessions = GatewaySessionManager(
     machine_enrollment,
     herdr,
 )
+gateway_sessions.scheduler = scheduler
+gateway_sessions.execution = execution
 operations = OperationsManager(settings, db)
 observability = ObservabilityManager(settings, db)
 reflex_metrics = ReflexMetrics(settings.studio)
@@ -233,6 +236,7 @@ async def lifespan(app: FastAPI):
     await observability.start()
     await scheduler.start()
     await execution.start()
+    await gateway_sessions.reconcile_pstack_execution_work()
     await connectivity.start()
     await db.add_audit("studio.start", actor="system", data={"version": "0.9.10-m6.2.5", "production_mode": settings.studio.production_mode})
     yield
@@ -1197,8 +1201,15 @@ async def _pstack_activity_snapshot(
             trace["status"] = "completed"
         elif lifecycle_status == "blocked":
             trace["status"] = "blocked"
-        elif lifecycle_status == "active" and trace_status != "failed":
-            trace["status"] = "active"
+        elif trace_status in {"queued", "running", "waiting", "executing", "failed"}:
+            trace["status"] = trace_status
+        elif trace_status == "ready_for_hirda":
+            trace["status"] = "queued"
+        elif lifecycle_status == "active":
+            # Lifecycle activity is methodology state, not proof that execution
+            # is currently running. Legacy floating "active" tasks project as
+            # waiting until Scheduler/ExecutionSupervisor supplies runtime state.
+            trace["status"] = "waiting"
         if current_phase:
             stages = lifecycle.get("stages")
             stages = stages if isinstance(stages, list) else []

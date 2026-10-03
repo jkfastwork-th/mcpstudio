@@ -2489,6 +2489,57 @@ class Database:
         item["execution"] = json.loads(execution_raw or "{}")
         return item
 
+    async def patch_pstack_task(
+        self,
+        task_id: str,
+        patch: dict[str, Any],
+    ) -> int:
+        """Patch every canonical copy of one active PStack task.
+
+        PStack task envelopes are mirrored across logical, gateway, and managed
+        sessions. Execution state must stay identical across those copies so
+        activity projection cannot resurrect a stale "active" status.
+        """
+        task_key = str(task_id or "").strip()
+        if not task_key:
+            return 0
+        patch_value = dict(patch or {})
+        if not patch_value:
+            return 0
+
+        def op() -> int:
+            updated = 0
+            with self._connect() as db:
+                for table in ("sessions", "gateway_sessions", "managed_sessions"):
+                    rows = db.execute(
+                        f"SELECT id, metadata_json FROM {table}"
+                    ).fetchall()
+                    for row in rows:
+                        try:
+                            metadata = json.loads(row["metadata_json"] or "{}")
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            continue
+                        task = metadata.get("active_pstack_task")
+                        if not isinstance(task, dict):
+                            continue
+                        if str(task.get("task_id") or "").strip() != task_key:
+                            continue
+                        metadata["active_pstack_task"] = {
+                            **task,
+                            **patch_value,
+                        }
+                        db.execute(
+                            f"UPDATE {table} SET metadata_json=? WHERE id=?",
+                            (
+                                json.dumps(metadata, ensure_ascii=False),
+                                row["id"],
+                            ),
+                        )
+                        updated += 1
+            return updated
+
+        return await self._run(op)
+
     async def create_work(self, payload: dict[str, Any], default_server_id: str) -> dict[str, Any]:
         work_id = f"work-{uuid.uuid4().hex[:16]}"
         now = _now()

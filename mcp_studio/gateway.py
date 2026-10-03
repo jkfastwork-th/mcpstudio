@@ -127,6 +127,8 @@ class GatewaySessionManager:
         self.machine_router = machine_router
         self.machine_enrollment = machine_enrollment
         self.herdr = herdr
+        self.scheduler: Any | None = None
+        self.execution: Any | None = None
         self.mcp_events = McpEventService(settings, db)
         # Live transports are process-local and only accelerate delivery. The
         # durable peer inbox remains the source of truth.
@@ -3243,6 +3245,200 @@ class GatewaySessionManager:
             )
         return task
 
+    @staticmethod
+    def _pstack_status_from_work(work: dict[str, Any]) -> tuple[str, str]:
+        work_state = str(work.get("state") or "").strip().casefold()
+        execution_state = str(work.get("execution_state") or "").strip().casefold()
+        if work_state == "queued":
+            return "queued", execution_state or "queued"
+        if work_state == "running":
+            if execution_state in {"stalled", "dispatch_uncertain"}:
+                return "blocked", execution_state
+            return "running", execution_state or "running"
+        if work_state == "completed":
+            return "waiting", execution_state or "completed"
+        if work_state == "failed":
+            return "failed", execution_state or "failed"
+        if work_state in {"cancelled", "detached"}:
+            return "waiting", execution_state or work_state
+        return "waiting", execution_state or work_state or "unknown"
+
+    async def _ensure_pstack_execution_work(
+        self,
+        gateway_session_id: str,
+        task: dict[str, Any],
+        *,
+        managed_session: dict[str, Any],
+    ) -> dict[str, Any]:
+        task_value = dict(task or {})
+        task_id = str(task_value.get("task_id") or "").strip()
+        trace_id = str(task_value.get("trace_id") or "").strip()
+        if not task_id or not trace_id:
+            return task_value
+
+        terminal = {"completed", "expired", "failed", "blocked", "cancelled"}
+        if str(task_value.get("status") or "").strip().casefold() in terminal:
+            return task_value
+
+        existing_work_id = str(task_value.get("work_id") or "").strip()
+        if existing_work_id:
+            try:
+                work = await self.db.get_work(existing_work_id)
+            except KeyError:
+                work = None
+            if work is not None:
+                task_status, execution_state = self._pstack_status_from_work(work)
+                return {
+                    **task_value,
+                    "status": task_status,
+                    "execution_state": execution_state,
+                }
+
+        directive = dict(task_value.get("workflow_directive") or {})
+        instruction = str(directive.get("prompt") or "").strip()
+        if not instruction:
+            return {
+                **task_value,
+                "status": "waiting",
+                "execution_state": "instruction_missing",
+            }
+
+        tab = dict(task_value.get("herdr_tab") or {})
+        pane_id = str(tab.get("root_pane_id") or "").strip() or None
+        project_path = str(managed_session.get("project_path") or "").strip()
+        if not project_path:
+            return {
+                **task_value,
+                "status": "waiting",
+                "execution_state": "workspace_missing",
+            }
+
+        studio_session_id: str | None = None
+        try:
+            gateway = await self.db.get_gateway_session(gateway_session_id)
+        except KeyError:
+            gateway = None
+        if gateway is not None:
+            studio_session_id = (
+                str(gateway.get("studio_session_id") or "").strip() or None
+            )
+
+        work = await self.db.create_work(
+            {
+                "label": f"[PStack] {task_id} · {str(task_value.get('goal') or '')[:160]}",
+                "workspace": project_path,
+                "priority": int(task_value.get("priority") or 50),
+                "lease_mode": "write",
+                "session_id": studio_session_id,
+                "pane": pane_id,
+                "agent": None,
+                "server_id": self.settings.studio.worker_server_id or "serena-8001",
+                "dispatch_mode": "herdr",
+                "instruction": instruction,
+                "metadata": {
+                    "pstack_task_id": task_id,
+                    "pstack_trace_id": trace_id,
+                    "managed_session_id": task_value.get("managed_session_id"),
+                    "gateway_session_id": gateway_session_id,
+                    "pstack_auto_dispatch": True,
+                    "dedupe_key": f"pstack:{task_id}",
+                },
+            },
+            self.settings.studio.worker_server_id or "serena-8001",
+        )
+        await self.db.add_event(
+            "pstack.execution.queued",
+            f"PStack task {task_id} queued for execution",
+            data={
+                "task_id": task_id,
+                "trace_id": trace_id,
+                "work_id": work.get("id"),
+                "workspace_key": task_value.get("workspace_key"),
+                "managed_session_id": task_value.get("managed_session_id"),
+                "gateway_session_id": gateway_session_id,
+                "actor": "hirda",
+                "phase": "scheduler_queued",
+                "title": "Queued for Scheduler",
+                "detail": "HIRDA created an execution-backed work item for this PStack task.",
+                "status": "queued",
+                "trace_status": "queued",
+            },
+            stream_id=f"pstack:{trace_id}",
+            correlation_id=trace_id,
+        )
+        scheduler = getattr(self, "scheduler", None)
+        if scheduler is not None:
+            scheduler.kick()
+        execution = getattr(self, "execution", None)
+        if execution is not None:
+            execution.kick()
+        return {
+            **task_value,
+            "work_id": work.get("id"),
+            "status": "queued",
+            "execution_state": "queued",
+        }
+
+    async def reconcile_pstack_execution_work(self) -> dict[str, int]:
+        """Queue execution for nonterminal PStack tasks that predate the bridge."""
+        scanned = 0
+        queued = 0
+        updated = 0
+        for managed in await self.db.list_managed_sessions(limit=1000):
+            metadata = managed.get("metadata")
+            metadata = metadata if isinstance(metadata, dict) else {}
+            task = metadata.get("active_pstack_task")
+            task = dict(task) if isinstance(task, dict) else {}
+            task_id = str(task.get("task_id") or "").strip()
+            trace_id = str(task.get("trace_id") or "").strip()
+            if not task_id or not trace_id:
+                continue
+            scanned += 1
+            lifecycle = task.get("lifecycle")
+            lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+            task_status = str(task.get("status") or "").strip().casefold()
+            if (
+                task_status in {"completed", "expired", "failed", "blocked", "cancelled"}
+                or str(lifecycle.get("status") or "").strip().casefold()
+                in {"completed", "blocked"}
+            ):
+                continue
+            gateway_session_id = str(task.get("gateway_session_id") or "").strip()
+            if not gateway_session_id:
+                siblings = await self.db.list_gateway_sessions_for_managed_session(
+                    str(managed.get("id") or "")
+                )
+                gateway_session_id = str(
+                    (siblings[0] if siblings else {}).get("id") or ""
+                ).strip()
+            if not gateway_session_id:
+                await self.db.patch_pstack_task(
+                    task_id,
+                    {
+                        "status": "waiting",
+                        "execution_state": "gateway_session_missing",
+                    },
+                )
+                updated += 1
+                continue
+
+            before_work_id = str(task.get("work_id") or "").strip()
+            reconciled = await self._ensure_pstack_execution_work(
+                gateway_session_id,
+                task,
+                managed_session=managed,
+            )
+            patch = {
+                key: reconciled.get(key)
+                for key in ("work_id", "status", "execution_state")
+                if reconciled.get(key) is not None
+            }
+            if patch:
+                updated += await self.db.patch_pstack_task(task_id, patch)
+            if not before_work_id and reconciled.get("work_id"):
+                queued += 1
+        return {"scanned": scanned, "queued": queued, "updated": updated}
+
     async def _open_pstack_gateway_task(
         self,
         gateway_session_id: str,
@@ -3380,6 +3576,11 @@ class GatewaySessionManager:
                 task,
                 managed_session=managed_session,
             )
+            task = await self._ensure_pstack_execution_work(
+                gateway_session_id,
+                task,
+                managed_session=managed_session,
+            )
             await self._persist_active_pstack_task(
                 gateway_session_id,
                 task,
@@ -3451,19 +3652,19 @@ class GatewaySessionManager:
         if not trace_id:
             return
         task_status = str(task.get("status") or "").casefold()
-        if status == "running" and task_status in {"ready_for_hirda", "failed"}:
-            task = {**task, "status": "active"}
-            studio_session_id = str(session.get("studio_session_id") or "").strip()
-            if studio_session_id:
-                await self.db.heartbeat_session(
-                    studio_session_id,
-                    {"metadata": {"active_pstack_task": task}},
-                )
+        if status == "running" and task_status in {
+            "ready_for_hirda",
+            "queued",
+            "waiting",
+            "active",
+            "failed",
+        }:
+            task = {**task, "status": "running"}
             gateway_session_id = str(session.get("id") or "").strip()
             if gateway_session_id:
-                await self.db.update_gateway_session_metadata(
+                await self._persist_active_pstack_task(
                     gateway_session_id,
-                    {"active_pstack_task": task},
+                    task,
                 )
             await self.db.add_event(
                 "pstack.hirda_execution_started",
@@ -3505,9 +3706,9 @@ class GatewaySessionManager:
                 "status": status,
                 "tool": tool_name,
                 "trace_status": (
-                    "executing" if status == "running"
+                    "running" if status == "running"
                     else "failed" if status == "failed"
-                    else "active"
+                    else str(task.get("status") or "waiting")
                 ),
                 "metadata": dict(metadata or {}),
             },

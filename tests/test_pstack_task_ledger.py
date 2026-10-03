@@ -613,6 +613,7 @@ class _GatewayDb:
         self.managed_metadata = {}
         self.sibling_gateways = []
         self.gateway_sessions = {}
+        self.work_items = {}
         self.events = []
 
     async def get_gateway_session(self, gateway_id):
@@ -663,6 +664,29 @@ class _GatewayDb:
 
     async def add_event(self, kind, message, **kwargs):
         self.events.append((kind, message, kwargs))
+
+    async def create_work(self, payload, default_server_id):
+        work_id = f"work-{len(self.work_items) + 1}"
+        item = {
+            "id": work_id,
+            "label": payload["label"],
+            "workspace": payload["workspace"],
+            "priority": payload.get("priority", 50),
+            "state": "queued",
+            "execution_state": "none",
+            "dispatch_mode": payload.get("dispatch_mode", "manual"),
+            "instruction": payload.get("instruction"),
+            "requested_pane": payload.get("pane"),
+            "metadata": dict(payload.get("metadata") or {}),
+            "server_id": payload.get("server_id") or default_server_id,
+        }
+        self.work_items[work_id] = item
+        return dict(item)
+
+    async def get_work(self, work_id):
+        if work_id not in self.work_items:
+            raise KeyError(work_id)
+        return dict(self.work_items[work_id])
 
 
 class _GatewayPstackAdapter:
@@ -758,6 +782,9 @@ class _GatewayHerdr:
 @pytest.mark.asyncio
 async def test_gateway_task_envelope_persists_trace_and_tool_activity():
     gateway = object.__new__(GatewaySessionManager)
+    gateway.settings = SimpleNamespace(
+        studio=SimpleNamespace(worker_server_id="serena-8001")
+    )
     gateway.db = _GatewayDb()
     gateway.integrations = _GatewayIntegrations()
 
@@ -766,6 +793,7 @@ async def test_gateway_task_envelope_persists_trace_and_tool_activity():
         managed_session={
             "id": "ms-1",
             "workspace_key": "mcp-studio",
+            "project_path": "/work/mcp-studio",
         },
         goal="Add persistent Pstack task ledger",
     )
@@ -773,12 +801,14 @@ async def test_gateway_task_envelope_persists_trace_and_tool_activity():
     assert task is not None
     assert task["trace_id"] == "TRACE-GW"
     assert task["workspace_key"] == "mcp-studio"
-    assert task["status"] == "ready_for_hirda"
+    assert task["status"] == "queued"
     assert task["lifecycle"]["schema"] == "hirda-pstack-lifecycle-v2"
     assert task["lifecycle"]["current_phase"] == "admitted"
     assert task["lifecycle"]["status"] == "active"
     assert task["lifecycle"]["orchestration_owner"] == "hirda"
     assert task["lifecycle"]["methodology_owner"] == "pstack"
+    assert task["work_id"] == "work-1"
+    assert gateway.db.work_items["work-1"]["metadata"]["pstack_auto_dispatch"] is True
     assert task["workflow_directive"]["capability"] == "coding"
     assert task["workflow_directive"]["context"]["workflow_provider"] == "pstack"
     assert gateway.integrations.calls[0][1]["workflow_hint"] == "engineering_task"
@@ -824,13 +854,16 @@ async def test_gateway_task_envelope_persists_trace_and_tool_activity():
     ]
     assert len(hirda_events) == 1
     assert hirda_events[0][2]["data"]["trace_status"] == "executing"
-    assert gateway.db.logical_metadata["active_pstack_task"]["status"] == "active"
-    assert gateway.db.metadata["active_pstack_task"]["status"] == "active"
+    assert gateway.db.logical_metadata["active_pstack_task"]["status"] == "running"
+    assert gateway.db.metadata["active_pstack_task"]["status"] == "running"
 
 
 @pytest.mark.asyncio
 async def test_pstack_task_owns_disposable_herdr_tab_until_done():
     gateway = object.__new__(GatewaySessionManager)
+    gateway.settings = SimpleNamespace(
+        studio=SimpleNamespace(worker_server_id="serena-8001")
+    )
     gateway.db = _GatewayDb()
     gateway.integrations = _GatewayIntegrations()
     gateway.herdr = _GatewayHerdr()
@@ -904,14 +937,21 @@ async def test_pstack_task_owns_disposable_herdr_tab_until_done():
 @pytest.mark.asyncio
 async def test_gateway_pstack_failed_tool_persists_terminal_status():
     gateway = object.__new__(GatewaySessionManager)
+    gateway.settings = SimpleNamespace(
+        studio=SimpleNamespace(worker_server_id="serena-8001")
+    )
     gateway.db = _GatewayDb()
     gateway.integrations = _GatewayIntegrations()
     task = await gateway._open_pstack_gateway_task(
         "gws-1",
-        managed_session={"id": "ms-1", "workspace_key": "mcp-studio"},
+        managed_session={
+            "id": "ms-1",
+            "workspace_key": "mcp-studio",
+            "project_path": "/work/mcp-studio",
+        },
         goal="Persist failed Pstack execution state",
     )
-    assert task["status"] == "ready_for_hirda"
+    assert task["status"] == "queued"
     session = {
         "id": "gws-1",
         "studio_session_id": "studio-1",
@@ -923,7 +963,7 @@ async def test_gateway_pstack_failed_tool_persists_terminal_status():
         status="running",
         detail="HIRDA dispatched tests.",
     )
-    assert gateway.db.metadata["active_pstack_task"]["status"] == "active"
+    assert gateway.db.metadata["active_pstack_task"]["status"] == "running"
     await gateway._record_active_pstack_tool(
         session,
         tool_name="run_tests",
