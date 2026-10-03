@@ -31,8 +31,12 @@ from mcp_studio.skill_runtime import (
     MAX_SKILL_ID_CHARS,
     MAX_SKILL_ID_COUNT,
     MAX_TASK_TEXT_CHARS,
+    MAX_TASK_TEXT_PART_CHARS,
     SkillRequestError,
     SkillRuntime,
+    _build_task_text,
+    _validate_ids,
+    _validate_skill_ids,
 )
 from mcp_studio.skills import SkillDefinition, SkillRegistry, SkillScope
 
@@ -242,6 +246,43 @@ def test_invalid_skill_selection_fails_closed(tmp_path, metadata):
     runtime = SkillRuntime(enabled=True, path=tmp_path, base_dir=tmp_path)
     with pytest.raises(SkillRequestError, match="skill_request_invalid"):
         runtime.enrich_work_payload({"label": "Review", "workspace": "repo", "metadata": metadata})
+
+
+def test_id_count_is_rejected_before_iterating_items():
+    class NonIterableOversizedList(list):
+        def __len__(self):
+            return MAX_SKILL_ID_COUNT + 1
+
+        def __iter__(self):
+            raise AssertionError("oversized request IDs must be rejected before iteration")
+
+    oversized = NonIterableOversizedList()
+    with pytest.raises(SkillRequestError, match="skill_request_invalid"):
+        _validate_ids(oversized)
+    with pytest.raises(SkillRequestError, match="skill_request_invalid"):
+        _validate_skill_ids(NonIterableOversizedList(), ())
+
+
+def test_task_text_bounds_each_large_part_before_join_then_bounds_combined_text():
+    sliced_inputs = []
+
+    class ProbeText(str):
+        def __getitem__(self, key):
+            if isinstance(key, slice):
+                sliced_inputs.append((key.stop, len(self)))
+            return super().__getitem__(key)
+
+    label = ProbeText("  label-first  " + " " * (MAX_TASK_TEXT_PART_CHARS * 3))
+    instruction = ProbeText("  instruction-second  " + " " * (MAX_TASK_TEXT_PART_CHARS * 3))
+    text = _build_task_text(label, instruction)
+    assert len(text) <= MAX_TASK_TEXT_CHARS
+    assert text.startswith("label-first")
+    assert "\n\ninstruction-second" in text
+    assert text.index("label-first") < text.index("instruction-second")
+    assert sliced_inputs == [
+        (MAX_TASK_TEXT_PART_CHARS, len(label)),
+        (MAX_TASK_TEXT_PART_CHARS, len(instruction)),
+    ]
 
 
 def test_label_trigger_is_retained_when_instruction_is_nonempty_and_text_is_bounded(tmp_path):

@@ -15,6 +15,7 @@ DEFAULT_MAX_MANIFEST_BYTES = 256 * 1024
 MAX_SKILL_DOMAIN_CHARS = 120
 MAX_SKILL_ID_CHARS = 128
 MAX_SKILL_ID_COUNT = 32
+MAX_TASK_TEXT_PART_CHARS = 4096
 MAX_TASK_TEXT_CHARS = 4096
 
 
@@ -132,17 +133,14 @@ class SkillRuntime:
             return enriched
 
         domain = _validate_domain(metadata.get("domain"))
-        explicit_ids = _validate_ids(metadata.get("explicit_skill_ids", ()))
-        advisory_ids = _validate_ids(metadata.get("advisory_skill_ids", ()))
-        if len(explicit_ids) + len(advisory_ids) > MAX_SKILL_ID_COUNT:
-            raise SkillRequestError("skill_request_invalid")
+        explicit_ids, advisory_ids = _validate_skill_ids(
+            metadata.get("explicit_skill_ids", ()),
+            metadata.get("advisory_skill_ids", ()),
+        )
         if state.status == "ready":
             label = enriched.get("label")
             instruction = enriched.get("instruction")
-            label_text = label.strip() if isinstance(label, str) else ""
-            instruction_text = instruction.strip() if isinstance(instruction, str) else ""
-            task_text = "\n\n".join(part for part in (label_text, instruction_text) if part)
-            task_text = task_text[:MAX_TASK_TEXT_CHARS]
+            task_text = _build_task_text(label, instruction)
             resolution = state.registry.resolve(
                 task_text,
                 workspace=enriched.get("workspace"),
@@ -179,6 +177,8 @@ def _validate_domain(value: Any) -> str | None:
 def _validate_ids(value: Any) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         raise SkillRequestError("skill_request_invalid")
+    if len(value) > MAX_SKILL_ID_COUNT:
+        raise SkillRequestError("skill_request_invalid")
     result: list[str] = []
     seen: set[str] = set()
     for raw in value:
@@ -192,6 +192,25 @@ def _validate_ids(value: Any) -> tuple[str, ...]:
         seen.add(skill_id)
         result.append(skill_id)
     return tuple(result)
+
+
+def _validate_skill_ids(explicit_value: Any, advisory_value: Any) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if not isinstance(explicit_value, (list, tuple)) or not isinstance(advisory_value, (list, tuple)):
+        raise SkillRequestError("skill_request_invalid")
+    if len(explicit_value) + len(advisory_value) > MAX_SKILL_ID_COUNT:
+        raise SkillRequestError("skill_request_invalid")
+    return _validate_ids(explicit_value), _validate_ids(advisory_value)
+
+
+def _build_task_text(label: Any, instruction: Any) -> str:
+    label_text = label[:MAX_TASK_TEXT_PART_CHARS].strip() if isinstance(label, str) else ""
+    instruction_text = (
+        instruction[:MAX_TASK_TEXT_PART_CHARS].strip()
+        if isinstance(instruction, str)
+        else ""
+    )
+    combined = "\n\n".join(part for part in (label_text, instruction_text) if part)
+    return combined[:MAX_TASK_TEXT_CHARS]
 
 
 def _serialize_resolution(
