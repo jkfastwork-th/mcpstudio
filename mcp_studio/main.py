@@ -913,6 +913,9 @@ async def _pstack_activity_snapshot(
             trace["tool"] = data.get("tool")
         if data.get("task_id"):
             trace["task_id"] = data.get("task_id")
+        for lineage_key in ("resumed_from", "resumed_from_trace_id", "resume_context"):
+            if data.get(lineage_key) is not None:
+                trace[lineage_key] = data.get(lineage_key)
         if isinstance(data.get("lifecycle"), dict):
             trace["lifecycle"] = dict(data.get("lifecycle") or {})
         identity_fields = {
@@ -1072,8 +1075,15 @@ async def _pstack_activity_snapshot(
                 "identity": {},
             },
         )
-        for key in ("task_id", "goal", "workflow"):
-            if task.get(key):
+        for key in (
+            "task_id",
+            "goal",
+            "workflow",
+            "resumed_from",
+            "resumed_from_trace_id",
+            "resume_context",
+        ):
+            if task.get(key) is not None:
                 trace[key] = task.get(key)
         if lifecycle:
             trace["lifecycle"] = lifecycle
@@ -1222,6 +1232,201 @@ async def pstack_activity_status(since: int = 0, limit: int = 100):
         since=max(0, since),
         limit=limit,
     )
+
+
+@app.post("/api/pstack/activity/{trace_id}/resume")
+async def pstack_activity_resume(trace_id: str):
+    requested_trace = str(trace_id or "").strip()
+    snapshot = await _pstack_activity_snapshot(limit=500)
+    trace = next(
+        (
+            item
+            for item in snapshot.get("traces") or []
+            if str(item.get("trace_id") or "").strip() == requested_trace
+        ),
+        None,
+    )
+    if trace is None:
+        raise HTTPException(status_code=404, detail="PStack trace not found")
+
+    lifecycle = trace.get("lifecycle")
+    lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+    trace_status = str(trace.get("status") or "").strip().casefold()
+    terminal_disposition = str(
+        lifecycle.get("terminal_disposition")
+        or trace.get("terminal_disposition")
+        or ""
+    ).strip().casefold()
+    if trace_status != "expired" and terminal_disposition != "expired":
+        raise HTTPException(
+            status_code=409,
+            detail="Only expired PStack tasks can be resumed as a new task",
+        )
+
+    identity = trace.get("identity")
+    identity = identity if isinstance(identity, dict) else {}
+    managed_session_id = str(identity.get("managed_session_id") or "").strip()
+    if not managed_session_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Expired trace has no managed workspace owner to resume",
+        )
+    try:
+        managed = await db.get_managed_session(managed_session_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Managed workspace for this expired task no longer exists",
+        ) from exc
+
+    def is_nonterminal_task(task: dict[str, Any] | None) -> bool:
+        candidate = task if isinstance(task, dict) else {}
+        if not candidate or not str(candidate.get("trace_id") or "").strip():
+            return False
+        candidate_lifecycle = candidate.get("lifecycle")
+        candidate_lifecycle = (
+            candidate_lifecycle if isinstance(candidate_lifecycle, dict) else {}
+        )
+        return (
+            str(candidate.get("status") or "").strip().casefold()
+            not in {"completed", "expired", "failed", "cancelled", "blocked"}
+            and str(candidate_lifecycle.get("status") or "").strip().casefold()
+            not in {"completed", "blocked"}
+        )
+
+    managed_task = dict(
+        ((managed.get("metadata") or {}).get("active_pstack_task") or {})
+    )
+    if is_nonterminal_task(managed_task):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Workspace already has an active PStack task: "
+                f"{managed_task.get('task_id') or managed_task.get('trace_id')}"
+            ),
+        )
+
+    gateway_rows = await db.list_gateway_sessions_for_managed_session(
+        managed_session_id
+    )
+    checked_logical_sessions: set[str] = set()
+    for row in gateway_rows:
+        gateway_task = dict(
+            ((row.get("metadata") or {}).get("active_pstack_task") or {})
+        )
+        if is_nonterminal_task(gateway_task):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Workspace already has an active PStack task: "
+                    f"{gateway_task.get('task_id') or gateway_task.get('trace_id')}"
+                ),
+            )
+        studio_session_id = str(row.get("studio_session_id") or "").strip()
+        if studio_session_id and studio_session_id not in checked_logical_sessions:
+            checked_logical_sessions.add(studio_session_id)
+            try:
+                logical = await db.get_session(studio_session_id)
+            except KeyError:
+                logical = None
+            logical_task = dict(
+                (((logical or {}).get("metadata") or {}).get("active_pstack_task") or {})
+            )
+            logical_managed_id = str(logical_task.get("managed_session_id") or "").strip()
+            if (
+                is_nonterminal_task(logical_task)
+                and logical_managed_id in {"", managed_session_id}
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Workspace already has an active PStack task: "
+                        f"{logical_task.get('task_id') or logical_task.get('trace_id')}"
+                    ),
+                )
+
+    preferred_gateway_id = str(identity.get("gateway_session_id") or "").strip()
+    gateway = next(
+        (
+            row
+            for row in gateway_rows
+            if str(row.get("id") or "").strip() == preferred_gateway_id
+        ),
+        gateway_rows[0] if gateway_rows else None,
+    )
+    if gateway is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "No gateway session remains for this workspace; attach the workspace "
+                "from ChatGPT before resuming."
+            ),
+        )
+
+    previous_task_id = str(
+        trace.get("task_id") or identity.get("task_id") or ""
+    ).strip()
+    resume_context = {
+        "task_id": previous_task_id or None,
+        "trace_id": requested_trace,
+        "status": "expired",
+        "goal": str(trace.get("goal") or ""),
+        "workflow": trace.get("workflow"),
+        "last_phase": lifecycle.get("current_phase"),
+        "expired_at": lifecycle.get("expired_at") or trace.get("expired_at"),
+        "projection_reason": trace.get("projection_reason"),
+    }
+    task = await gateway_sessions._open_pstack_gateway_task(
+        str(gateway.get("id") or ""),
+        managed_session=managed,
+        goal=str(trace.get("goal") or ""),
+        resume_context=resume_context,
+    )
+    if not task:
+        raise HTTPException(
+            status_code=503,
+            detail="HIRDA could not create the resumed PStack task",
+        )
+
+    await db.add_event(
+        "pstack.task.resumed",
+        f"PStack task {task['task_id']} resumed from {previous_task_id or requested_trace}",
+        data={
+            "task_id": task.get("task_id"),
+            "trace_id": task.get("trace_id"),
+            "resumed_from": previous_task_id or None,
+            "resumed_from_trace_id": requested_trace,
+            "managed_session_id": managed_session_id,
+            "workspace_key": managed.get("workspace_key"),
+            "actor": "hirda",
+            "phase": "task_resumed",
+            "title": "Expired task resumed as new task",
+            "detail": "A new task envelope was created; the expired task remains immutable history.",
+            "status": "ready",
+            "trace_status": task.get("status"),
+        },
+        stream_id=f"pstack:{task.get('trace_id')}",
+        correlation_id=str(task.get("trace_id") or ""),
+    )
+    return {
+        "resumed": True,
+        "resumed_from": previous_task_id or None,
+        "resumed_from_trace_id": requested_trace,
+        "task": {
+            key: task.get(key)
+            for key in (
+                "task_id",
+                "trace_id",
+                "goal",
+                "workflow",
+                "workspace_key",
+                "managed_session_id",
+                "status",
+                "resumed_from",
+                "resumed_from_trace_id",
+            )
+        },
+    }
 
 
 @app.get("/api/pstack/activity/stream")

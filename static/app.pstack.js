@@ -41,6 +41,10 @@ function pstackTraceStatus(trace){
   return [normalized.toUpperCase(),'idle'];
 }
 
+function pstackIsTerminal(trace){
+  return ['completed','expired','failed','blocked'].includes(pstackCanonicalState(trace));
+}
+
 function pstackEventHtml(event){
   const status=String(event.status||'idle').toLowerCase();
   const label=(event.actor||'pstack')+' · '+(event.role||event.tool||'workflow');
@@ -166,18 +170,23 @@ function renderPstackActivity(snapshot){
   }
 
   const traces=snapshot.traces||[];
+  const activeTraces=traces.filter(item=>!pstackIsTerminal(item));
+  const historyTraces=traces.filter(item=>pstackIsTerminal(item));
   if(pstackSelectedTraceId&&!traces.some(item=>item.trace_id===pstackSelectedTraceId)){
     pstackSelectedTraceId=null;
   }
   const trace=traces.find(item=>item.trace_id===pstackSelectedTraceId)
     ||snapshot.active_trace
-    ||traces[0]
+    ||activeTraces[0]
+    ||historyTraces[0]
     ||null;
   if(trace&&!pstackSelectedTraceId)pstackSelectedTraceId=trace.trace_id;
 
   const events=snapshot.events||[];
   const traceEvents=trace?events.filter(event=>event.trace_id===trace.trace_id):[];
   const state=pstackTraceStatus(trace);
+  const selectedState=pstackCanonicalState(trace);
+  const canResume=selectedState==='expired';
   const statusLabel=state[0];
   const statusClass=state[1];
   const totalByTool={route_task:4,load_workflow:2,build_role_request:2};
@@ -213,19 +222,26 @@ function renderPstackActivity(snapshot){
       +'<span><small>Started</small><strong>'+esc(pstackTime(trace.started_at))+'</strong></span>'
       +'<span><small>Task</small><code>'+esc(trace.task_id||identity.task_id||'—')+'</code></span>'
       +'<span><small>Trace</small><code>'+esc(trace.trace_id||'—')+'</code></span>'
-      +'</div><small class="pstack-identity">'+esc(identityText)+'</small></div>';
+      +(trace.resumed_from?'<span><small>Resumed from</small><code>'+esc(trace.resumed_from)+'</code></span>':'')
+      +'</div><small class="pstack-identity">'+esc(identityText)+'</small>'
+      +(canResume?'<div class="pstack-task-actions"><button class="button secondary small" type="button" data-pstack-resume="'+esc(trace.trace_id||'')+'">Resume as new task</button><small>Creates a new task in the same workspace. This expired task stays immutable history.</small></div>':'')
+      +'</div>';
   }
 
   root.innerHTML=pstackFlowHtml(trace,traceEvents)
     +'<div class="pstack-summary-grid">'
     +'<article class="pstack-summary-card"><span>Selected workflow</span><strong>'+esc(workflow)+'</strong><small>'+esc(trace&&trace.tool||'waiting for activity')+'</small></article>'
     +'<article class="pstack-summary-card"><span>Selected state</span><strong class="pstack-state '+esc(statusClass)+'">'+esc(statusLabel)+'</strong><small>'+esc(trace&&trace.current_step&&trace.current_step.title||'No active step')+'</small></article>'
-    +'<article class="pstack-summary-card"><span>Task ledger</span><strong>'+esc(snapshot.trace_count==null?traces.length:snapshot.trace_count)+'</strong><small>persistent task traces</small></article>'
+    +'<article class="pstack-summary-card"><span>Task ledger</span><strong>'+esc(activeTraces.length)+'</strong><small>'+esc(activeTraces.length)+' active · '+esc(historyTraces.length)+' history shown</small></article>'
     +'<article class="pstack-summary-card"><span>Trace events</span><strong>'+esc(snapshot.event_count||0)+'</strong><small>'+esc(snapshot.persistent?'persistent Event Ledger':'process memory')+'</small></article>'
     +'</div>'
     +'<article class="panel-card pstack-ledger-card">'
-    +'<div class="panel-head"><div><span class="eyebrow">TASK LEDGER</span><h3>Recent Pstack tasks</h3></div><small>'+esc(traces.length)+' shown</small></div>'
-    +'<div class="pstack-task-list">'+(traces.length?traces.map(item=>pstackTaskRow(item,trace&&item.trace_id===trace.trace_id)).join(''):'<div class="empty">No task envelopes recorded yet.</div>')+'</div>'
+    +'<div class="panel-head"><div><span class="eyebrow">ACTIVE TASKS</span><h3>Current PStack work</h3></div><small>'+esc(activeTraces.length)+' active</small></div>'
+    +'<div class="pstack-task-list">'+(activeTraces.length?activeTraces.map(item=>pstackTaskRow(item,trace&&item.trace_id===trace.trace_id)).join(''):'<div class="empty">No active PStack tasks.</div>')+'</div>'
+    +'</article>'
+    +'<article class="panel-card pstack-ledger-card pstack-history-card">'
+    +'<div class="panel-head"><div><span class="eyebrow">HISTORY</span><h3>Completed & expired tasks</h3></div><small>'+esc(historyTraces.length)+' shown</small></div>'
+    +'<div class="pstack-task-list">'+(historyTraces.length?historyTraces.map(item=>pstackTaskRow(item,trace&&item.trace_id===trace.trace_id)).join(''):'<div class="empty">No task history yet.</div>')+'</div>'
     +'</article>'
     +'<div class="pstack-layout">'
     +'<article class="panel-card pstack-current-card">'
@@ -268,6 +284,29 @@ function startPstackActivityStream(){
 }
 
 document.getElementById('pstackActivityPanel')?.addEventListener('click',event=>{
+  const resume=event.target.closest('[data-pstack-resume]');
+  if(resume){
+    event.preventDefault();
+    event.stopPropagation();
+    uiAction(async()=>{
+      const traceId=resume.dataset.pstackResume||'';
+      resume.disabled=true;
+      const original=resume.textContent;
+      resume.textContent='Resuming…';
+      try{
+        const response=await fetch('/api/pstack/activity/'+encodeURIComponent(traceId)+'/resume',{method:'POST'});
+        let body={};
+        try{body=await response.json();}catch{}
+        if(!response.ok)throw new Error(body.detail||('HTTP '+response.status));
+        pstackSelectedTraceId=body.task&&body.task.trace_id||null;
+        await refreshPstackActivity();
+      }finally{
+        resume.disabled=false;
+        resume.textContent=original;
+      }
+    });
+    return;
+  }
   const row=event.target.closest('[data-pstack-trace]');
   if(!row)return;
   pstackSelectedTraceId=row.dataset.pstackTrace||null;

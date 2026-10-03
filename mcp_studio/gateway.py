@@ -3249,6 +3249,7 @@ class GatewaySessionManager:
         *,
         managed_session: dict[str, Any],
         goal: str,
+        resume_context: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         if self.integrations is None:
             return None
@@ -3265,7 +3266,6 @@ class GatewaySessionManager:
                 registration = self.integrations.get("pstack")
             if registration.stage != "ready":
                 await self.integrations.reconcile("pstack")
-            current_gateway = await self.db.get_gateway_session(gateway_session_id)
             active = await self._active_pstack_gateway_task(
                 gateway_session_id,
                 managed_session=managed_session,
@@ -3298,6 +3298,11 @@ class GatewaySessionManager:
                 context={
                     "task_id": task_id,
                     "managed_session_id": managed_session.get("id"),
+                    **(
+                        {"resume_context": dict(resume_context)}
+                        if resume_context
+                        else {}
+                    ),
                 },
             )
             trace_id = str(routed.get("trace_id") or "").strip()
@@ -3305,6 +3310,14 @@ class GatewaySessionManager:
                 return None
             coordinator = dict(routed.get("coordinator") or {})
             hirda_request = dict(coordinator.get("hirda_request") or {})
+            resume_prompt = ""
+            if resume_context:
+                resume_prompt = (
+                    "HIRDA PSTACK RESUME CONTEXT:\n"
+                    f"- This is a new task resumed from {resume_context.get('task_id') or resume_context.get('trace_id') or 'an expired task'}.\n"
+                    "- Continue in the same managed workspace, but inspect the existing branch/worktree and prior evidence before writing.\n"
+                    "- The expired task remains immutable history; do not reactivate or overwrite its lifecycle.\n\n"
+                )
             lifecycle_prompt = (
                 "HIRDA PSTACK LIFECYCLE CONTROL:\n"
                 "- Before any file write, complete Analyze then Plan by calling "
@@ -3320,13 +3333,29 @@ class GatewaySessionManager:
                 "request_id": hirda_request.get("request_id"),
                 "capability": hirda_request.get("capability"),
                 "preferred_depth": hirda_request.get("preferred_depth"),
-                "prompt": lifecycle_prompt + str(hirda_request.get("prompt") or ""),
-                "context": dict(hirda_request.get("context") or {}),
+                "prompt": lifecycle_prompt + resume_prompt + str(hirda_request.get("prompt") or ""),
+                "context": {
+                    **dict(hirda_request.get("context") or {}),
+                    **(
+                        {"resume_context": dict(resume_context)}
+                        if resume_context
+                        else {}
+                    ),
+                },
             }
             task = {
                 "task_id": task_id,
                 "trace_id": trace_id,
                 "goal": goal_text,
+                **(
+                    {
+                        "resumed_from": resume_context.get("task_id"),
+                        "resumed_from_trace_id": resume_context.get("trace_id"),
+                        "resume_context": dict(resume_context),
+                    }
+                    if resume_context
+                    else {}
+                ),
                 "workflow": routed.get("workflow"),
                 "workspace_key": managed_session.get("workspace_key"),
                 "managed_session_id": managed_session.get("id"),
@@ -3340,18 +3369,10 @@ class GatewaySessionManager:
                 task,
                 managed_session=managed_session,
             )
-            await self.db.update_gateway_session_metadata(
+            await self._persist_active_pstack_task(
                 gateway_session_id,
-                {"active_pstack_task": task},
+                task,
             )
-            studio_session_id = str(
-                current_gateway.get("studio_session_id") or ""
-            ).strip()
-            if studio_session_id:
-                await self.db.heartbeat_session(
-                    studio_session_id,
-                    {"metadata": {"active_pstack_task": task}},
-                )
             await self._persist_pstack_adapter_trace(
                 trace_id=trace_id,
                 task_id=task_id,

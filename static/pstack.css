@@ -258,6 +258,9 @@
   white-space:nowrap;
 }
 .pstack-identity{color:var(--ref-muted);font-size:var(--fs-7)}
+.pstack-task-actions{display:flex;align-items:center;gap:10px;padding-top:2px;border-top:1px solid var(--ref-border-soft)}
+.pstack-task-actions small{color:var(--ref-muted);font-size:var(--fs-7);line-height:1.4}
+.pstack-history-card .pstack-task-list{max-height:260px}
 .pstack-timeline{
   display:grid;
   max-height:520px;

@@ -1146,6 +1146,38 @@ async def test_gateway_opens_new_task_after_completed_same_goal():
     assert task["lifecycle"]["current_phase"] == "analyze"
 
 
+@pytest.mark.asyncio
+async def test_gateway_resumed_task_creates_new_lineage_without_reusing_lifecycle():
+    gateway = object.__new__(GatewaySessionManager)
+    gateway.db = _GatewayDb()
+    gateway.integrations = _GatewayIntegrations()
+
+    task = await gateway._open_pstack_gateway_task(
+        "gws-1",
+        managed_session={"id": "ms-1", "workspace_key": "mcp-studio"},
+        goal="Continue expired scheduler work",
+        resume_context={
+            "task_id": "TASK-OLD",
+            "trace_id": "TRACE-OLD",
+            "status": "expired",
+            "last_phase": "verify",
+        },
+    )
+
+    assert task is not None
+    assert task["task_id"] != "TASK-OLD"
+    assert task["resumed_from"] == "TASK-OLD"
+    assert task["resumed_from_trace_id"] == "TRACE-OLD"
+    assert task["resume_context"]["last_phase"] == "verify"
+    assert task["lifecycle"]["status"] == "active"
+    assert task["lifecycle"]["current_phase"] == "analyze"
+    assert gateway.integrations.calls[0][2]["resume_context"]["task_id"] == "TASK-OLD"
+    assert task["workflow_directive"]["context"]["resume_context"]["trace_id"] == "TRACE-OLD"
+    assert "HIRDA PSTACK RESUME CONTEXT" in task["workflow_directive"]["prompt"]
+    assert "expired task remains immutable history" in task["workflow_directive"]["prompt"]
+    assert gateway.db.managed_metadata["active_pstack_task"]["task_id"] == task["task_id"]
+
+
 def test_gateway_requires_pstack_admission_when_integration_is_configured():
     gateway = object.__new__(GatewaySessionManager)
     gateway.integrations = _GatewayIntegrations()
@@ -1165,15 +1197,165 @@ def test_gateway_tool_dispatch_requires_existing_pstack_task():
     assert 'goal=f"Engineering work in' not in dispatch
 
 
+@pytest.mark.asyncio
+async def test_resume_expired_trace_creates_new_task_with_lineage(monkeypatch):
+    expired_trace = {
+        "task_id": "TASK-OLD",
+        "trace_id": "TRACE-OLD",
+        "goal": "Continue expired scheduler work",
+        "workflow": "feature",
+        "status": "expired",
+        "terminal_disposition": "expired",
+        "lifecycle": {
+            "status": "completed",
+            "current_phase": "done",
+            "terminal_disposition": "expired",
+        },
+        "identity": {
+            "task_id": "TASK-OLD",
+            "workspace_key": "alpha",
+            "managed_session_id": "ms-alpha",
+            "gateway_session_id": "gws-alpha",
+        },
+    }
+
+    async def fake_snapshot(*, since=0, limit=100):
+        return {"traces": [expired_trace]}
+
+    class ResumeDb:
+        def __init__(self):
+            self.events = []
+
+        async def get_managed_session(self, session_id):
+            assert session_id == "ms-alpha"
+            return {
+                "id": "ms-alpha",
+                "workspace_key": "alpha",
+                "metadata": {"active_pstack_task": expired_trace},
+            }
+
+        async def list_gateway_sessions_for_managed_session(self, session_id):
+            assert session_id == "ms-alpha"
+            return [{
+                "id": "gws-alpha",
+                "managed_session_id": "ms-alpha",
+                "metadata": {"active_pstack_task": expired_trace},
+            }]
+
+        async def add_event(self, kind, message, **kwargs):
+            self.events.append((kind, message, kwargs))
+
+    class ResumeGateway:
+        def __init__(self):
+            self.calls = []
+
+        async def _open_pstack_gateway_task(
+            self,
+            gateway_session_id,
+            *,
+            managed_session,
+            goal,
+            resume_context=None,
+        ):
+            self.calls.append({
+                "gateway_session_id": gateway_session_id,
+                "managed_session": managed_session,
+                "goal": goal,
+                "resume_context": resume_context,
+            })
+            return {
+                "task_id": "TASK-NEW",
+                "trace_id": "TRACE-NEW",
+                "goal": goal,
+                "workflow": "feature",
+                "workspace_key": "alpha",
+                "managed_session_id": "ms-alpha",
+                "status": "ready_for_hirda",
+                "resumed_from": "TASK-OLD",
+                "resumed_from_trace_id": "TRACE-OLD",
+            }
+
+    database = ResumeDb()
+    gateway = ResumeGateway()
+    monkeypatch.setattr(main, "_pstack_activity_snapshot", fake_snapshot)
+    monkeypatch.setattr(main, "db", database)
+    monkeypatch.setattr(main, "gateway_sessions", gateway)
+
+    result = await main.pstack_activity_resume("TRACE-OLD")
+
+    assert result["resumed"] is True
+    assert result["resumed_from"] == "TASK-OLD"
+    assert result["task"]["task_id"] == "TASK-NEW"
+    assert gateway.calls[0]["resume_context"]["task_id"] == "TASK-OLD"
+    assert gateway.calls[0]["resume_context"]["trace_id"] == "TRACE-OLD"
+    assert database.events[-1][0] == "pstack.task.resumed"
+
+
+@pytest.mark.asyncio
+async def test_resume_expired_trace_refuses_to_replace_active_workspace_task(monkeypatch):
+    expired_trace = {
+        "task_id": "TASK-OLD",
+        "trace_id": "TRACE-OLD",
+        "goal": "Old work",
+        "status": "expired",
+        "terminal_disposition": "expired",
+        "lifecycle": {"status": "completed", "terminal_disposition": "expired"},
+        "identity": {
+            "managed_session_id": "ms-alpha",
+            "gateway_session_id": "gws-alpha",
+        },
+    }
+    active_task = {
+        "task_id": "TASK-ACTIVE",
+        "trace_id": "TRACE-ACTIVE",
+        "status": "active",
+        "lifecycle": {"status": "active", "current_phase": "implement"},
+    }
+
+    async def fake_snapshot(*, since=0, limit=100):
+        return {"traces": [expired_trace]}
+
+    class BusyDb:
+        async def get_managed_session(self, session_id):
+            return {
+                "id": session_id,
+                "workspace_key": "alpha",
+                "metadata": {"active_pstack_task": active_task},
+            }
+
+        async def list_gateway_sessions_for_managed_session(self, session_id):
+            raise AssertionError("managed active task must block before gateway lookup")
+
+    class NeverResumeGateway:
+        async def _open_pstack_gateway_task(self, *_args, **_kwargs):
+            raise AssertionError("busy workspace must not open another task")
+
+    monkeypatch.setattr(main, "_pstack_activity_snapshot", fake_snapshot)
+    monkeypatch.setattr(main, "db", BusyDb())
+    monkeypatch.setattr(main, "gateway_sessions", NeverResumeGateway())
+
+    with pytest.raises(main.HTTPException) as exc:
+        await main.pstack_activity_resume("TRACE-OLD")
+
+    assert exc.value.status_code == 409
+    assert "TASK-ACTIVE" in str(exc.value.detail)
+
+
 def test_pstack_ui_exposes_multi_task_ledger():
     root = main.ROOT
     app = (root / "static" / "app.pstack.js").read_text(encoding="utf-8")
     css = (root / "static" / "pstack.css").read_text(encoding="utf-8")
 
-    assert "Recent Pstack tasks" in app
+    assert "ACTIVE TASKS" in app
+    assert "Current PStack work" in app
+    assert "HISTORY" in app
+    assert "Completed & expired tasks" in app
     assert "data-pstack-trace" in app
     assert "pstackSelectedTraceId" in app
-    assert "persistent task traces" in app
+    assert "data-pstack-resume" in app
+    assert "Resume as new task" in app
+    assert "activeTraces" in app
+    assert "historyTraces" in app
     assert "HIRDA STACK FLOW" in app
     assert "Task flow overview" in app
     for label in ("Task", "Pstack", "HIRDA", "Runtime / Tools", "Verify", "Done"):
