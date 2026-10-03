@@ -26,7 +26,14 @@ else:
 
 from mcp_studio.models import WorkSubmit
 from mcp_studio.settings import StudioConfig, load_settings
-from mcp_studio.skill_runtime import SkillRequestError, SkillRuntime
+from mcp_studio.skill_runtime import (
+    MAX_SKILL_DOMAIN_CHARS,
+    MAX_SKILL_ID_CHARS,
+    MAX_SKILL_ID_COUNT,
+    MAX_TASK_TEXT_CHARS,
+    SkillRequestError,
+    SkillRuntime,
+)
 from mcp_studio.skills import SkillDefinition, SkillRegistry, SkillScope
 
 
@@ -55,21 +62,29 @@ def _definition(
     )
 
 
-def _manifest(root: Path, *, skill_id: str = "review.skill", scope=None, trigger="review changes") -> Path:
+def _manifest(
+    root: Path,
+    *,
+    skill_id: str = "review.skill",
+    scope=None,
+    trigger="review changes",
+    filename="review.yaml",
+    tool="git diff",
+) -> Path:
     import yaml
 
     root.mkdir(parents=True, exist_ok=True)
-    path = root / "review.yaml"
+    path = root / filename
     path.write_text(yaml.safe_dump({
         "schema": "hirda-skill-v1",
         "id": skill_id,
-        "name": "Review Skill",
+        "name": f"{skill_id} skill",
         "version": "1",
         "description": "Procedural review guidance",
         "scope": scope or {"kind": "global"},
         "triggers": [trigger],
         "required_capabilities": ["repo.read"],
-        "required_tools": ["git diff"],
+        "required_tools": [tool],
         "policy_hints": ["preserve user changes"],
         "workflow_steps": ["inspect diff"],
         "verification_checks": ["run focused tests"],
@@ -121,14 +136,11 @@ def test_skill_registry_settings_defaults_and_yaml_config(tmp_path):
 
 
 def test_enabled_runtime_resolves_scope_precedence_and_unresolved_explicit(tmp_path):
-    registry = SkillRegistry()
-    registry.register(_definition(scope=SkillScope("global"), source="global.yaml"))
-    registry.register(_definition(scope=SkillScope("domain", "engineering"), source="domain.yaml"))
-    registry.register(_definition(scope=SkillScope("workspace", "repo-a"), source="workspace.yaml"))
-    runtime = SkillRuntime(enabled=True, path=tmp_path, base_dir=tmp_path)
-    runtime.registry = registry
-    runtime.loaded_skill_count = len(registry.snapshot())
-    runtime.status = "ready"
+    root = tmp_path / "skills"
+    _manifest(root, scope={"kind": "global"}, filename="global.yaml")
+    _manifest(root, scope={"kind": "domain", "value": "engineering"}, filename="domain.yaml")
+    _manifest(root, scope={"kind": "workspace", "value": "repo-a"}, filename="workspace.yaml")
+    runtime = SkillRuntime(enabled=True, path=root, base_dir=tmp_path)
     payload = {
         "label": "Unrelated title",
         "instruction": "  review changes carefully  ",
@@ -142,8 +154,8 @@ def test_enabled_runtime_resolves_scope_precedence_and_unresolved_explicit(tmp_p
     assert resolution["loaded_skill_count"] == 3
     assert resolution["unresolved_explicit_ids"] == ["missing.skill"]
     assert resolution["selected"] == [{
-        "id": "review.skill", "name": "review.skill skill", "version": "1.0",
-        "scope": {"kind": "workspace", "value": "repo-a"}, "source": "workspace.yaml",
+        "id": "review.skill", "name": "review.skill skill", "version": "1",
+        "scope": {"kind": "workspace", "value": "repo-a"}, "source": str(root / "workspace.yaml"),
         "explicit": True, "advisory": False, "trigger_matches": ["review changes"],
     }]
     assert resolution["required_tools"] == ["git diff"]
@@ -151,15 +163,14 @@ def test_enabled_runtime_resolves_scope_precedence_and_unresolved_explicit(tmp_p
 
 
 def test_advisory_ranks_only_applicable_skills(tmp_path):
-    registry = SkillRegistry()
-    registry.register(_definition("ordinary.skill"))
-    registry.register(_definition("advised.skill"))
-    registry.register(_definition(
-        "other.workspace", scope=SkillScope("workspace", "repo-b"), triggers=(), source="other.yaml",
-    ))
-    runtime = SkillRuntime(enabled=True, path=tmp_path, base_dir=tmp_path)
-    runtime.registry = registry
-    runtime.status = "ready"
+    root = tmp_path / "skills"
+    _manifest(root, skill_id="ordinary.skill", filename="ordinary.yaml")
+    _manifest(root, skill_id="advised.skill", filename="advised.yaml")
+    _manifest(
+        root, skill_id="other.workspace", scope={"kind": "workspace", "value": "repo-b"},
+        trigger="never matches", filename="other.yaml",
+    )
+    runtime = SkillRuntime(enabled=True, path=root, base_dir=tmp_path)
     result = runtime.enrich_work_payload({
         "label": "Review changes", "workspace": "repo-a",
         "metadata": {"advisory_skill_ids": ["advised.skill", "other.workspace"]},
@@ -169,11 +180,9 @@ def test_advisory_ranks_only_applicable_skills(tmp_path):
 
 
 def test_metadata_is_preserved_and_result_has_no_authority_fields(tmp_path):
-    registry = SkillRegistry()
-    registry.register(_definition())
-    runtime = SkillRuntime(enabled=True, path=tmp_path, base_dir=tmp_path)
-    runtime.registry = registry
-    runtime.status = "ready"
+    root = tmp_path / "skills"
+    _manifest(root)
+    runtime = SkillRuntime(enabled=True, path=root, base_dir=tmp_path)
     payload = {
         "label": "Review changes", "workspace": "repo", "priority": 99,
         "metadata": {"ticket": "ABC-1", "domain": "engineering", "skill_resolution": {"caller": True}},
@@ -219,14 +228,66 @@ def test_runtime_can_reload_and_drops_partial_registry_on_failure(tmp_path):
 
 @pytest.mark.parametrize("metadata", [
     {"domain": "  "},
+    {"domain": 42},
+    {"domain": "d" * (MAX_SKILL_DOMAIN_CHARS + 1)},
     {"explicit_skill_ids": [""]},
+    {"explicit_skill_ids": [42]},
     {"explicit_skill_ids": ["dup", " dup "]},
+    {"explicit_skill_ids": ["x" * (MAX_SKILL_ID_CHARS + 1)]},
     {"advisory_skill_ids": "skill.id"},
+    {"explicit_skill_ids": [f"explicit-{index}" for index in range(MAX_SKILL_ID_COUNT // 2 + 1)],
+     "advisory_skill_ids": [f"advisory-{index}" for index in range(MAX_SKILL_ID_COUNT // 2)]},
 ])
 def test_invalid_skill_selection_fails_closed(tmp_path, metadata):
     runtime = SkillRuntime(enabled=True, path=tmp_path, base_dir=tmp_path)
     with pytest.raises(SkillRequestError, match="skill_request_invalid"):
         runtime.enrich_work_payload({"label": "Review", "workspace": "repo", "metadata": metadata})
+
+
+def test_label_trigger_is_retained_when_instruction_is_nonempty_and_text_is_bounded(tmp_path):
+    root = tmp_path / "skills"
+    _manifest(root, trigger="label only phrase")
+    runtime = SkillRuntime(enabled=True, path=root, base_dir=tmp_path)
+    result = runtime.enrich_work_payload({
+        "label": "Label only phrase", "instruction": "unrelated " + "x" * (MAX_TASK_TEXT_CHARS + 100),
+        "workspace": "repo", "metadata": {},
+    })["metadata"]["skill_resolution"]
+    assert result["selected"][0]["trigger_matches"] == ["label only phrase"]
+
+
+def test_enrichment_uses_one_coherent_state_during_concurrent_reload(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    import mcp_studio.skill_runtime as runtime_module
+
+    root = tmp_path / "skills"
+    _manifest(root, filename="first.yaml")
+    runtime = SkillRuntime(enabled=True, path=root, base_dir=tmp_path)
+    serialization_started = Event()
+    allow_serialization = Event()
+    original_serialize = runtime_module._serialize_resolution
+
+    def delayed_serialize(*args, **kwargs):
+        serialization_started.set()
+        assert allow_serialization.wait(timeout=5)
+        return original_serialize(*args, **kwargs)
+
+    monkeypatch.setattr(runtime_module, "_serialize_resolution", delayed_serialize)
+    payload = {"label": "Review changes", "workspace": "repo", "metadata": {}}
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(runtime.enrich_work_payload, payload)
+        assert serialization_started.wait(timeout=5)
+        next(root.glob("*.yaml")).write_text("id: invalid", encoding="utf-8")
+        assert runtime.reload() == "error"
+        allow_serialization.set()
+        old_result = pending.result(timeout=5)["metadata"]["skill_resolution"]
+
+    new_result = runtime.enrich_work_payload(payload)["metadata"]["skill_resolution"]
+    assert (old_result["registry_status"], old_result["loaded_skill_count"]) == ("ready", 1)
+    assert [item["id"] for item in old_result["selected"]] == ["review.skill"]
+    assert (new_result["registry_status"], new_result["loaded_skill_count"]) == ("error", 0)
+    assert new_result["selected"] == []
+    assert new_result["error_code"] == "manifest_invalid"
 
 
 class _FakeDatabase:
