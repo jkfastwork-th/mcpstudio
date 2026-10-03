@@ -20,6 +20,11 @@ studio:
   scheduler_interval_seconds: 1.0
   scheduler_max_queue: 1000
 
+  # Declarative procedural Skills registry; enable only for trusted YAML manifests.
+  #skill_registry_enabled: false
+  #skill_registry_path: ./skills
+  #skill_registry_max_manifest_bytes: 262144
+
   # M3 execution supervisor. Keep automatic dispatch disabled until live
   # certification passes. Manual/explicit dispatch remains available.
   execution_enabled: false

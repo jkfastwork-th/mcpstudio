@@ -49,6 +49,7 @@
 <a data-help="Inspect capsule state, routing, handoffs, and session history." data-view="sessions" href="#sessions"><span>◉</span>Capsule Lanes</a>
 <a data-help="Monitor Claude, Codex, and Hermes runtime availability." data-view="agents" href="#agents"><span>◈</span>Agents</a>
 <a data-help="Watch Pstack methodology routing and live workflow trace events before HIRDA execution." data-view="pstack" href="#pstack"><span>⌘</span>Pstack</a>
+<a data-help="Browse declarative Skills loaded by HIRDA. This page is read-only." data-view="skills" href="#skills"><span>✧</span>Skills</a>
 <a data-help="Inspect HIRDA Reflex decisions, JEV teacher agreement, latency, risk, and dataset growth." data-view="reflex" href="#reflex"><span>◇</span>Reflex</a>
 <a data-help="Test the generic JEV Action Adapter with side-effect-free Browser, World, and Finance fixtures." data-view="actions" href="#actions"><span>◎</span>Actions</a>
 <a data-help="Approved project folders, managed sessions and workspace safety." data-view="workspaces" href="#workspaces"><span>▢</span>Workspaces</a>
@@ -208,6 +209,24 @@
 <div class="reflex-boundary-note pstack-boundary-note">
   <strong>Authority boundary</strong>
   <span>Pstack chooses methodology and translates roles only. HIRDA remains authoritative for runtime, model, machine, permission, fallback, and execution.</span>
+</div>
+</section>
+
+<section class="view-page" data-page="skills">
+<div class="page-section-head focus-page-head skills-page-head">
+  <div><span class="eyebrow">DECLARATIVE REGISTRY</span><h2>Skills</h2><p>Browse procedural guidance available to HIRDA work resolution.</p></div>
+  <div class="toolbar skills-toolbar"><button class="button secondary small" id="skillsRefreshBtn" type="button">Refresh skills</button></div>
+</div>
+<div class="skills-summary-grid" id="skillsSummary" aria-live="polite"><article class="skills-summary-card"><span>Registry status</span><strong>Loading…</strong></article><article class="skills-summary-card"><span>Loaded</span><strong>—</strong></article><article class="skills-summary-card"><span>Triggered</span><strong>—</strong></article><article class="skills-summary-card"><span>Scope-default</span><strong>—</strong></article></div>
+<p class="skills-configured-path" id="skillsConfiguredPath"></p>
+<div class="skills-authority-notice"><strong>Read-only · no execution authority</strong><span>Skills provide declarative context only. HIRDA retains runtime, model, machine, permission, and execution authority. Nothing on this page installs or runs a skill.</span></div>
+<div class="skills-browser">
+  <section class="panel-card skills-list-card" aria-label="Skill registry list">
+    <div class="panel-head"><div><span class="eyebrow">AVAILABLE SKILLS</span><h3>Registry</h3></div><span class="skills-result-count" id="skillsResultCount">—</span></div>
+    <div class="skills-filters"><label><span>Search</span><input id="skillsSearch" type="search" placeholder="Search name, id, or description"/></label><label><span>Scope</span><select id="skillsScopeFilter"><option value="all">All scopes</option><option value="global">Global</option><option value="domain">Domain</option><option value="workspace">Workspace</option></select></label></div>
+    <div class="skills-list" id="skillsList" aria-live="polite"><div class="empty">Loading Skills registry…</div></div>
+  </section>
+  <section class="panel-card skills-detail-card" aria-label="Selected skill details" id="skillsDetailPanel"><div class="empty">Select a skill to inspect its declared guidance.</div></section>
 </div>
 </section>
 
@@ -528,6 +547,7 @@
 <a data-view="sessions" href="#sessions"><span>◉</span><small>Capsule Lanes</small></a>
 <a data-view="agents" href="#agents"><span>◈</span><small>Agents</small></a>
 <a data-view="pstack" href="#pstack"><span>⌘</span><small>Pstack</small></a>
+<a data-view="skills" href="#skills"><span>✧</span><small>Skills</small></a>
 <a data-view="reflex" href="#reflex"><span>◇</span><small>Reflex</small></a>
 <a data-view="actions" href="#actions"><span>◎</span><small>Actions</small></a>
 <a data-view="workspaces" href="#workspaces"><span>▢</span><small>Workspaces</small></a>

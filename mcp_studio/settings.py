@@ -173,6 +173,12 @@ class StudioConfig:
     integration_plugin_runtime_enabled: bool = False
     integration_plugin_trusted_fingerprints: list[str] = field(default_factory=list)
 
+    # Declarative task context only. Registry loading is opt-in and never grants
+    # runtime, model, machine, agent, or permission authority.
+    skill_registry_enabled: bool = False
+    skill_registry_path: str = "./skills"
+    skill_registry_max_manifest_bytes: int = 256 * 1024
+
     # Desktop Commander is an optional HIRDA-gated compatibility/fallback
     # backend. Native filesystem/process support is built in and always primary.
     desktop_commander_backend_enabled: bool = False

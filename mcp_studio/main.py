@@ -38,6 +38,7 @@ from .models import (
     CapsuleHandoffValidation, CapsuleHandoffApproval, CapsuleHandoffCompletion, LaneStateUpdate, CapsuleComplete,
 )
 from .settings import Settings, load_settings
+from .skill_runtime import SkillRequestError, SkillRuntime
 from .workers import WorkerManager
 from .scheduler import Scheduler
 from .execution import ExecutionSupervisor
@@ -81,6 +82,12 @@ from .plugin_bundle import router as plugin_bundle_router
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = os.environ.get("MCP_STUDIO_CONFIG", str(ROOT / "config.yaml"))
 settings: Settings = load_settings(CONFIG_PATH)
+skill_runtime = SkillRuntime(
+    enabled=settings.studio.skill_registry_enabled,
+    path=settings.studio.skill_registry_path,
+    max_manifest_bytes=settings.studio.skill_registry_max_manifest_bytes,
+    base_dir=settings.config_path.parent,
+)
 db = Database(settings.studio.database)
 health = HealthManager(settings, db)
 workers = WorkerManager(settings, db)
@@ -663,6 +670,38 @@ async def api_status():
 @app.get("/api/reflex/metrics")
 async def reflex_metrics_status(window: str = "24h", recent: int = 20):
     return reflex_metrics.snapshot(window=window, recent=recent)
+
+
+@app.get("/api/skills")
+async def skills_registry_status():
+    """Return read-only, declarative skill registry data for the Skills page."""
+    state = skill_runtime._snapshot()
+    skills = []
+    for skill in state.registry.snapshot():
+        skills.append({
+            "id": skill.id,
+            "name": skill.name,
+            "version": skill.version,
+            "description": skill.description,
+            "scope": {"kind": skill.scope.kind, "value": skill.scope.value},
+            "triggers": list(skill.triggers),
+            "required_capabilities": list(skill.required_capabilities),
+            "required_tools": list(skill.required_tools),
+            "policy_hints": list(skill.policy_hints),
+            "workflow_steps": list(skill.workflow_steps),
+            "verification_checks": list(skill.verification_checks),
+            "source": "in-memory" if skill.source == "memory" else "manifest",
+            "activation_mode": "scope-default" if not skill.triggers else "triggered",
+        })
+    return {
+        "schema": "hirda-skill-registry-status-v1",
+        "enabled": bool(skill_runtime.enabled),
+        "registry_status": state.status,
+        "error_code": state.error_code,
+        "configured_path": Path(str(skill_runtime.path)).name or ".",
+        "loaded_skill_count": state.loaded_skill_count,
+        "skills": skills,
+    }
 
 
 @app.get("/api/integrations")
@@ -3672,7 +3711,11 @@ async def submit_work(payload: WorkSubmit):
     summary = await db.work_summary()
     if summary["queue"] >= settings.studio.scheduler_max_queue:
         raise HTTPException(status_code=429, detail="Scheduler queue is full")
-    item = await db.create_work(payload.model_dump(), settings.studio.worker_server_id or server_id)
+    try:
+        work_payload = skill_runtime.enrich_work_payload(payload.model_dump())
+    except SkillRequestError as exc:
+        raise HTTPException(status_code=400, detail="skill_request_invalid") from exc
+    item = await db.create_work(work_payload, settings.studio.worker_server_id or server_id)
     await db.add_event(
         "work.queued",
         f"{item['id']} queued: {item['label']}",
