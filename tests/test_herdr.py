@@ -163,3 +163,35 @@ async def test_close_task_tab_refuses_fern_and_nova():
                 "status": "open",
             }
         )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_disposable_task_tabs_closes_only_stale_pstack_tabs():
+    manager = object.__new__(HerdrManager)
+    closed = []
+
+    async def run_cli(*args, timeout_seconds=15.0):
+        if args == ("tab", "list"):
+            return {
+                "result": {"tabs": [
+                    {"tab_id": "wH:t1", "label": "fern", "workspace_id": "wH"},
+                    {"tab_id": "wH:t2", "label": "nova", "workspace_id": "wH"},
+                    {"tab_id": "wH:t3", "label": "[PStack] TASK-A", "workspace_id": "wH"},
+                    {"tab_id": "wH:t4", "label": "[PStack] TASK-OLD", "workspace_id": "wH"},
+                    {"tab_id": "wH:t5", "label": "operator", "workspace_id": "wH"},
+                ]}
+            }
+        if args[:2] == ("tab", "close"):
+            closed.append(args[2])
+            return {"ok": True}
+        raise AssertionError(args)
+
+    manager._run_cli_json = run_cli
+    result = await manager.reconcile_disposable_task_tabs(
+        keep_tab_ids={"wH:t3"}
+    )
+
+    assert closed == ["wH:t4"]
+    assert result["closed"] == 1
+    assert result["kept"] == 1
+    assert result["protected"] == 2

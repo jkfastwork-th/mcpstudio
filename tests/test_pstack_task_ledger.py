@@ -700,6 +700,46 @@ class _GatewayDb:
         return dict(item)
 
 
+    async def list_sessions(self, limit=500):
+        return [
+            {"id": "studio-1", "metadata": dict(self.logical_metadata)}
+        ]
+
+    async def list_gateway_sessions(self, limit=500):
+        return [
+            {
+                "id": "gws-1",
+                "managed_session_id": "ms-1",
+                "metadata": dict(self.metadata),
+            }
+        ]
+
+    async def list_managed_sessions(self, limit=500):
+        return [
+            {
+                "id": "ms-1",
+                "workspace_key": "mcp-studio",
+                "metadata": dict(self.managed_metadata),
+            }
+        ]
+
+    async def patch_pstack_task(self, task_id, patch):
+        updated = 0
+        for metadata in (
+            self.metadata,
+            self.logical_metadata,
+            self.managed_metadata,
+        ):
+            task = metadata.get("active_pstack_task")
+            if not isinstance(task, dict):
+                continue
+            if str(task.get("task_id") or "") != str(task_id):
+                continue
+            metadata["active_pstack_task"] = {**task, **dict(patch)}
+            updated += 1
+        return updated
+
+
 class _GatewayPstackAdapter:
     def activity_snapshot(self, *, since=0, limit=250):
         return {
@@ -804,6 +844,18 @@ class _GatewayHerdr:
             **tab,
             "status": "closed",
             "closed_at": "2026-10-02T10:00:00+00:00",
+        }
+
+
+    async def reconcile_disposable_task_tabs(self, *, keep_tab_ids=None):
+        self.keep_tab_ids = set(keep_tab_ids or set())
+        return {
+            "scanned": 4,
+            "candidates": 1,
+            "closed": 1,
+            "kept": len(self.keep_tab_ids),
+            "protected": 2,
+            "closed_tabs": [{"tab_id": "wH:t-stale", "status": "closed"}],
         }
 
 
@@ -1045,6 +1097,50 @@ async def test_pstack_task_owns_disposable_herdr_tab_until_done():
     kinds = [item[0] for item in gateway.db.events]
     assert "pstack.herdr_tab.opened" in kinds
     assert "pstack.herdr_tab.closed" in kinds
+
+
+@pytest.mark.asyncio
+async def test_terminal_reconciliation_closes_terminal_and_sweeps_stale_tabs():
+    gateway = object.__new__(GatewaySessionManager)
+    gateway.settings = SimpleNamespace(
+        studio=SimpleNamespace(worker_server_id="serena-8001")
+    )
+    gateway.db = _GatewayDb()
+    gateway.integrations = _GatewayIntegrations()
+    gateway.herdr = _GatewayHerdr()
+
+    terminal = {
+        "task_id": "TASK-DONE",
+        "trace_id": "TRACE-DONE",
+        "status": "expired",
+        "execution_state": "failed",
+        "lifecycle": {
+            "status": "completed",
+            "current_phase": "done",
+            "revision": 8,
+            "terminal_disposition": "expired",
+        },
+        "herdr_tab": {
+            "status": "open",
+            "owner": "pstack",
+            "persistent": False,
+            "workspace_id": "wH",
+            "tab_id": "wH:t-done",
+            "label": "[PStack] TASK-DONE",
+        },
+    }
+    gateway.db.metadata["active_pstack_task"] = dict(terminal)
+    gateway.db.logical_metadata["active_pstack_task"] = dict(terminal)
+    gateway.db.managed_metadata["active_pstack_task"] = dict(terminal)
+
+    result = await gateway.reconcile_pstack_terminal_tabs()
+
+    assert result["terminal_closed"] == 1
+    assert result["stale"]["closed"] == 1
+    assert gateway.db.metadata["active_pstack_task"]["herdr_tab"]["status"] == "closed"
+    assert gateway.herdr.closed[0]["tab_id"] == "wH:t-done"
+    assert gateway.herdr.keep_tab_ids == set()
+    assert any(kind == "pstack.herdr_tab.reconciled" for kind, _, _ in gateway.db.events)
 
 
 @pytest.mark.asyncio

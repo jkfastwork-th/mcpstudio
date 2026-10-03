@@ -3079,6 +3079,125 @@ class GatewaySessionManager:
             )
         return {**task, "herdr_tab": closed}
 
+
+    @staticmethod
+    def _pstack_task_is_terminal(task: dict[str, Any]) -> bool:
+        lifecycle = task.get("lifecycle")
+        lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+        status = str(task.get("status") or "").strip().casefold()
+        execution_state = str(task.get("execution_state") or "").strip().casefold()
+        lifecycle_status = str(lifecycle.get("status") or "").strip().casefold()
+        terminal_disposition = str(
+            lifecycle.get("terminal_disposition")
+            or task.get("terminal_disposition")
+            or ""
+        ).strip().casefold()
+        if status in {"completed", "expired", "cancelled", "failed"}:
+            return True
+        if execution_state in {"completed", "cancelled", "failed"}:
+            return True
+        if terminal_disposition in {"completed", "expired", "cancelled", "failed"}:
+            return True
+        return lifecycle_status == "completed"
+
+    async def reconcile_pstack_terminal_tabs(self) -> dict[str, Any]:
+        """Close disposable tabs for terminal tasks and sweep orphan PStack tabs."""
+        canonical_rows = list(await self.db.list_sessions(limit=500))
+        for lister_name in ("list_gateway_sessions", "list_managed_sessions"):
+            lister = getattr(self.db, lister_name, None)
+            if callable(lister):
+                canonical_rows.extend(await lister(limit=500))
+
+        tasks: dict[str, tuple[tuple[int, float], dict[str, Any]]] = {}
+        for row in canonical_rows:
+            metadata = row.get("metadata")
+            metadata = metadata if isinstance(metadata, dict) else {}
+            task = metadata.get("active_pstack_task")
+            task = dict(task) if isinstance(task, dict) else {}
+            task_id = str(task.get("task_id") or "").strip()
+            if not task_id:
+                continue
+            lifecycle = task.get("lifecycle")
+            lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+            score = (
+                int(lifecycle.get("revision") or 0),
+                float(lifecycle.get("updated_at") or task.get("opened_at") or 0.0),
+            )
+            current = tasks.get(task_id)
+            if current is None or score > current[0]:
+                tasks[task_id] = (score, task)
+
+        terminal_closed = 0
+        patched = 0
+        keep_tab_ids: set[str] = set()
+        for task_id, (_, task) in tasks.items():
+            tab = task.get("herdr_tab")
+            tab = dict(tab) if isinstance(tab, dict) else {}
+            tab_id = str(tab.get("tab_id") or "").strip()
+            disposable = (
+                bool(tab)
+                and str(tab.get("owner") or "").casefold() == "pstack"
+                and not bool(tab.get("persistent"))
+            )
+            if not disposable:
+                continue
+            if self._pstack_task_is_terminal(task):
+                before_status = str(tab.get("status") or "").casefold()
+                closed_task = await self._close_pstack_herdr_tab(task)
+                closed_tab = dict(closed_task.get("herdr_tab") or {})
+                if closed_tab != tab:
+                    patched += await self.db.patch_pstack_task(
+                        task_id,
+                        {"herdr_tab": closed_tab},
+                    )
+                if (
+                    before_status not in {"closed", "unavailable"}
+                    and str(closed_tab.get("status") or "").casefold() == "closed"
+                ):
+                    terminal_closed += 1
+                continue
+            if (
+                tab_id
+                and str(tab.get("status") or "").casefold()
+                not in {"closed", "unavailable"}
+            ):
+                keep_tab_ids.add(tab_id)
+
+        stale = {
+            "scanned": 0,
+            "candidates": 0,
+            "closed": 0,
+            "kept": len(keep_tab_ids),
+            "protected": 0,
+            "closed_tabs": [],
+        }
+        herdr = getattr(self, "herdr", None)
+        sweep = getattr(herdr, "reconcile_disposable_task_tabs", None)
+        if callable(sweep):
+            stale = await sweep(keep_tab_ids=keep_tab_ids)
+
+        await self.db.add_event(
+            "pstack.herdr_tab.reconciled",
+            "PStack terminal/disposable HERDR tabs reconciled.",
+            data={
+                "task_count": len(tasks),
+                "terminal_closed": terminal_closed,
+                "patched": patched,
+                "keep_tab_count": len(keep_tab_ids),
+                "stale": {
+                    key: stale.get(key)
+                    for key in ("scanned", "candidates", "closed", "kept", "protected")
+                },
+            },
+        )
+        return {
+            "tasks": len(tasks),
+            "terminal_closed": terminal_closed,
+            "patched": patched,
+            "keep_tab_ids": sorted(keep_tab_ids),
+            "stale": stale,
+        }
+
     async def _checkpoint_active_pstack_task(
         self,
         gateway_session_id: str,
@@ -3511,6 +3630,7 @@ class GatewaySessionManager:
                     "managed_session_id": task_value.get("managed_session_id"),
                     "gateway_session_id": gateway_session_id,
                     "pstack_auto_dispatch": True,
+                    "pstack_herdr_tab": tab,
                     "pstack_runtime": runtime_id,
                     "runtime_authority": "hirda",
                     "runtime_selection": runtime_plan,

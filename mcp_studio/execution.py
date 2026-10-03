@@ -436,14 +436,69 @@ class ExecutionSupervisor:
         trace_id = str(metadata.get("pstack_trace_id") or "").strip()
         if not task_id:
             return
-        await self.db.patch_pstack_task(
-            task_id,
-            {
-                "work_id": work.get("id"),
-                "status": status,
-                "execution_state": execution_state,
-            },
-        )
+
+        patch: dict[str, Any] = {
+            "work_id": work.get("id"),
+            "status": status,
+            "execution_state": execution_state,
+        }
+        status_key = str(status or "").strip().casefold()
+        execution_key = str(execution_state or "").strip().casefold()
+        if status_key in {"completed", "expired", "cancelled", "failed"} or execution_key in {
+            "completed",
+            "cancelled",
+            "failed",
+        }:
+            tab = metadata.get("pstack_herdr_tab")
+            tab = dict(tab) if isinstance(tab, dict) else {}
+            if (
+                tab
+                and str(tab.get("owner") or "").casefold() == "pstack"
+                and not bool(tab.get("persistent"))
+                and str(tab.get("status") or "").casefold()
+                not in {"closed", "unavailable"}
+            ):
+                try:
+                    closed_tab = await self.herdr.close_task_tab(tab)
+                except Exception as exc:
+                    closed_tab = {
+                        **tab,
+                        "status": "close_failed",
+                        "close_error": f"{type(exc).__name__}: {exc}"[:1000],
+                    }
+                    if trace_id:
+                        await self.db.add_event(
+                            "pstack.herdr_tab.close_failed",
+                            "PStack HERDR task tab could not be closed after terminal execution.",
+                            severity="warning",
+                            data={
+                                "task_id": task_id,
+                                "trace_id": trace_id,
+                                "work_id": work.get("id"),
+                                "tab_id": tab.get("tab_id"),
+                                "error": closed_tab["close_error"],
+                            },
+                            stream_id=f"pstack:{trace_id}",
+                            correlation_id=trace_id,
+                        )
+                else:
+                    if trace_id:
+                        await self.db.add_event(
+                            "pstack.herdr_tab.closed",
+                            "PStack HERDR task tab closed after terminal execution.",
+                            data={
+                                "task_id": task_id,
+                                "trace_id": trace_id,
+                                "work_id": work.get("id"),
+                                "tab_id": closed_tab.get("tab_id"),
+                                "tab_label": closed_tab.get("label"),
+                            },
+                            stream_id=f"pstack:{trace_id}",
+                            correlation_id=trace_id,
+                        )
+                patch["herdr_tab"] = closed_tab
+
+        await self.db.patch_pstack_task(task_id, patch)
         if trace_id:
             await self.db.add_event(
                 "pstack.execution.state",

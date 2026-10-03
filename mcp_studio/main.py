@@ -38,6 +38,7 @@ from .models import (
     CapsuleHandoffValidation, CapsuleHandoffApproval, CapsuleHandoffCompletion, LaneStateUpdate, CapsuleComplete,
 )
 from .settings import Settings, load_settings
+from .capabilities import build_capability_registry
 from .skill_runtime import SkillRequestError, SkillRuntime
 from .workers import WorkerManager
 from .scheduler import Scheduler
@@ -238,6 +239,7 @@ async def lifespan(app: FastAPI):
     await scheduler.start()
     await execution.start()
     await gateway_sessions.reconcile_pstack_execution_work()
+    await gateway_sessions.reconcile_pstack_terminal_tabs()
     await connectivity.start()
     await db.add_audit("studio.start", actor="system", data={"version": "0.9.10-m6.2.5", "production_mode": settings.studio.production_mode})
     yield
@@ -675,6 +677,12 @@ async def api_status():
 @app.get("/api/reflex/metrics")
 async def reflex_metrics_status(window: str = "24h", recent: int = 20):
     return reflex_metrics.snapshot(window=window, recent=recent)
+
+
+@app.get("/api/capabilities")
+async def capability_registry_status():
+    """Return a provider-neutral view over MCP tools and HIRDA skills."""
+    return build_capability_registry(integration_manager, skill_runtime)
 
 
 @app.get("/api/skills")

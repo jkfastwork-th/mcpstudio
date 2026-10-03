@@ -653,6 +653,63 @@ class HerdrManager:
             "closed_at": _now(),
         }
 
+
+    async def reconcile_disposable_task_tabs(
+        self,
+        *,
+        keep_tab_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Close stale PStack-owned tabs without touching persistent/user tabs."""
+        keep = {
+            str(tab_id).strip()
+            for tab_id in (keep_tab_ids or set())
+            if str(tab_id).strip()
+        }
+        payload = await self._run_cli_json("tab", "list")
+        live_tabs = self._tabs_from_cli(payload)
+        persistent = self._persistent_tab_labels()
+        closed: list[dict[str, Any]] = []
+        kept = 0
+        protected = 0
+        candidates = 0
+
+        for live in live_tabs:
+            tab_id = str(live.get("tab_id") or "").strip()
+            label = str(live.get("label") or "").strip()
+            label_key = label.casefold()
+            if not tab_id:
+                continue
+            if tab_id in keep:
+                kept += 1
+                continue
+            if label_key in persistent:
+                protected += 1
+                continue
+            if not label.startswith("[PStack] "):
+                continue
+            candidates += 1
+            closed.append(
+                await self.close_task_tab(
+                    {
+                        "status": "open",
+                        "owner": "pstack",
+                        "persistent": False,
+                        "workspace_id": live.get("workspace_id"),
+                        "tab_id": tab_id,
+                        "label": label,
+                    }
+                )
+            )
+
+        return {
+            "scanned": len(live_tabs),
+            "candidates": candidates,
+            "closed": len(closed),
+            "kept": kept,
+            "protected": protected,
+            "closed_tabs": closed,
+        }
+
     async def start_agent_in_pane(
         self,
         *,
