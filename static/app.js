@@ -1106,7 +1106,7 @@ function renderSkillsRegistry(){
     list.innerHTML=`<div class="empty">${esc(tr('No skills match these filters.'))}</div>`;
   }else{
     list.innerHTML=filtered.map(skill=>`<button type="button" class="skills-list-item${skill.id===skillsSelectedId?' selected':''}" data-skill-id="${esc(skill.id)}" aria-pressed="${skill.id===skillsSelectedId?'true':'false'}"><span class="skills-item-heading"><strong>${esc(skill.name)}</strong><small>${esc(skill.version)}</small></span><code>${esc(skill.id)}</code><span class="skills-item-meta">${esc(skill.scope?.kind||'—')}${skill.scope?.value?` · ${esc(skill.scope.value)}`:''} · ${esc(skill.activation_mode||'—')}</span></button>`).join('');
-    list.querySelectorAll('[data-skill-id]').forEach(button=>button.addEventListener('click',()=>{skillsSelectedId=button.dataset.skillId||'';renderSkillsRegistry();}));
+
   }
   const selected=filtered.find(skill=>skill.id===skillsSelectedId);
   if(!selected){
@@ -2112,6 +2112,7 @@ document.addEventListener('click',e=>uiAction(async()=>{
   const laneApply=e.target.closest('[data-lane-state-apply]'); if(laneApply){await applyLaneState(laneApply.dataset.laneStateApply);return;}
   const agentCheck=e.target.closest('[data-agent-check]'); if(agentCheck){await checkAgentRuntime(agentCheck.dataset.agentCheck);return;}
   const agentDetails=e.target.closest('[data-agent-details]'); if(agentDetails){await showAgentRuntimeDetails(agentDetails.dataset.agentDetails);return;}
+  const skillRow=e.target.closest('[data-skill-id]'); if(skillRow){skillsSelectedId=skillRow.dataset.skillId||'';renderSkillsRegistry();return;}
   const go=e.target.closest('[data-go-view]'); if(go){setView(go.dataset.goView);if(go.dataset.capsuleId){if(latestData)renderCapsuleLedger(latestData);const focused=focusCapsuleLedgerItem(go.dataset.capsuleId);if(!focused&&go.dataset.managedSessionId){renderManagedHistory(await getJson(`/api/managed/sessions/${encodeURIComponent(go.dataset.managedSessionId)}/history`));}}return;}
   const tunnel=e.target.closest('[data-tunnel-session]'); if(tunnel){sessionTunnelFilter=tunnel.dataset.tunnelSession;showSessionHistory=false;setView('sessions');if(latestData)renderSessions(latestData);return;}
   const restart=e.target.closest('[data-managed-restart]'); if(restart){await sendJson(`/api/managed/sessions/${encodeURIComponent(restart.dataset.managedRestart)}/restart`);await load();return;}
