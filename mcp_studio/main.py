@@ -38,6 +38,7 @@ from .models import (
     CapsuleHandoffValidation, CapsuleHandoffApproval, CapsuleHandoffCompletion, LaneStateUpdate, CapsuleComplete,
 )
 from .settings import Settings, load_settings
+from .skill_runtime import SkillRequestError, SkillRuntime
 from .workers import WorkerManager
 from .scheduler import Scheduler
 from .execution import ExecutionSupervisor
@@ -81,6 +82,12 @@ from .plugin_bundle import router as plugin_bundle_router
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = os.environ.get("MCP_STUDIO_CONFIG", str(ROOT / "config.yaml"))
 settings: Settings = load_settings(CONFIG_PATH)
+skill_runtime = SkillRuntime(
+    enabled=settings.studio.skill_registry_enabled,
+    path=settings.studio.skill_registry_path,
+    max_manifest_bytes=settings.studio.skill_registry_max_manifest_bytes,
+    base_dir=settings.config_path.parent,
+)
 db = Database(settings.studio.database)
 health = HealthManager(settings, db)
 workers = WorkerManager(settings, db)
@@ -3415,7 +3422,11 @@ async def submit_work(payload: WorkSubmit):
     summary = await db.work_summary()
     if summary["queue"] >= settings.studio.scheduler_max_queue:
         raise HTTPException(status_code=429, detail="Scheduler queue is full")
-    item = await db.create_work(payload.model_dump(), settings.studio.worker_server_id or server_id)
+    try:
+        work_payload = skill_runtime.enrich_work_payload(payload.model_dump())
+    except SkillRequestError as exc:
+        raise HTTPException(status_code=400, detail="skill_request_invalid") from exc
+    item = await db.create_work(work_payload, settings.studio.worker_server_id or server_id)
     await db.add_event(
         "work.queued",
         f"{item['id']} queued: {item['label']}",
