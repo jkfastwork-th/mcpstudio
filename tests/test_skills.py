@@ -136,6 +136,10 @@ def test_rejects_bad_id_scope_and_non_mapping_root(tmp_path):
     with pytest.raises(SkillManifestError, match="scope_value_required"):
         SkillRegistry().load_directory(tmp_path)
 
+    write_manifest(tmp_path, manifest(scope={"kind": "machine", "value": "gpu"}))
+    with pytest.raises(SkillManifestError, match="skill_scope_invalid"):
+        SkillRegistry().load_directory(tmp_path)
+
 
 def test_rejects_symlink_manifest_and_oversized_manifest(tmp_path):
     target = write_manifest(tmp_path / "source", manifest())
