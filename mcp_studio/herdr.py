@@ -828,6 +828,7 @@ class HerdrManager:
         kind: str,
         pane_id: str,
         timeout_ms: int = 30000,
+        agent_args: list[str] | None = None,
     ) -> dict[str, Any]:
         """Start one HIRDA-selected runtime inside an existing HERDR pane."""
         agent_name = str(name or "").strip()
@@ -836,7 +837,12 @@ class HerdrManager:
         if not agent_name or not runtime_kind or not target_pane:
             raise ValueError("agent name, runtime kind, and pane id are required")
         bounded_timeout = max(1000, min(int(timeout_ms or 30000), 300000))
-        payload = await self._run_cli_json(
+        clean_args = [
+            str(item)
+            for item in (agent_args or [])
+            if str(item or "").strip()
+        ]
+        command = [
             "agent",
             "start",
             agent_name,
@@ -846,6 +852,11 @@ class HerdrManager:
             target_pane,
             "--timeout",
             str(bounded_timeout),
+        ]
+        if clean_args:
+            command.extend(["--", *clean_args])
+        payload = await self._run_cli_json(
+            *command,
             timeout_seconds=(bounded_timeout / 1000.0) + 5.0,
         )
         await self.refresh()
@@ -864,6 +875,7 @@ class HerdrManager:
             "pane_id": target_pane,
             "agent_session": pane.get("agent_session"),
             "agent_status": pane.get("agent_status"),
+            "agent_args": clean_args,
             "payload": payload,
         }
 

@@ -43,6 +43,43 @@ def test_decode_nested_panes_count():
     assert _count_items(decoded, ("panes",)) == 6
 
 
+@pytest.mark.asyncio
+async def test_start_agent_in_pane_forwards_runtime_agent_args():
+    manager = object.__new__(HerdrManager)
+    calls = []
+    pane = {
+        "pane_id": "wH:p9",
+        "agent": "claude",
+        "agent_status": "idle",
+        "agent_session": {"value": "session-1"},
+    }
+
+    async def run_cli(*args, timeout_seconds=15.0):
+        calls.append(args)
+        return {"result": {"ok": True}}
+
+    async def refresh():
+        return {"status": "healthy"}
+
+    manager._run_cli_json = run_cli
+    manager.refresh = refresh
+    manager.find_pane = lambda **kwargs: pane
+
+    result = await manager.start_agent_in_pane(
+        name="pstack-task-1",
+        kind="claude",
+        pane_id="wH:p9",
+        agent_args=["--permission-mode", "acceptEdits"],
+    )
+
+    assert calls[0][-3:] == (
+        "--",
+        "--permission-mode",
+        "acceptEdits",
+    )
+    assert result["agent_args"] == ["--permission-mode", "acceptEdits"]
+
+
 def test_pane_list_enriches_agent_name_and_session_from_agent_inventory():
     snapshot = {
         "panes": {

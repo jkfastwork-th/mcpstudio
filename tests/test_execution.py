@@ -186,6 +186,28 @@ def test_runtime_readiness_parses_model_effort_and_auto_edit():
     assert readiness["pending_prompt"] is None
 
 
+def test_runtime_readiness_accept_edits_matches_launch_contract():
+    readiness = _parse_runtime_readiness(
+        "claude",
+        {
+            "result": (
+                "Claude Code v2.1.289\n"
+                "cx/gpt-6-luna[1m] with medium effort · API Usage Billing\n"
+                "accept edits on\n"
+            )
+        },
+        pane={"interactive_ready": True},
+        require_auto_edit=True,
+        expected_permission_mode="acceptEdits",
+    )
+
+    assert readiness["ready"] is True
+    assert readiness["permission_mode"] == "acceptEdits"
+    assert readiness["permission_mode_matches"] is True
+    assert readiness["auto_edit_enabled"] is True
+    assert readiness["auto_edit_source"] == "claude_accept_edits"
+
+
 def test_runtime_readiness_blocks_on_onboarding_prompt():
     readiness = _parse_runtime_readiness(
         "claude",
@@ -251,8 +273,9 @@ async def test_dispatch_bootstraps_hirda_selected_runtime_before_prompt(tmp_path
             kind,
             pane_id,
             timeout_ms=30000,
+            agent_args=None,
         ):
-            self.starts.append((name, kind, pane_id, timeout_ms))
+            self.starts.append((name, kind, pane_id, timeout_ms, list(agent_args or [])))
             pane = self.snapshot["panes"]["panes"][0]
             assert pane["pane_id"] == pane_id
             pane["agent"] = kind
@@ -281,11 +304,111 @@ async def test_dispatch_bootstraps_hirda_selected_runtime_before_prompt(tmp_path
     dispatched = await supervisor.dispatch(running["id"], explicit=True)
 
     assert herdr.starts
-    assert herdr.starts[0][1:] == ("claude", "wF:p1", 30000)
+    assert herdr.starts[0][1:4] == ("claude", "wF:p1", 30000)
+    assert herdr.starts[0][4] == []
     assert herdr.calls[0][0] == "herdr_read_agent"
     assert herdr.calls[1][0] == "herdr_prompt_agent"
     assert dispatched["execution_state"] == "waiting_agent"
     assert dispatched["agent"] == "claude"
+
+
+@pytest.mark.asyncio
+async def test_pstack_claude_bootstrap_enforces_accept_edits_launch_contract(tmp_path):
+    db = Database(str(tmp_path / "studio.sqlite3"))
+    await db.init()
+    await db.ensure_workers(1, "serena-8001")
+    work = await db.create_work(
+        {
+            "label": "PStack launch contract",
+            "workspace": "/ws/demo",
+            "priority": 50,
+            "lease_mode": "write",
+            "pane": "wF:p1",
+            "agent": "claude",
+            "dispatch_mode": "herdr",
+            "instruction": "Reply READY only",
+            "metadata": {"pstack_task_id": "TASK-LAUNCH"},
+        },
+        "serena-8001",
+    )
+    running = await db.assign_work(
+        work["id"],
+        "worker-1",
+        pane="wF:p1",
+        agent="claude",
+    )
+
+    class ContractClient(FakeClient):
+        async def call_tool(self, name, arguments, client_name="test"):
+            self.calls.append((name, arguments, client_name))
+            if name == "herdr_read_agent":
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": (
+                            "Claude Code v2.1.289\n"
+                            "cx/gpt-6-luna[1m] with medium effort\n"
+                            "accept edits on\n"
+                        ),
+                    }]
+                }
+            if name == "herdr_prompt_agent":
+                return {"content": [{"type": "text", "text": '{"accepted":true}'}]}
+            return {}
+
+    class ContractHerdr(FakeHerdr):
+        def __init__(self):
+            super().__init__()
+            pane = self.snapshot["panes"]["panes"][0]
+            pane["agent"] = None
+            pane["agent_session"] = None
+            pane["agent_status"] = "unknown"
+            self.starts = []
+
+        def client(self):
+            return ContractClient(self.calls)
+
+        async def start_agent_in_pane(
+            self,
+            *,
+            name,
+            kind,
+            pane_id,
+            timeout_ms=30000,
+            agent_args=None,
+        ):
+            args = list(agent_args or [])
+            self.starts.append((name, kind, pane_id, timeout_ms, args))
+            pane = self.snapshot["panes"]["panes"][0]
+            pane["agent"] = kind
+            pane["agent_status"] = "idle"
+            pane["agent_session"] = {"value": "session-contract"}
+            return {
+                "name": name,
+                "kind": kind,
+                "pane_id": pane_id,
+                "agent_status": "idle",
+                "agent_session": pane["agent_session"],
+                "agent_args": args,
+            }
+
+    herdr = ContractHerdr()
+    supervisor = ExecutionSupervisor(
+        studio_settings(),
+        db,
+        herdr,
+        FakeScheduler(),
+    )
+
+    dispatched = await supervisor.dispatch(running["id"], explicit=True)
+
+    assert herdr.starts[0][4] == ["--permission-mode", "acceptEdits"]
+    readiness = dispatched["execution"]["runtime_readiness"]
+    assert readiness["permission_mode"] == "acceptEdits"
+    assert readiness["auto_edit_enabled"] is True
+    assert readiness["ready"] is True
+    launch = dispatched["execution"]["runtime_launch_contract"]
+    assert launch["permission_mode"] == "acceptEdits"
 
 
 @pytest.mark.asyncio

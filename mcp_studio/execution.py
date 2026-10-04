@@ -68,6 +68,7 @@ def _parse_runtime_readiness(
     pane: dict[str, Any] | None = None,
     require_auto_edit: bool = False,
     expected_model: str | None = None,
+    expected_permission_mode: str | None = None,
 ) -> dict[str, Any]:
     text = _decoded_text(decoded)
     model = None
@@ -89,11 +90,18 @@ def _parse_runtime_readiness(
             break
 
     mode = None
+    permission_mode = None
     auto_mode_enabled = None
     mode_match = re.search(r"\b(auto|manual) mode on\b", text, re.I)
+    accept_edits_match = re.search(r"\baccept edits on\b", text, re.I)
     if mode_match:
         mode = mode_match.group(1).casefold()
+        permission_mode = mode
         auto_mode_enabled = mode == "auto"
+    elif accept_edits_match:
+        mode = "acceptEdits"
+        permission_mode = "acceptEdits"
+        auto_mode_enabled = False
 
     auto_edit_enabled = None
     auto_edit_source = None
@@ -105,6 +113,9 @@ def _parse_runtime_readiness(
     if explicit_auto_edit:
         auto_edit_enabled = explicit_auto_edit.group(1).casefold() in {"on", "enabled"}
         auto_edit_source = "explicit"
+    elif permission_mode == "acceptEdits" and runtime_id == "claude":
+        auto_edit_enabled = True
+        auto_edit_source = "claude_accept_edits"
     elif auto_mode_enabled is not None and runtime_id == "claude":
         auto_edit_enabled = auto_mode_enabled
         auto_edit_source = "claude_auto_mode"
@@ -134,12 +145,24 @@ def _parse_runtime_readiness(
     expected_key = str(expected_model or "").strip().casefold()
     observed_key = str(model or "").strip().casefold()
     model_matches = not expected_key or observed_key == expected_key
+    expected_permission_key = str(
+        expected_permission_mode or ""
+    ).strip().casefold()
+    observed_permission_key = str(
+        permission_mode or ""
+    ).strip().casefold()
+    permission_mode_matches = (
+        not expected_permission_key
+        or observed_permission_key == expected_permission_key
+    )
 
     reasons: list[str] = []
     if not model:
         reasons.append("model_unobserved")
     if not model_matches:
         reasons.append("model_mismatch")
+    if not permission_mode_matches:
+        reasons.append("permission_mode_mismatch")
     if pending_prompt:
         reasons.append(f"pending_prompt:{pending_prompt}")
     if not interactive_ready:
@@ -157,6 +180,9 @@ def _parse_runtime_readiness(
         "model_matches": model_matches,
         "reasoning_effort": effort,
         "mode": mode,
+        "permission_mode": permission_mode,
+        "expected_permission_mode": expected_permission_mode,
+        "permission_mode_matches": permission_mode_matches,
         "auto_mode_enabled": auto_mode_enabled,
         "auto_edit_enabled": auto_edit_enabled,
         "auto_edit_source": auto_edit_source,
@@ -761,17 +787,47 @@ class ExecutionSupervisor:
 
         metadata = self._pstack_execution_metadata(work)
         task_id = str(metadata.get("pstack_task_id") or "").strip()
+        requirements = metadata.get("runtime_requirements")
+        requirements = requirements if isinstance(requirements, dict) else {}
         agent_name = (
             f"pstack-{task_id.casefold()}"
             if task_id
             else f"work-{str(work.get('id') or '').removeprefix('work-')[:12]}"
         )
+
+        agent_args: list[str] = []
+        launch_contract: dict[str, Any] = {
+            "runtime": runtime_id,
+            "authority": "hirda",
+        }
+        if runtime_id == "claude" and task_id:
+            permission_mode = str(
+                requirements.get("permission_mode")
+                or "acceptEdits"
+            ).strip()
+            if permission_mode:
+                agent_args.extend(["--permission-mode", permission_mode])
+                launch_contract["permission_mode"] = permission_mode
+            expected_model = str(requirements.get("model") or "").strip()
+            if expected_model:
+                agent_args.extend(["--model", expected_model])
+                launch_contract["model"] = expected_model
+            effort = str(
+                requirements.get("reasoning_effort")
+                or requirements.get("effort")
+                or ""
+            ).strip()
+            if effort:
+                agent_args.extend(["--effort", effort])
+                launch_contract["reasoning_effort"] = effort
+
         starter_fn = cast(Callable[..., Awaitable[dict[str, Any]]], starter)
-        await starter_fn(
+        started = await starter_fn(
             name=agent_name[:64],
             kind=runtime_id,
             pane_id=str(pane.get("pane_id") or ""),
             timeout_ms=30000,
+            agent_args=agent_args,
         )
         refreshed = self._pane_for_work(work)
         if not refreshed:
@@ -782,6 +838,17 @@ class ExecutionSupervisor:
                 "HIRDA-selected runtime did not become ready in task pane: "
                 f"expected {runtime_id}, observed {detected or 'none'}"
             )
+        await self.db.update_work_execution(
+            work["id"],
+            execution_patch={
+                "runtime_launch_contract": launch_contract,
+                "runtime_launch_observed": {
+                    "agent_session": started.get("agent_session"),
+                    "agent_status": started.get("agent_status"),
+                    "agent_args": started.get("agent_args", agent_args),
+                },
+            },
+        )
         await self.db.add_event(
             "execution.agent_started",
             f"{work['id']} started {runtime_id} in {refreshed.get('pane_id')}",
@@ -791,6 +858,7 @@ class ExecutionSupervisor:
                 "runtime": runtime_id,
                 "pane": refreshed.get("pane_id"),
                 "authority": "hirda",
+                "launch_contract": launch_contract,
             },
         )
         return refreshed
@@ -828,6 +896,14 @@ class ExecutionSupervisor:
             if explicit_auto_edit is not None
             else bool(metadata.get("pstack_task_id") and runtime_id == "claude")
         )
+        expected_permission_mode = (
+            str(requirements.get("permission_mode") or "").strip()
+            or (
+                "acceptEdits"
+                if metadata.get("pstack_task_id") and runtime_id == "claude"
+                else None
+            )
+        )
 
         tool = self.herdr.tool("herdr_read_agent")
         decoded: Any = None
@@ -838,6 +914,7 @@ class ExecutionSupervisor:
                 pane=pane,
                 require_auto_edit=require_auto_edit,
                 expected_model=expected_model,
+                expected_permission_mode=expected_permission_mode,
             )
             readiness["reasons"].append("readiness_probe_unavailable")
             readiness["ready"] = False
@@ -866,6 +943,7 @@ class ExecutionSupervisor:
                 pane=pane,
                 require_auto_edit=require_auto_edit,
                 expected_model=expected_model,
+                expected_permission_mode=expected_permission_mode,
             )
             last["attempt"] = attempt + 1
             if last["ready"]:
@@ -885,6 +963,7 @@ class ExecutionSupervisor:
             pane=pane,
             require_auto_edit=require_auto_edit,
             expected_model=expected_model,
+            expected_permission_mode=expected_permission_mode,
         )
         await self.db.update_work_execution(
             work["id"],
@@ -905,6 +984,7 @@ class ExecutionSupervisor:
                 "model": readiness.get("model"),
                 "reasoning_effort": readiness.get("reasoning_effort"),
                 "mode": readiness.get("mode"),
+                "permission_mode": readiness.get("permission_mode"),
                 "auto_edit_enabled": readiness.get("auto_edit_enabled"),
                 "pending_prompt": readiness.get("pending_prompt"),
                 "ready": readiness.get("ready"),
@@ -1027,6 +1107,7 @@ class ExecutionSupervisor:
                         "model": readiness.get("model"),
                         "reasons": readiness.get("reasons"),
                         "pending_prompt": readiness.get("pending_prompt"),
+                        "permission_mode": readiness.get("permission_mode"),
                     },
                 )
                 raise RuntimeError(
