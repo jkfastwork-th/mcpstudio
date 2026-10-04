@@ -358,6 +358,67 @@ async def test_server_discover_is_available_on_authenticated_mcp_endpoint_withou
 
 
 @pytest.mark.asyncio
+async def test_tools_list_is_available_without_session_for_chatgpt_action_discovery(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MCP_STUDIO_GATEWAY_TOKEN", "action-discovery-token")
+    settings = Settings(
+        studio=StudioConfig(
+            database=str(tmp_path / "action-discovery.sqlite3"),
+            gateway_enabled=True,
+            gateway_auth_mode="bearer",
+            gateway_token_env="MCP_STUDIO_GATEWAY_TOKEN",
+            gateway_allowed_servers=["serena-8001"],
+            gateway_session_enabled=True,
+        ),
+        servers=[
+            ServerConfig(
+                id="serena-8001",
+                name="Serena",
+                url="http://127.0.0.1:8999/mcp",
+            )
+        ],
+        tunnels=[],
+        config_path=tmp_path / "config.yaml",
+    )
+    db = Database(settings.studio.database)
+    await db.init()
+    manager = GatewaySessionManager(settings, db, skill_runtime=object())
+
+    async def fail_if_forwarded(**kwargs):
+        raise AssertionError("sessionless tools/list must not be forwarded to Serena")
+
+    monkeypatch.setattr(manager, "_send", fail_if_forwarded)
+    app = FastAPI()
+    app.include_router(make_gateway_router(settings, db, manager))
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://studio.local",
+    ) as client:
+        response = await client.post(
+            "/mcp/serena-8001",
+            headers={
+                "Authorization": "Bearer action-discovery-token",
+                "Content-Type": "application/json",
+            },
+            json={
+                "jsonrpc": "2.0",
+                "id": 92,
+                "method": "tools/list",
+                "params": {},
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["id"] == 92
+    names = [tool["name"] for tool in payload["result"]["tools"]]
+    assert "hirda_skill_run" in names
+
+
+@pytest.mark.asyncio
 async def test_initialize_bridges_mcp_events_protocol_to_legacy_upstream(
     tmp_path, monkeypatch
 ):

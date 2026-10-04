@@ -7388,6 +7388,43 @@ def make_gateway_router(settings: Settings, db: Database, manager: GatewaySessio
                 )
             return await observed_response(response_obj)
 
+        if (
+            settings.studio.gateway_session_enabled
+            and request.method == "POST"
+            and method == "tools/list"
+            and not incoming_session
+        ):
+            # ChatGPT action discovery can request tools/list immediately after
+            # OAuth without first establishing a stateful MCP session. Serena's
+            # upstream transport requires Mcp-Session-Id and returns HTTP 400 in
+            # that flow, so answer from HIRDA's governed local catalog instead.
+            payload = manager._control_tools_payload(
+                jsonrpc.get("id") if jsonrpc else None
+            )
+            response_obj = Response(
+                content=json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8"),
+                status_code=200,
+                media_type="application/json",
+                headers={
+                    "Cache-Control": "no-store",
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+            await db.add_event(
+                "gateway.sessionless_tool_discovery",
+                "Served HIRDA tool catalog without an MCP session for action discovery.",
+                server_id=server_id,
+                data={
+                    "client_class": client_class,
+                    "tool_count": len(payload.get("result", {}).get("tools", [])),
+                },
+            )
+            return await observed_response(response_obj)
+
         if settings.studio.gateway_session_enabled:
             if request.method == "POST" and method == "initialize":
                 return await observed_response(manager.initialize(
