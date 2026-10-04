@@ -378,6 +378,28 @@ class Database:
                         ON routines(enabled, next_run_at);
                     CREATE INDEX IF NOT EXISTS idx_routine_runs_routine
                         ON routine_runs(routine_id, started_at DESC);
+                    CREATE TABLE IF NOT EXISTS skill_experiences (
+                        id TEXT PRIMARY KEY,
+                        invocation_id TEXT NOT NULL,
+                        work_id TEXT NOT NULL UNIQUE,
+                        pstack_task_id TEXT,
+                        skill_ids_json TEXT NOT NULL DEFAULT '[]',
+                        domain TEXT,
+                        intent TEXT,
+                        input_json TEXT NOT NULL DEFAULT '{}',
+                        identity_json TEXT NOT NULL DEFAULT '{}',
+                        channel TEXT,
+                        outcome TEXT NOT NULL,
+                        execution_cert_json TEXT NOT NULL DEFAULT '{}',
+                        quality_cert_json TEXT NOT NULL DEFAULT '{}',
+                        trace_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_skill_experiences_skill
+                        ON skill_experiences(domain, intent, created_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_skill_experiences_work
+                        ON skill_experiences(work_id);
                     CREATE TABLE IF NOT EXISTS connectivity_tunnels (
                         id TEXT PRIMARY KEY,
                         provider TEXT NOT NULL,
@@ -2900,6 +2922,167 @@ class Database:
 
         await self._run(op)
         return await self.get_routine_run(run_id)
+
+
+    @staticmethod
+    def _skill_experience_item(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["skill_ids"] = json.loads(item.pop("skill_ids_json") or "[]")
+        item["input"] = json.loads(item.pop("input_json") or "{}")
+        item["identity"] = json.loads(item.pop("identity_json") or "{}")
+        item["execution_certification"] = json.loads(
+            item.pop("execution_cert_json") or "{}"
+        )
+        item["quality_certification"] = json.loads(
+            item.pop("quality_cert_json") or "{}"
+        )
+        item["trace"] = json.loads(item.pop("trace_json") or "{}")
+        return item
+
+    async def record_skill_experience(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        work_id = str(payload.get("work_id") or "").strip()
+        invocation_id = str(payload.get("invocation_id") or "").strip()
+        if not work_id or not invocation_id:
+            raise ValueError("skill experience requires work_id and invocation_id")
+        now = _now()
+
+        def op() -> None:
+            with self._connect() as db:
+                existing = db.execute(
+                    "SELECT id, created_at FROM skill_experiences WHERE work_id=?",
+                    (work_id,),
+                ).fetchone()
+                experience_id = (
+                    str(existing["id"])
+                    if existing is not None
+                    else f"skill-exp-{uuid.uuid4().hex[:16]}"
+                )
+                created_at = (
+                    str(existing["created_at"])
+                    if existing is not None
+                    else now
+                )
+                db.execute(
+                    """INSERT INTO skill_experiences
+                       (id, invocation_id, work_id, pstack_task_id,
+                        skill_ids_json, domain, intent, input_json,
+                        identity_json, channel, outcome,
+                        execution_cert_json, quality_cert_json,
+                        trace_json, created_at, updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(work_id) DO UPDATE SET
+                         invocation_id=excluded.invocation_id,
+                         pstack_task_id=excluded.pstack_task_id,
+                         skill_ids_json=excluded.skill_ids_json,
+                         domain=excluded.domain,
+                         intent=excluded.intent,
+                         input_json=excluded.input_json,
+                         identity_json=excluded.identity_json,
+                         channel=excluded.channel,
+                         outcome=excluded.outcome,
+                         execution_cert_json=excluded.execution_cert_json,
+                         quality_cert_json=excluded.quality_cert_json,
+                         trace_json=excluded.trace_json,
+                         updated_at=excluded.updated_at""",
+                    (
+                        experience_id,
+                        invocation_id,
+                        work_id,
+                        payload.get("pstack_task_id"),
+                        json.dumps(
+                            payload.get("skill_ids") or [],
+                            ensure_ascii=False,
+                        ),
+                        payload.get("domain"),
+                        payload.get("intent"),
+                        json.dumps(payload.get("input") or {}, ensure_ascii=False),
+                        json.dumps(
+                            payload.get("identity") or {},
+                            ensure_ascii=False,
+                        ),
+                        payload.get("channel"),
+                        str(payload.get("outcome") or "unknown"),
+                        json.dumps(
+                            payload.get("execution_certification") or {},
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            payload.get("quality_certification") or {},
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(payload.get("trace") or {}, ensure_ascii=False),
+                        created_at,
+                        now,
+                    ),
+                )
+
+        await self._run(op)
+        return await self.get_skill_experience_by_work(work_id)
+
+    async def get_skill_experience(self, experience_id: str) -> dict[str, Any]:
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT * FROM skill_experiences WHERE id=?",
+                    (experience_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(experience_id)
+                return self._skill_experience_item(row)
+
+        return await self._run(op)
+
+    async def get_skill_experience_by_work(
+        self,
+        work_id: str,
+    ) -> dict[str, Any]:
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT * FROM skill_experiences WHERE work_id=?",
+                    (work_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(work_id)
+                return self._skill_experience_item(row)
+
+        return await self._run(op)
+
+    async def list_skill_experiences(
+        self,
+        *,
+        skill_id: str | None = None,
+        domain: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        bounded = max(1, min(int(limit or 100), 500))
+
+        def op() -> list[dict[str, Any]]:
+            with self._connect() as db:
+                clauses: list[str] = []
+                values: list[Any] = []
+                if domain:
+                    clauses.append("domain=?")
+                    values.append(domain)
+                query = "SELECT * FROM skill_experiences"
+                if clauses:
+                    query += " WHERE " + " AND ".join(clauses)
+                query += " ORDER BY created_at DESC LIMIT ?"
+                values.append(bounded)
+                rows = db.execute(query, tuple(values)).fetchall()
+                items = [self._skill_experience_item(row) for row in rows]
+                if skill_id:
+                    items = [
+                        item
+                        for item in items
+                        if skill_id in set(item.get("skill_ids") or [])
+                    ]
+                return items
+
+        return await self._run(op)
 
     async def create_work(self, payload: dict[str, Any], default_server_id: str) -> dict[str, Any]:
         work_id = f"work-{uuid.uuid4().hex[:16]}"

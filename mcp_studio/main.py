@@ -41,6 +41,7 @@ from .models import (
 from .settings import Settings, load_settings
 from .capabilities import CapabilityResolver, build_capability_registry
 from .skill_runtime import SkillRequestError, SkillRuntime
+from .skill_gateway import SkillGateway
 from .execution_environments import plan_execution_environment
 from .workers import WorkerManager
 from .scheduler import Scheduler
@@ -126,6 +127,7 @@ integration_manager = build_integration_manager(
     pixel_art_studio=pixel_art_studio,
 )
 capability_resolver = CapabilityResolver(integration_manager)
+skill_gateway = SkillGateway(db, skill_runtime, capability_resolver)
 visual_assets = VisualAssetOrchestrator(
     pixel_art_studio,
     earth_validator_url=earth_world_validator_url,
@@ -184,6 +186,7 @@ gateway_sessions = GatewaySessionManager(
 )
 gateway_sessions.scheduler = scheduler
 gateway_sessions.execution = execution
+gateway_sessions.skill_gateway = skill_gateway
 operations = OperationsManager(settings, db)
 observability = ObservabilityManager(settings, db)
 reflex_metrics = ReflexMetrics(settings.studio)
@@ -740,23 +743,31 @@ async def skills_registry_status():
     skills = []
     for skill in state.registry.snapshot():
         skills.append({
+            "schema": skill.schema,
             "id": skill.id,
             "name": skill.name,
             "version": skill.version,
             "description": skill.description,
             "scope": {"kind": skill.scope.kind, "value": skill.scope.value},
             "triggers": list(skill.triggers),
+            "intents": list(skill.intents),
             "required_capabilities": list(skill.required_capabilities),
             "required_tools": list(skill.required_tools),
             "runtime_constraints": list(skill.runtime_constraints),
+            "permission_requirements": list(skill.permission_requirements),
             "policy_hints": list(skill.policy_hints),
             "workflow_steps": list(skill.workflow_steps),
             "verification_checks": list(skill.verification_checks),
+            "provenance": dict(skill.provenance),
             "source": "in-memory" if skill.source == "memory" else "manifest",
-            "activation_mode": "scope-default" if not skill.triggers else "triggered",
+            "activation_mode": (
+                "scope-default"
+                if not skill.triggers and not skill.intents
+                else "intent-or-triggered"
+            ),
         })
     return {
-        "schema": "hirda-skill-registry-status-v1",
+        "schema": "hirda-skill-registry-status-v2",
         "enabled": bool(skill_runtime.enabled),
         "registry_status": state.status,
         "error_code": state.error_code,
@@ -4169,7 +4180,40 @@ async def ai_quality_certification(
         stream_id=f"work:{work_id}",
         correlation_id=work_id,
     )
-    return result
+    experience = await skill_gateway.record_experience(
+        work=work,
+        pstack_task=task,
+        execution_certification=execution_cert,
+        quality_certification=result,
+    )
+    return {
+        **result,
+        "skill_experience": experience,
+    }
+
+
+@app.get("/api/skill-experiences")
+async def list_skill_experiences(
+    skill_id: str | None = None,
+    domain: str | None = None,
+    limit: int = 100,
+):
+    return {
+        "schema": "hirda-skill-experience-list-v1",
+        "items": await db.list_skill_experiences(
+            skill_id=skill_id,
+            domain=domain,
+            limit=limit,
+        ),
+    }
+
+
+@app.get("/api/skill-experiences/{experience_id}")
+async def get_skill_experience(experience_id: str):
+    try:
+        return await db.get_skill_experience(experience_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown skill experience")
 
 @app.post("/api/scheduler/run")
 async def run_scheduler_once():
