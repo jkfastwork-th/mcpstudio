@@ -53,6 +53,10 @@ def test_classifies_serena_read_write_and_destructive_tools():
     assert classify_tool("herdr_wait_agent", {"agent_id": "w1:pA"}) == "read"
 
 
+def test_hirda_skill_run_is_classified_as_execute():
+    assert classify_tool("hirda_skill_run") == "execute"
+
+
 def test_shell_classifier_keeps_read_write_execute_separate():
     assert classify_shell_command("git status && git diff --stat") == "read"
     assert classify_shell_command("git branch --show-current") == "read"
