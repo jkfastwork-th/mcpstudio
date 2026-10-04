@@ -4519,6 +4519,9 @@ class GatewaySessionManager:
         args: dict[str, Any],
     ) -> dict[str, Any]:
         """Run one deterministic action Skill inside its own PStack lifecycle."""
+        if self.skill_gateway is None:
+            raise ManagedSessionError("HIRDA Skill Gateway is unavailable")
+
         gateway = await self.db.get_gateway_session(gateway_session_id)
         managed_id = str(gateway.get("managed_session_id") or "").strip()
         if not managed_id:
@@ -4554,19 +4557,44 @@ class GatewaySessionManager:
         instruction = str(args.get("instruction") or "").strip()
         parameters = args.get("parameters")
         parameters = dict(parameters) if isinstance(parameters, dict) else {}
+        intent = (
+            "schedule_social_post"
+            if str(parameters.get("run_mode") or "now").casefold() == "scheduled"
+            else "publish_social_post"
+        )
+        input_data = {
+            "instruction": instruction,
+            **parameters,
+        }
+        channels = parameters.get("channels")
+        if isinstance(channels, list) and channels:
+            input_data["channel"] = channels[0]
+
+        prepared = self.skill_gateway.prepare_run(
+            intent=intent,
+            input_data=input_data,
+            workspace=str(managed.get("project_path") or ""),
+            domain="social-hub",
+            skill_id=skill_id,
+            priority=50,
+        )
         goal = (
             "HIRDA DETERMINISTIC SKILL ACTION\n"
             f"Skill: {skill_id}\n"
             f"Instruction: {instruction}"
         )
+        task_overrides = dict(prepared.get("task_overrides") or {})
+        task_overrides.update(
+            {
+                "deterministic_action": True,
+                "skill_id": skill_id,
+            }
+        )
         task = await self._open_pstack_gateway_task(
             gateway_session_id,
             managed_session=managed,
             goal=goal,
-            task_overrides={
-                "deterministic_action": True,
-                "skill_id": skill_id,
-            },
+            task_overrides=task_overrides,
         )
         if not task:
             raise ManagedSessionError("skill_pstack_admission_failed")
@@ -4579,7 +4607,7 @@ class GatewaySessionManager:
             status="passed",
             detail=f"Resolved deterministic Skill {skill_id} under HIRDA authority.",
         )
-        await self._checkpoint_active_pstack_task(
+        task = await self._checkpoint_active_pstack_task(
             gateway_session_id,
             phase="admitted",
             status="passed",
@@ -4587,6 +4615,42 @@ class GatewaySessionManager:
                 f"HIRDA resolved Skill {skill_id}, its capability/tool requirements, "
                 "and the attached managed workspace before action execution."
             ),
+        )
+
+        invocation = dict(prepared.get("invocation") or {})
+        metadata = {
+            "deterministic_action": True,
+            "action_provider": "social-hub-task",
+            "pstack_task_id": task.get("task_id"),
+            "pstack_trace_id": task.get("trace_id"),
+            "skill_invocation": invocation,
+            "skill_resolution": task_overrides.get("skill_resolution") or {},
+            "capability_resolution": task_overrides.get("capability_resolution") or {},
+            "runtime_constraints": task_overrides.get("runtime_constraints") or [],
+        }
+        work = await self.db.create_work(
+            {
+                "label": f"Skill action · {skill_id}"[:240],
+                "workspace": str(managed.get("project_path") or ""),
+                "priority": int(invocation.get("priority") or 50),
+                "lease_mode": "none",
+                "session_id": managed_id,
+                "pane": None,
+                "agent": None,
+                "dispatch_mode": "manual",
+                "instruction": instruction,
+                "metadata": metadata,
+            },
+            self.settings.studio.worker_server_id,
+        )
+        work = await self.db.start_deterministic_work(work["id"])
+        task = {
+            **task,
+            "work_id": work["id"],
+        }
+        await self._persist_active_pstack_task(
+            gateway_session_id,
+            task,
         )
 
         try:
@@ -4600,6 +4664,25 @@ class GatewaySessionManager:
                 status="failed",
                 detail=f"{type(exc).__name__}: {exc}"[:1000],
             )
+            try:
+                await self.db.finish_work(
+                    work["id"],
+                    state="failed",
+                    error=f"{type(exc).__name__}: {exc}"[:1000],
+                    result={
+                        "semantic_completion": {
+                            "status": "failed",
+                            "reason": type(exc).__name__,
+                        },
+                        "action_verification": {
+                            "passed": False,
+                            "provider": "social-hub-task",
+                            "error": type(exc).__name__,
+                        },
+                    },
+                )
+            except Exception:
+                pass
             try:
                 failed = await self._checkpoint_active_pstack_task(
                     gateway_session_id,
@@ -4632,10 +4715,44 @@ class GatewaySessionManager:
         task_id = str(action_result.get("task_id") or "").strip()
         action_status = str(action_result.get("status") or "").strip()
         if not task_id or not action_status:
+            await self.db.finish_work(
+                work["id"],
+                state="failed",
+                error="skill_action_verification_missing_task_result",
+                result={
+                    "semantic_completion": {
+                        "status": "failed",
+                        "reason": "action_verification_missing",
+                    },
+                    "action_verification": {
+                        "passed": False,
+                        "provider": "social-hub-task",
+                    },
+                },
+            )
             raise ManagedSessionError(
                 "skill_action_verification_missing_task_result"
             )
 
+        await self.db.finish_work(
+            work["id"],
+            state="completed",
+            result={
+                "semantic_completion": {
+                    "status": "success",
+                    "reason": "governed_action_verified",
+                },
+                "action_verification": {
+                    "passed": True,
+                    "provider": "social-hub-task",
+                    "task_id": task_id,
+                    "status": action_status,
+                    "publish_policy": result.get("publish_policy"),
+                    "comment_policy": result.get("comment_policy"),
+                },
+                "skill_action": result,
+            },
+        )
         await self._record_pstack_lifecycle_tool_evidence(
             gateway_session_id,
             managed_session=managed,
@@ -4687,6 +4804,8 @@ class GatewaySessionManager:
         )
         return {
             **result,
+            "work_id": work["id"],
+            "invocation": invocation,
             "pstack_task": terminal,
         }
 

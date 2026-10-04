@@ -3335,6 +3335,37 @@ class Database:
         await self._run(op)
         return await self.get_work(work_id)
 
+
+    async def start_deterministic_work(self, work_id: str) -> dict[str, Any]:
+        """Start a governed deterministic work item without binding an agent worker."""
+        now = _now()
+
+        def op() -> None:
+            with self._connect() as db:
+                work = db.execute(
+                    "SELECT state, metadata_json FROM work_items WHERE id=?",
+                    (work_id,),
+                ).fetchone()
+                if work is None:
+                    raise KeyError(work_id)
+                if work["state"] != "queued":
+                    raise ValueError(f"work {work_id} is not queued")
+                metadata = json.loads(work["metadata_json"] or "{}")
+                if metadata.get("deterministic_action") is not True:
+                    raise ValueError(
+                        f"work {work_id} is not a deterministic action"
+                    )
+                db.execute(
+                    """UPDATE work_items
+                       SET state='running', started_at=?, updated_at=?,
+                           execution_state='running_action'
+                       WHERE id=?""",
+                    (now, now, work_id),
+                )
+
+        await self._run(op)
+        return await self.get_work(work_id)
+
     async def get_work(self, work_id: str) -> dict[str, Any]:
         def op() -> dict[str, Any]:
             with self._connect() as db:

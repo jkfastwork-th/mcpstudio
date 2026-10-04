@@ -28,12 +28,37 @@ def certify_execution(
     semantic = semantic if isinstance(semantic, dict) else {}
     execution = work.get("execution")
     execution = execution if isinstance(execution, dict) else {}
+    metadata = work.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    deterministic_action = metadata.get("deterministic_action") is True
     readiness = (
         result.get("runtime_readiness")
         if isinstance(result.get("runtime_readiness"), dict)
         else execution.get("runtime_readiness")
     )
     readiness = readiness if isinstance(readiness, dict) else {}
+    action_verification = result.get("action_verification")
+    action_verification = (
+        action_verification
+        if isinstance(action_verification, dict)
+        else {}
+    )
+
+    execution_specific_check = (
+        _check(
+            "deterministic_action_verified",
+            action_verification.get("passed") is True,
+            actual=action_verification,
+            expected={"passed": True},
+        )
+        if deterministic_action
+        else _check(
+            "runtime_readiness_passed",
+            readiness.get("ready") is True,
+            actual=readiness.get("ready"),
+            expected=True,
+        )
+    )
 
     checks = [
         _check(
@@ -54,12 +79,7 @@ def certify_execution(
             actual=semantic.get("status"),
             expected="success",
         ),
-        _check(
-            "runtime_readiness_passed",
-            readiness.get("ready") is True,
-            actual=readiness.get("ready"),
-            expected=True,
-        ),
+        execution_specific_check,
         _check(
             "no_failure_class",
             not str(work.get("failure_class") or "").strip(),
@@ -131,6 +151,9 @@ def certify_execution(
         "schema": EXECUTION_CERTIFICATION_SCHEMA,
         "certification_type": "execution",
         "deterministic": True,
+        "execution_kind": (
+            "deterministic_action" if deterministic_action else "agent_runtime"
+        ),
         "passed": passed,
         "outcome": "PASS" if passed else "FAIL",
         "checks": checks,

@@ -262,6 +262,45 @@ def test_execution_certification_is_deterministic_and_quality_free():
     assert all(check["passed"] for check in result["checks"])
 
 
+def test_execution_certification_supports_governed_deterministic_action():
+    work = {
+        "id": "work-action",
+        "state": "completed",
+        "execution_state": "completed",
+        "failure_class": None,
+        "error": None,
+        "metadata": {
+            "deterministic_action": True,
+        },
+        "result": {
+            "semantic_completion": {
+                "status": "success",
+            },
+            "action_verification": {
+                "passed": True,
+                "provider": "social-hub-task",
+                "task_id": "task_0123456789abcdef",
+                "status": "needs_review",
+            },
+        },
+    }
+
+    result = certify_execution(work)
+
+    assert result["passed"] is True
+    assert result["outcome"] == "PASS"
+    assert result["execution_kind"] == "deterministic_action"
+    assert any(
+        check["name"] == "deterministic_action_verified"
+        and check["passed"] is True
+        for check in result["checks"]
+    )
+    assert not any(
+        check["name"] == "runtime_readiness_passed"
+        for check in result["checks"]
+    )
+
+
 def test_execution_certification_requires_closed_pstack_resources():
     task = {
         "status": "completed",

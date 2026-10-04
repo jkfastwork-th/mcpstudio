@@ -161,6 +161,7 @@ async def test_social_publish_dispatches_governed_backend_with_safe_defaults(tmp
 @pytest.mark.asyncio
 async def test_hirda_skill_run_owns_deterministic_pstack_lifecycle(tmp_path):
     db = FakeDb()
+    work_rows = {}
 
     async def get_gateway_session(gateway_session_id):
         assert gateway_session_id == "gws-test"
@@ -174,14 +175,75 @@ async def test_hirda_skill_run_owns_deterministic_pstack_lifecycle(tmp_path):
             "workspace_key": "social",
         }
 
+    async def create_work(payload, default_server_id):
+        row = {
+            "id": "work-skill",
+            "state": "queued",
+            "execution_state": "none",
+            "metadata": payload["metadata"],
+            "result": {},
+        }
+        work_rows[row["id"]] = row
+        return dict(row)
+
+    async def start_deterministic_work(work_id):
+        row = work_rows[work_id]
+        row.update({"state": "running", "execution_state": "running_action"})
+        return dict(row)
+
+    async def finish_work(work_id, *, state, result=None, error=None):
+        row = work_rows[work_id]
+        row.update(
+            {
+                "state": state,
+                "execution_state": state,
+                "result": result or {},
+                "error": error,
+            }
+        )
+        return dict(row)
+
     db.get_gateway_session = get_gateway_session
     db.get_managed_session = get_managed_session
+    db.create_work = create_work
+    db.start_deterministic_work = start_deterministic_work
+    db.finish_work = finish_work
+
     manager = GatewaySessionManager(
         settings(tmp_path),
         db,
         integrations=FakeIntegrations(),
         skill_runtime=runtime(),
     )
+
+    class FakeSkillGateway:
+        def prepare_run(self, **kwargs):
+            return {
+                "invocation": {
+                    "invocation_id": "skill-inv-test",
+                    "intent": kwargs["intent"],
+                    "domain": kwargs["domain"],
+                    "skill_ids": [kwargs["skill_id"]],
+                    "priority": kwargs["priority"],
+                    "input": kwargs["input_data"],
+                },
+                "task_overrides": {
+                    "priority": kwargs["priority"],
+                    "skill_invocation": {
+                        "invocation_id": "skill-inv-test",
+                        "intent": kwargs["intent"],
+                        "domain": kwargs["domain"],
+                        "skill_ids": [kwargs["skill_id"]],
+                        "priority": kwargs["priority"],
+                        "input": kwargs["input_data"],
+                    },
+                    "skill_resolution": {},
+                    "capability_resolution": {"resolved": True},
+                    "runtime_constraints": [],
+                },
+            }
+
+    manager.skill_gateway = FakeSkillGateway()
     calls = []
     task = {
         "task_id": "TASK-SKILL",
@@ -197,7 +259,12 @@ async def test_hirda_skill_run_owns_deterministic_pstack_lifecycle(tmp_path):
     async def open_task(*args, **kwargs):
         calls.append(("open", kwargs))
         assert kwargs["task_overrides"]["deterministic_action"] is True
+        assert kwargs["task_overrides"]["skill_invocation"]["invocation_id"] == "skill-inv-test"
         return dict(task)
+
+    async def persist(*args, **kwargs):
+        calls.append(("persist", args[1].get("work_id")))
+        return args[1]
 
     async def record(*args, **kwargs):
         calls.append(("evidence", kwargs["tool_name"], kwargs["status"]))
@@ -207,6 +274,7 @@ async def test_hirda_skill_run_owns_deterministic_pstack_lifecycle(tmp_path):
         calls.append(("checkpoint", kwargs["phase"], kwargs["status"]))
         return {
             **task,
+            "work_id": "work-skill",
             "status": "completed" if kwargs["phase"] == "terminal" else "active",
             "lifecycle": {
                 "status": "completed" if kwargs["phase"] == "terminal" else "active",
@@ -220,6 +288,8 @@ async def test_hirda_skill_run_owns_deterministic_pstack_lifecycle(tmp_path):
             "schema": "hirda-skill-run-v1",
             "skill_id": "social.publish",
             "skill_version": "0.2.0",
+            "publish_policy": "draft",
+            "comment_policy": "off",
             "result": {
                 "task_id": "social-task-1",
                 "status": "needs_review",
@@ -228,6 +298,7 @@ async def test_hirda_skill_run_owns_deterministic_pstack_lifecycle(tmp_path):
 
     manager._active_pstack_gateway_task = active
     manager._open_pstack_gateway_task = open_task
+    manager._persist_active_pstack_task = persist
     manager._record_pstack_lifecycle_tool_evidence = record
     manager._checkpoint_active_pstack_task = checkpoint
     manager._run_action_skill = run_action
@@ -237,12 +308,21 @@ async def test_hirda_skill_run_owns_deterministic_pstack_lifecycle(tmp_path):
         {
             "skill_id": "social.publish",
             "instruction": "create governed draft",
-            "parameters": {"publish_policy": "draft"},
+            "parameters": {
+                "publish_policy": "draft",
+                "comment_policy": "off",
+                "channels": ["facebook"],
+            },
         },
     )
 
     assert result["result"]["task_id"] == "social-task-1"
+    assert result["work_id"] == "work-skill"
     assert result["pstack_task"]["status"] == "completed"
+    completed_work = work_rows["work-skill"]
+    assert completed_work["state"] == "completed"
+    assert completed_work["result"]["action_verification"]["passed"] is True
+    assert completed_work["metadata"]["skill_invocation"]["invocation_id"] == "skill-inv-test"
     assert [item for item in calls if item[0] == "checkpoint"] == [
         ("checkpoint", "admitted", "passed"),
         ("checkpoint", "working", "passed"),
