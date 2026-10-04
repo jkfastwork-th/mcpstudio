@@ -449,7 +449,7 @@ def test_skill_distiller_system_principal_is_hermes_only_allowlisted():
     assert router._principal_pane_name_prefixes(
         "hermes",
         "hirda-skill-distiller",
-    ) == ("hirda-skill-distiller-hermes",)
+    ) == ("hirda-skill-hermes",)
     assert router._principal_pane_name_prefixes(
         "claude",
         "hirda-skill-distiller",

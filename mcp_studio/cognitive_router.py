@@ -1401,7 +1401,7 @@ class CognitiveRouter:
 
         system_principals = {
             ("hermes", "hirda-skill-distiller"): (
-                "hirda-skill-distiller-hermes",
+                "hirda-skill-hermes",
             ),
         }
         return system_principals.get((runtime_key, principal_key), ())
