@@ -1370,31 +1370,41 @@ class CognitiveRouter:
     ) -> tuple[str, ...]:
         if not principal_id:
             return ()
+
+        runtime_key = str(runtime_id or "").strip().casefold()
+        principal_key = str(principal_id or "").strip().casefold()
+
         raw_bindings = getattr(self.studio, "cognitive_runtime_bindings", {})
         selected: Any = None
         if isinstance(raw_bindings, dict):
             for key, value in raw_bindings.items():
-                if str(key or "").strip().casefold() == runtime_id.casefold():
+                if str(key or "").strip().casefold() == runtime_key:
                     selected = value
                     break
-        if not isinstance(selected, dict):
-            return ()
-        raw_map = selected.get("principal_pane_name_prefixes")
-        if not isinstance(raw_map, dict):
-            return ()
-        for key, raw_values in raw_map.items():
-            if str(key or "").strip().casefold() != principal_id.casefold():
-                continue
-            if isinstance(raw_values, str):
-                raw_values = [raw_values]
-            if not isinstance(raw_values, list):
-                return ()
-            return tuple(
-                str(value).strip().casefold()
-                for value in raw_values
-                if str(value or "").strip()
-            )
-        return ()
+        if isinstance(selected, dict):
+            raw_map = selected.get("principal_pane_name_prefixes")
+            if isinstance(raw_map, dict):
+                for key, raw_values in raw_map.items():
+                    if str(key or "").strip().casefold() != principal_key:
+                        continue
+                    if isinstance(raw_values, str):
+                        raw_values = [raw_values]
+                    if not isinstance(raw_values, list):
+                        return ()
+                    configured = tuple(
+                        str(value).strip().casefold()
+                        for value in raw_values
+                        if str(value or "").strip()
+                    )
+                    if configured:
+                        return configured
+
+        system_principals = {
+            ("hermes", "hirda-skill-distiller"): (
+                "hirda-skill-distiller-hermes",
+            ),
+        }
+        return system_principals.get((runtime_key, principal_key), ())
 
     def _pane_claimed_by_any_principal(
         self,

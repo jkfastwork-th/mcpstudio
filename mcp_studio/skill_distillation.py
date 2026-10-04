@@ -225,6 +225,7 @@ class SkillDistillationManager:
                 "preferred_depth": "deep",
                 "allow_fallback": False,
                 "preferred_runtime": "hermes",
+                "principal_id": "hirda-skill-distiller",
                 "timeout_seconds": 60.0,
                 "context": {
                     "purpose": "skill_distillation",

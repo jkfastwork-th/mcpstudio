@@ -440,6 +440,22 @@ async def test_execute_bootstraps_isolated_principal_pane_when_missing():
     assert len(herdr.closed_tabs) == 1
 
 
+def test_skill_distiller_system_principal_is_hermes_only_allowlisted():
+    herdr = BootstrapPrincipalHerdr()
+    cfg = studio()
+    cfg.cognitive_runtime_bindings = {}
+    router = CognitiveRouter(cfg, herdr, FakeRuntimes())
+
+    assert router._principal_pane_name_prefixes(
+        "hermes",
+        "hirda-skill-distiller",
+    ) == ("hirda-skill-distiller-hermes",)
+    assert router._principal_pane_name_prefixes(
+        "claude",
+        "hirda-skill-distiller",
+    ) == ()
+
+
 @pytest.mark.asyncio
 async def test_execute_does_not_bootstrap_explicit_cross_principal_target():
     herdr = BootstrapPrincipalHerdr()

@@ -152,6 +152,7 @@ async def test_hermes_distills_certifies_and_promotes_skill_evolution(tmp_path):
     assert candidate["distiller_runtime"] == "hermes"
     request = router.requests[0]
     assert request["preferred_runtime"] == "hermes"
+    assert request["principal_id"] == "hirda-skill-distiller"
     assert request["allow_fallback"] is False
     assert "private-account-" not in request["prompt"]
 
