@@ -6304,7 +6304,10 @@ class GatewaySessionManager:
         if (
             request.method == "POST"
             and rpc_method == "tools/call"
-            and (tool_name.startswith("mcpstudio_") or tool_name in PEER_TOOL_NAMES)
+            and (
+                tool_name.startswith("mcpstudio_")
+                or tool_name in CONTROL_TOOL_NAMES
+            )
         ):
             try:
                 result = await self._handle_management_tool(gateway_session_id, tool_name, tool_args)
@@ -7424,6 +7427,108 @@ def make_gateway_router(settings: Settings, db: Database, manager: GatewaySessio
                 },
             )
             return await observed_response(response_obj)
+
+        if (
+            settings.studio.gateway_session_enabled
+            and request.method == "POST"
+            and method == "tools/call"
+            and not incoming_session
+        ):
+            # ChatGPT may invoke actions without replaying Mcp-Session-Id.
+            # Bootstrap a normal HIRDA gateway session internally, then route
+            # the original call through the standard session-aware path.
+            bootstrap_jsonrpc = {
+                "jsonrpc": "2.0",
+                "id": f"hirda-bootstrap-{uuid4().hex[:12]}",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": UPSTREAM_COMPAT_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "hirda-sessionless-action-bridge",
+                        "version": "1",
+                    },
+                },
+            }
+            bootstrap_body = json.dumps(
+                bootstrap_jsonrpc,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            bootstrap_response = await manager.initialize(
+                request=request,
+                server=server,
+                body=bootstrap_body,
+                jsonrpc=bootstrap_jsonrpc,
+                client_id=client_id,
+                client_type=client_type,
+                identity_scope=identity_scope,
+                identity_source=identity_source,
+                ingress_override=ingress_override,
+            )
+            bootstrap_session = str(
+                bootstrap_response.headers.get("mcp-session-id") or ""
+            ).strip()
+            if bootstrap_response.status_code >= 400 or not bootstrap_session:
+                await db.add_event(
+                    "gateway.sessionless_action_bootstrap_failed",
+                    "Could not establish a gateway session for stateless tools/call.",
+                    server_id=server_id,
+                    data={
+                        "client_class": client_class,
+                        "bootstrap_status": bootstrap_response.status_code,
+                    },
+                )
+                error_payload = {
+                    "jsonrpc": "2.0",
+                    "id": jsonrpc.get("id") if jsonrpc else None,
+                    "error": {
+                        "code": -32001,
+                        "message": (
+                            "HIRDA could not establish an MCP session for "
+                            "stateless action invocation"
+                        ),
+                    },
+                }
+                return await observed_response(
+                    Response(
+                        content=json.dumps(
+                            error_payload,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ).encode("utf-8"),
+                        status_code=502,
+                        media_type="application/json",
+                        headers={
+                            "Cache-Control": "no-store",
+                            "X-Content-Type-Options": "nosniff",
+                        },
+                    )
+                )
+            await db.add_event(
+                "gateway.sessionless_action_bootstrap",
+                f"Bootstrapped gateway session {bootstrap_session} for stateless tools/call.",
+                server_id=server_id,
+                data={
+                    "gateway_session_id": bootstrap_session,
+                    "client_class": client_class,
+                    "tool_name": (
+                        str((jsonrpc.get("params") or {}).get("name") or "")
+                        if jsonrpc and isinstance(jsonrpc.get("params"), dict)
+                        else ""
+                    ),
+                },
+            )
+            return await observed_response(
+                manager.proxy_existing(
+                    request=request,
+                    server=server,
+                    body=body,
+                    gateway_session_id=bootstrap_session,
+                    ingress_override=ingress_override,
+                ),
+                gateway_id=bootstrap_session,
+            )
 
         if settings.studio.gateway_session_enabled:
             if request.method == "POST" and method == "initialize":

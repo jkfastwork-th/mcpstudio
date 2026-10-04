@@ -10,6 +10,7 @@ from typing import Any, cast
 import httpx
 import pytest
 from fastapi import FastAPI
+from fastapi.responses import Response
 
 from mcp_studio.db import Database
 from mcp_studio.gateway import GatewaySessionManager, make_gateway_router
@@ -416,6 +417,96 @@ async def test_tools_list_is_available_without_session_for_chatgpt_action_discov
     assert payload["id"] == 92
     names = [tool["name"] for tool in payload["result"]["tools"]]
     assert "hirda_skill_run" in names
+
+
+@pytest.mark.asyncio
+async def test_tools_call_without_session_bootstraps_gateway_transport(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MCP_STUDIO_GATEWAY_TOKEN", "action-call-token")
+    settings = Settings(
+        studio=StudioConfig(
+            database=str(tmp_path / "action-call.sqlite3"),
+            gateway_enabled=True,
+            gateway_auth_mode="bearer",
+            gateway_token_env="MCP_STUDIO_GATEWAY_TOKEN",
+            gateway_allowed_servers=["serena-8001"],
+            gateway_session_enabled=True,
+        ),
+        servers=[
+            ServerConfig(
+                id="serena-8001",
+                name="Serena",
+                url="http://127.0.0.1:8999/mcp",
+            )
+        ],
+        tunnels=[],
+        config_path=tmp_path / "config.yaml",
+    )
+    db = Database(settings.studio.database)
+    await db.init()
+    manager = GatewaySessionManager(settings, db, skill_runtime=object())
+    captured: dict[str, Any] = {}
+
+    async def fake_initialize(**kwargs):
+        captured["initialize"] = kwargs["jsonrpc"]
+        return Response(
+            content=b"{}",
+            status_code=200,
+            headers={"Mcp-Session-Id": "gws-bootstrap"},
+            media_type="application/json",
+        )
+
+    async def fake_proxy_existing(**kwargs):
+        captured["gateway_session_id"] = kwargs["gateway_session_id"]
+        captured["call"] = json.loads(kwargs["body"])
+        return Response(
+            content=json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 93,
+                    "result": {"content": [{"type": "text", "text": "ok"}]},
+                }
+            ).encode(),
+            status_code=200,
+            headers={"Mcp-Session-Id": "gws-bootstrap"},
+            media_type="application/json",
+        )
+
+    monkeypatch.setattr(manager, "initialize", fake_initialize)
+    monkeypatch.setattr(manager, "proxy_existing", fake_proxy_existing)
+
+    app = FastAPI()
+    app.include_router(make_gateway_router(settings, db, manager))
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://studio.local",
+    ) as client:
+        response = await client.post(
+            "/mcp/serena-8001",
+            headers={
+                "Authorization": "Bearer action-call-token",
+                "Content-Type": "application/json",
+            },
+            json={
+                "jsonrpc": "2.0",
+                "id": 93,
+                "method": "tools/call",
+                "params": {
+                    "name": "mcpstudio_current_session",
+                    "arguments": {},
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured["initialize"]["method"] == "initialize"
+    assert captured["gateway_session_id"] == "gws-bootstrap"
+    assert captured["call"]["method"] == "tools/call"
+    assert captured["call"]["params"]["name"] == "mcpstudio_current_session"
+
 
 
 @pytest.mark.asyncio
