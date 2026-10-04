@@ -29,8 +29,11 @@ _ASSET_NAME_RE = re.compile(r"^[A-Za-z0-9._-](?:[A-Za-z0-9._ -]{0,254}[A-Za-z0-9
 _ALLOWED_CHANNELS = {"facebook", "instagram"}
 _ALLOWED_RUN_MODES = {"now", "scheduled"}
 _FORCED_SOURCE_APP = "chatgpt_web"
+_SKILL_SOURCE_APP = "hirda_skill"
 _FORCED_REQUESTED_BY = "jack"
 _FORCED_ASSIGNED_AGENT = "fern"
+_ALLOWED_PUBLISH_POLICIES = {"auto", "review", "draft"}
+_ALLOWED_COMMENT_POLICIES = {"off", "track", "auto"}
 
 
 class SocialHubTaskAdapterError(RuntimeError):
@@ -55,8 +58,18 @@ def _descriptor_create() -> dict[str, Any]:
                 },
                 "run_mode": {"type": "string", "enum": sorted(_ALLOWED_RUN_MODES), "default": "now"},
                 "scheduled_at": {"type": "string"},
+                "publish_policy": {
+                    "type": "string",
+                    "enum": sorted(_ALLOWED_PUBLISH_POLICIES),
+                    "default": "review",
+                },
+                "comment_policy": {
+                    "type": "string",
+                    "enum": sorted(_ALLOWED_COMMENT_POLICIES),
+                    "default": "track",
+                },
                 "watch_after_publish": {"type": "boolean", "default": True},
-                "auto_reply": {"type": "boolean", "default": True},
+                "auto_reply": {"type": "boolean", "default": False},
                 "hold_for_asset": {"type": "boolean", "default": False},
                 "correlation_id": {"type": ["string", "null"], "maxLength": 160},
             },
@@ -152,7 +165,11 @@ class SocialHubTaskIntegration:
         self.manifest = IntegrationManifest.from_mapping({
             "id": "social-hub-task",
             "name": "Social Hub Task Connector",
-            "capabilities": ["social_hub_task", "social_media_scheduling"],
+            "capabilities": [
+                "social_hub_task",
+                "social_media_scheduling",
+                "social_hub_task_ingress",
+            ],
             "runtime": {"type": "local-http", "authority": "hirda-gated-backend"},
             "tools": list(_TOOL_CATALOG),
             "permissions": {
@@ -271,8 +288,35 @@ class SocialHubTaskIntegration:
         if run_mode == "scheduled" and not scheduled_at:
             raise SocialHubTaskAdapterError("social_hub_scheduled_at_required")
 
-        watch_after_publish = bool(arguments.get("watch_after_publish", True))
-        auto_reply = bool(arguments.get("auto_reply", True))
+        skill_id = str(context.get("skill_id") or "").strip()
+        source_app = _SKILL_SOURCE_APP if skill_id else _FORCED_SOURCE_APP
+
+        publish_policy = str(
+            arguments.get("publish_policy")
+            or ("review" if skill_id else "review")
+        ).strip().casefold()
+        if publish_policy not in _ALLOWED_PUBLISH_POLICIES:
+            raise SocialHubTaskAdapterError("social_hub_publish_policy_invalid")
+
+        explicit_comment_policy = str(
+            arguments.get("comment_policy") or ""
+        ).strip().casefold()
+        if explicit_comment_policy:
+            comment_policy = explicit_comment_policy
+        elif "watch_after_publish" in arguments or "auto_reply" in arguments:
+            watch_requested = bool(arguments.get("watch_after_publish", True))
+            auto_requested = bool(arguments.get("auto_reply", False))
+            comment_policy = (
+                "off"
+                if not watch_requested
+                else ("auto" if auto_requested else "track")
+            )
+        else:
+            comment_policy = "track"
+        if comment_policy not in _ALLOWED_COMMENT_POLICIES:
+            raise SocialHubTaskAdapterError("social_hub_comment_policy_invalid")
+        watch_after_publish = comment_policy != "off"
+        auto_reply = comment_policy == "auto"
         hold_for_asset = bool(arguments.get("hold_for_asset", False))
 
         raw_correlation_id = arguments.get("correlation_id")
@@ -286,6 +330,8 @@ class SocialHubTaskIntegration:
                 "channels": channels,
                 "run_mode": run_mode,
                 "scheduled_at": scheduled_at,
+                "publish_policy": publish_policy,
+                "comment_policy": comment_policy,
                 "watch_after_publish": watch_after_publish,
                 "auto_reply": auto_reply,
                 "hold_for_asset": hold_for_asset,
@@ -298,13 +344,20 @@ class SocialHubTaskIntegration:
             "channels": channels,
             "run_mode": run_mode,
             "scheduled_at": scheduled_at,
+            "task_type": "publish",
+            "publish_policy": publish_policy,
+            "target_identity": "owner_social",
+            "comment_policy": comment_policy,
             "watch_after_publish": watch_after_publish,
             "auto_reply": auto_reply,
             "hold_for_asset": hold_for_asset,
             "correlation_id": correlation_id,
-            "source_app": _FORCED_SOURCE_APP,
+            "source_app": source_app,
             "requested_by": _FORCED_REQUESTED_BY,
             "assigned_agent": _FORCED_ASSIGNED_AGENT,
+            "skill_id": skill_id,
+            "conversation_id": str(context.get("conversation_id") or "")[:160],
+            "parent_request_id": str(context.get("parent_request_id") or "")[:160],
         }
 
         async with httpx.AsyncClient(timeout=self.timeout_sec) as client:
@@ -332,9 +385,12 @@ class SocialHubTaskIntegration:
             "task_id": task_id,
             "duplicate_suppressed": duplicate_suppressed,
             "correlation_id": correlation_id,
-            "source_app": _FORCED_SOURCE_APP,
+            "source_app": source_app,
             "requested_by": _FORCED_REQUESTED_BY,
             "assigned_agent": _FORCED_ASSIGNED_AGENT,
+            "skill_id": skill_id,
+            "publish_policy": publish_policy,
+            "comment_policy": comment_policy,
             "governance_authority": False,
             "external_action_authority": False,
         }

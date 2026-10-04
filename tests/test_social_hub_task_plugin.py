@@ -169,6 +169,53 @@ async def test_create_task_forced_identities(hub_server, token_file, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_create_task_from_social_publish_skill_preserves_governed_policy_and_provenance(
+    hub_server, token_file, monkeypatch
+):
+    monkeypatch.setenv("HIRDA_SOCIAL_HUB_URL", hub_server)
+    monkeypatch.setenv("HIRDA_SOCIAL_HUB_TOKEN_FILE", str(token_file))
+    module = load_plugin()
+    integration = module.SocialHubTaskIntegration()
+
+    result = await integration.call_tool(
+        "social_task_create",
+        {
+            "instructions": "Prepare a Facebook analysis post.",
+            "channels": ["facebook"],
+            "publish_policy": "review",
+            "comment_policy": "track",
+            "correlation_id": "skill-social-publish-1",
+        },
+        context={
+            "gateway_session_id": "gws-social",
+            "skill_id": "social.publish",
+            "conversation_id": "conversation-1",
+            "parent_request_id": "request-1",
+        },
+    )
+
+    assert result["task_id"] == TASK_ID
+    assert result["source_app"] == "hirda_skill"
+    assert result["skill_id"] == "social.publish"
+    assert result["publish_policy"] == "review"
+    assert result["comment_policy"] == "track"
+
+    received = SocialHubHandler.received
+    assert received["task_type"] == "publish"
+    assert received["publish_policy"] == "review"
+    assert received["target_identity"] == "owner_social"
+    assert received["comment_policy"] == "track"
+    assert received["watch_after_publish"] is True
+    assert received["auto_reply"] is False
+    assert received["source_app"] == "hirda_skill"
+    assert received["requested_by"] == "jack"
+    assert received["assigned_agent"] == "fern"
+    assert received["skill_id"] == "social.publish"
+    assert received["conversation_id"] == "conversation-1"
+    assert received["parent_request_id"] == "request-1"
+
+
+@pytest.mark.asyncio
 async def test_create_task_reports_duplicate_suppression(hub_server, token_file, monkeypatch):
     monkeypatch.setenv("HIRDA_SOCIAL_HUB_URL", hub_server)
     monkeypatch.setenv("HIRDA_SOCIAL_HUB_TOKEN_FILE", str(token_file))

@@ -180,6 +180,7 @@ gateway_sessions = GatewaySessionManager(
     machine_router,
     machine_enrollment,
     herdr,
+    skill_runtime,
 )
 gateway_sessions.scheduler = scheduler
 gateway_sessions.execution = execution

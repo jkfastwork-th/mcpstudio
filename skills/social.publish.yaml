@@ -1,0 +1,42 @@
+schema: hirda-skill-v1
+id: social.publish
+name: Social Publish
+version: 0.1.0
+description: Create a governed Social Hub publish task from a natural-language publishing request.
+scope:
+  kind: global
+triggers:
+  - publish this on facebook
+  - publish this on instagram
+  - create a social post
+  - post this to facebook
+  - post this to instagram
+  - โพสต์ลง facebook
+  - โพสต์ลง instagram
+  - สร้างโพสต์ social
+  - ช่วยโพสต์เรื่องนี้
+required_capabilities:
+  - social_hub_task_ingress
+required_tools:
+  - social_task_create
+policy_hints:
+  - Create a Social Hub task instead of controlling the browser or social website directly.
+  - Default to review before publish unless the user explicitly requests automatic publication.
+  - Default comment handling to track only unless the user explicitly requests automatic replies.
+  - Use only the connected owner social identity supported by Social Hub.
+  - Preserve correlation and conversation provenance so repeated requests are idempotent.
+  - Never infer authority to publish from trigger matching alone; the tool invocation must represent an affirmative user request.
+workflow_steps:
+  - Convert the user request into the Social Hub publish task contract.
+  - Resolve the requested channels and schedule.
+  - Apply publish and comment policies.
+  - Create the idempotent Social Hub task through the governed ingress capability.
+  - Return the created task identifier and status.
+verification_checks:
+  - The Social Hub ingress provider is ready.
+  - The created task records the social.publish skill provenance.
+  - Review and comment policies match the user request or the safe defaults.
+  - No direct browser publication occurs inside the skill dispatcher.
+metadata:
+  domain: social
+  task_contract: social-publish-v2

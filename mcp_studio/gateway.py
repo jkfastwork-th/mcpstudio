@@ -72,6 +72,7 @@ CONTROL_TOOL_NAMES = (
     "mcpstudio_use_workspace",
     "mcpstudio_create_session",
     "mcpstudio_use_session",
+    "hirda_skill_run",
     *PEER_TOOL_NAMES,
     "mcpstudio_pstack_status",
     "mcpstudio_pstack_checkpoint",
@@ -120,6 +121,7 @@ class GatewaySessionManager:
         machine_router: MachineCapabilityRouter | None = None,
         machine_enrollment: MachineEnrollmentManager | None = None,
         herdr: Any | None = None,
+        skill_runtime: Any | None = None,
     ):
         self.settings = settings
         self.db = db
@@ -132,6 +134,7 @@ class GatewaySessionManager:
         self.machine_router = machine_router
         self.machine_enrollment = machine_enrollment
         self.herdr = herdr
+        self.skill_runtime = skill_runtime
         self.scheduler: Any | None = None
         self.execution: Any | None = None
         self.cognitive_router: Any | None = None
@@ -719,6 +722,76 @@ class GatewaySessionManager:
 
     def _management_tools(self) -> list[dict[str, Any]]:
         tools = self._peer_tools()
+        if self.skill_runtime is not None:
+            tools.append({
+                "name": "hirda_skill_run",
+                "description": (
+                    "Run a registered HIRDA action skill through its governed capability provider. "
+                    "Skills do not choose models, runtimes, machines, or permissions. "
+                    "social.publish creates a Social Hub task and defaults to review-before-publish."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "skill_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                        },
+                        "instruction": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 12000,
+                        },
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string", "maxLength": 240},
+                                "channels": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string",
+                                        "enum": ["facebook", "instagram"],
+                                    },
+                                    "uniqueItems": True,
+                                    "minItems": 1,
+                                    "maxItems": 2,
+                                },
+                                "run_mode": {
+                                    "type": "string",
+                                    "enum": ["now", "scheduled"],
+                                },
+                                "scheduled_at": {
+                                    "type": ["string", "null"],
+                                    "maxLength": 100,
+                                },
+                                "publish_policy": {
+                                    "type": "string",
+                                    "enum": ["auto", "review", "draft"],
+                                },
+                                "comment_policy": {
+                                    "type": "string",
+                                    "enum": ["off", "track", "auto"],
+                                },
+                                "hold_for_asset": {"type": "boolean"},
+                                "correlation_id": {
+                                    "type": ["string", "null"],
+                                    "maxLength": 160,
+                                },
+                            },
+                            "additionalProperties": False,
+                        },
+                    },
+                    "required": ["skill_id", "instruction"],
+                    "additionalProperties": False,
+                },
+                "annotations": {
+                    "readOnlyHint": False,
+                    "destructiveHint": False,
+                    "idempotentHint": True,
+                    "openWorldHint": True,
+                },
+            })
         if not (self.managed_sessions and self.managed_sessions.enabled):
             return tools
         tools.extend([
@@ -4142,8 +4215,147 @@ class GatewaySessionManager:
             correlation_id=trace_id,
         )
 
+    async def _run_action_skill(
+        self,
+        gateway_session_id: str,
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self.skill_runtime is None:
+            raise ManagedSessionError("skill runtime is unavailable")
+        if self.integrations is None:
+            raise ManagedSessionError("integration registry is unavailable")
+
+        skill_id = str(args.get("skill_id") or "").strip()
+        instruction = str(args.get("instruction") or "").strip()
+        parameters = args.get("parameters")
+        parameters = dict(parameters) if isinstance(parameters, dict) else {}
+        if not skill_id or len(skill_id) > 128:
+            raise ManagedSessionError("skill_id_invalid")
+        if not instruction or len(instruction) > 12000:
+            raise ManagedSessionError("skill_instruction_invalid")
+
+        state = self.skill_runtime._snapshot()
+        if str(getattr(state, "status", "")) != "ready":
+            raise ManagedSessionError(
+                f"skill_registry_unavailable:{getattr(state, 'status', 'unknown')}"
+            )
+        resolution = state.registry.resolve(
+            instruction,
+            explicit_skill_ids=[skill_id],
+        )
+        if skill_id in resolution.unresolved_explicit_ids:
+            raise ManagedSessionError("skill_not_found_or_not_applicable")
+        match = next(
+            (
+                item for item in resolution.matches
+                if item.skill.id == skill_id and item.explicit
+            ),
+            None,
+        )
+        if match is None:
+            raise ManagedSessionError("skill_not_resolved")
+
+        skill = match.skill
+        if skill_id != "social.publish":
+            raise ManagedSessionError("skill_execution_not_registered")
+        if "social_hub_task_ingress" not in skill.required_capabilities:
+            raise ManagedSessionError("skill_capability_contract_invalid")
+        if "social_task_create" not in skill.required_tools:
+            raise ManagedSessionError("skill_tool_contract_invalid")
+
+        capability_providers = self.integrations.capability_providers(
+            "social_hub_task_ingress"
+        )
+        if not any(
+            item.get("id") == "social-hub-task" and item.get("available")
+            for item in capability_providers
+        ):
+            raise ManagedSessionError("skill_capability_unavailable")
+
+        backend_name = "hirda__social_hub_task__social_task_create"
+        if not self.integrations.is_backend_tool(backend_name):
+            raise ManagedSessionError("skill_backend_tool_unavailable")
+
+        allowed = {
+            "title",
+            "channels",
+            "run_mode",
+            "scheduled_at",
+            "publish_policy",
+            "comment_policy",
+            "hold_for_asset",
+            "correlation_id",
+        }
+        unknown = set(parameters) - allowed
+        if unknown:
+            raise ManagedSessionError("skill_parameters_invalid")
+
+        publish_policy = str(
+            parameters.get("publish_policy") or "review"
+        ).strip().casefold()
+        comment_policy = str(
+            parameters.get("comment_policy") or "track"
+        ).strip().casefold()
+        if publish_policy not in {"auto", "review", "draft"}:
+            raise ManagedSessionError("skill_publish_policy_invalid")
+        if comment_policy not in {"off", "track", "auto"}:
+            raise ManagedSessionError("skill_comment_policy_invalid")
+
+        backend_args = {
+            "instructions": instruction,
+            "channels": list(parameters.get("channels") or ["facebook"]),
+            "run_mode": str(parameters.get("run_mode") or "now"),
+            "scheduled_at": parameters.get("scheduled_at"),
+            "publish_policy": publish_policy,
+            "comment_policy": comment_policy,
+            "hold_for_asset": bool(parameters.get("hold_for_asset", False)),
+        }
+        if parameters.get("title") is not None:
+            backend_args["title"] = str(parameters["title"])
+        if parameters.get("correlation_id") is not None:
+            backend_args["correlation_id"] = parameters["correlation_id"]
+
+        result = await self.integrations.call_backend_tool(
+            backend_name,
+            backend_args,
+            context={
+                "gateway_session_id": gateway_session_id,
+                "skill_id": skill_id,
+                "conversation_id": gateway_session_id,
+                "parent_request_id": str(parameters.get("correlation_id") or ""),
+            },
+        )
+        task_id = str(result.get("task_id") or "")
+        correlation_id = str(result.get("correlation_id") or "")
+        await self.db.add_event(
+            "skill.executed",
+            f"HIRDA skill {skill_id} created governed work.",
+            data={
+                "skill_id": skill_id,
+                "task_id": task_id,
+                "status": result.get("status"),
+                "publish_policy": publish_policy,
+                "comment_policy": comment_policy,
+            },
+            stream_id=f"skill:{skill_id}",
+            correlation_id=correlation_id or None,
+        )
+        return {
+            "schema": "hirda-skill-run-v1",
+            "skill_id": skill_id,
+            "skill_version": skill.version,
+            "required_capabilities": list(skill.required_capabilities),
+            "required_tools": list(skill.required_tools),
+            "publish_policy": publish_policy,
+            "comment_policy": comment_policy,
+            "result": result,
+        }
+
     async def _handle_management_tool(self, gateway_session_id: str, name: str, args: dict[str, Any]) -> Any:
         principal_id = await self.connector_principal_for_gateway(gateway_session_id)
+
+        if name == "hirda_skill_run":
+            return await self._run_action_skill(gateway_session_id, args)
 
         if name in PEER_TOOL_NAMES:
             peer_scope_id = await self.connector_peer_scope_for_gateway(gateway_session_id)

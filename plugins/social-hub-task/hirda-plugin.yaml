@@ -1,7 +1,7 @@
 schema: hirda-plugin-v1
 id: social-hub-task
 name: Social Hub Task Connector
-version: 0.1.0
+version: 0.2.0
 adapter:
   runtime: python
   entry: adapter.py
@@ -9,6 +9,7 @@ adapter:
 capabilities:
   - social_hub_task
   - social_media_scheduling
+  - social_hub_task_ingress
 tools:
   - social_task_create
   - social_task_attach_asset
