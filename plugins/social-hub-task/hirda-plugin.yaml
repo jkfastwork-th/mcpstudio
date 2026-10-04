@@ -1,14 +1,12 @@
 schema: hirda-plugin-v1
 id: social-hub-task
-name: Social Hub Task Connector
-version: 0.2.0
+name: Social Hub Task Ingress
+version: 1.1.0
 adapter:
   runtime: python
   entry: adapter.py
   class: SocialHubTaskIntegration
 capabilities:
-  - social_hub_task
-  - social_media_scheduling
   - social_hub_task_ingress
 tools:
   - social_task_create
@@ -21,12 +19,10 @@ permissions:
 health:
   type: adapter_probe
 routing:
-  mode: communication-backend
-  preferred_lanes: [claude, codex, hermes]
+  mode: local-http-backend
+  preferred_lanes: [chatgpt]
 metadata:
-  backend_capability: true
   executor_identity: fern
   owner_social_accounts: true
   runtime_authority: hirda
   governance_authority: false
-  external_action_authority: false
