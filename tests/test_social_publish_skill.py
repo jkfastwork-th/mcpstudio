@@ -159,6 +159,100 @@ async def test_social_publish_dispatches_governed_backend_with_safe_defaults(tmp
 
 
 @pytest.mark.asyncio
+async def test_hirda_skill_run_owns_deterministic_pstack_lifecycle(tmp_path):
+    db = FakeDb()
+
+    async def get_gateway_session(gateway_session_id):
+        assert gateway_session_id == "gws-test"
+        return {"managed_session_id": "ms-test"}
+
+    async def get_managed_session(managed_session_id):
+        assert managed_session_id == "ms-test"
+        return {
+            "id": "ms-test",
+            "project_path": "/ws/social",
+            "workspace_key": "social",
+        }
+
+    db.get_gateway_session = get_gateway_session
+    db.get_managed_session = get_managed_session
+    manager = GatewaySessionManager(
+        settings(tmp_path),
+        db,
+        integrations=FakeIntegrations(),
+        skill_runtime=runtime(),
+    )
+    calls = []
+    task = {
+        "task_id": "TASK-SKILL",
+        "trace_id": "TRACE-SKILL",
+        "workflow": "feature",
+        "status": "ready_for_hirda",
+        "lifecycle": {"status": "active", "current_phase": "admitted"},
+    }
+
+    async def active(*args, **kwargs):
+        return None
+
+    async def open_task(*args, **kwargs):
+        calls.append(("open", kwargs))
+        assert kwargs["task_overrides"]["deterministic_action"] is True
+        return dict(task)
+
+    async def record(*args, **kwargs):
+        calls.append(("evidence", kwargs["tool_name"], kwargs["status"]))
+        return dict(task)
+
+    async def checkpoint(*args, **kwargs):
+        calls.append(("checkpoint", kwargs["phase"], kwargs["status"]))
+        return {
+            **task,
+            "status": "completed" if kwargs["phase"] == "terminal" else "active",
+            "lifecycle": {
+                "status": "completed" if kwargs["phase"] == "terminal" else "active",
+                "current_phase": kwargs["phase"],
+            },
+        }
+
+    async def run_action(*args, **kwargs):
+        calls.append(("action",))
+        return {
+            "schema": "hirda-skill-run-v1",
+            "skill_id": "social.publish",
+            "skill_version": "0.2.0",
+            "result": {
+                "task_id": "social-task-1",
+                "status": "needs_review",
+            },
+        }
+
+    manager._active_pstack_gateway_task = active
+    manager._open_pstack_gateway_task = open_task
+    manager._record_pstack_lifecycle_tool_evidence = record
+    manager._checkpoint_active_pstack_task = checkpoint
+    manager._run_action_skill = run_action
+
+    result = await manager._run_governed_action_skill(
+        "gws-test",
+        {
+            "skill_id": "social.publish",
+            "instruction": "create governed draft",
+            "parameters": {"publish_policy": "draft"},
+        },
+    )
+
+    assert result["result"]["task_id"] == "social-task-1"
+    assert result["pstack_task"]["status"] == "completed"
+    assert [item for item in calls if item[0] == "checkpoint"] == [
+        ("checkpoint", "admitted", "passed"),
+        ("checkpoint", "working", "passed"),
+        ("checkpoint", "verified", "passed"),
+        ("checkpoint", "terminal", "passed"),
+    ]
+    assert ("action",) in calls
+
+
+@pytest.mark.asyncio
 async def test_skill_run_fail_closed_for_unregistered_or_unavailable_execution(tmp_path):
     manager = GatewaySessionManager(
         settings(tmp_path),

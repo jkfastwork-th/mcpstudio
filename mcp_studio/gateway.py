@@ -4228,11 +4228,19 @@ class GatewaySessionManager:
                 task,
                 managed_session=managed_session,
             )
-            task = await self._ensure_pstack_execution_work(
-                gateway_session_id,
-                task,
-                managed_session=managed_session,
-            )
+            if bool(task.get("deterministic_action")):
+                task = {
+                    **task,
+                    "work_id": None,
+                    "execution_state": "deterministic_action",
+                    "status": "ready_for_hirda",
+                }
+            else:
+                task = await self._ensure_pstack_execution_work(
+                    gateway_session_id,
+                    task,
+                    managed_session=managed_session,
+                )
             await self._persist_active_pstack_task(
                 gateway_session_id,
                 task,
@@ -4504,11 +4512,192 @@ class GatewaySessionManager:
             "result": result,
         }
 
+
+    async def _run_governed_action_skill(
+        self,
+        gateway_session_id: str,
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Run one deterministic action Skill inside its own PStack lifecycle."""
+        gateway = await self.db.get_gateway_session(gateway_session_id)
+        managed_id = str(gateway.get("managed_session_id") or "").strip()
+        if not managed_id:
+            raise ManagedSessionError(
+                "hirda_skill_run requires an attached managed workspace"
+            )
+        managed = await self.db.get_managed_session(managed_id)
+
+        active = await self._active_pstack_gateway_task(
+            gateway_session_id,
+            managed_session=managed,
+        )
+        if active:
+            lifecycle = ensure_pstack_lifecycle(
+                active.get("lifecycle"),
+                workflow=str(active.get("workflow") or "feature"),
+            )
+            if (
+                str(active.get("status") or "").casefold()
+                not in {"completed", "expired", "failed", "cancelled"}
+                and str(lifecycle.get("status") or "").casefold()
+                not in {"completed", "blocked"}
+            ):
+                raise PstackLifecycleError(
+                    "PSTACK_ACTIVE_TASK_CONFLICT",
+                    (
+                        "hirda_skill_run will not replace an active PStack task; "
+                        "finish or terminalize the current task first."
+                    ),
+                )
+
+        skill_id = str(args.get("skill_id") or "").strip()
+        instruction = str(args.get("instruction") or "").strip()
+        parameters = args.get("parameters")
+        parameters = dict(parameters) if isinstance(parameters, dict) else {}
+        goal = (
+            "HIRDA DETERMINISTIC SKILL ACTION\n"
+            f"Skill: {skill_id}\n"
+            f"Instruction: {instruction}"
+        )
+        task = await self._open_pstack_gateway_task(
+            gateway_session_id,
+            managed_session=managed,
+            goal=goal,
+            task_overrides={
+                "deterministic_action": True,
+                "skill_id": skill_id,
+            },
+        )
+        if not task:
+            raise ManagedSessionError("skill_pstack_admission_failed")
+
+        await self._record_pstack_lifecycle_tool_evidence(
+            gateway_session_id,
+            managed_session=managed,
+            tool_name="mcpstudio_skill_resolve",
+            tool_class="read",
+            status="passed",
+            detail=f"Resolved deterministic Skill {skill_id} under HIRDA authority.",
+        )
+        await self._checkpoint_active_pstack_task(
+            gateway_session_id,
+            phase="admitted",
+            status="passed",
+            evidence=(
+                f"HIRDA resolved Skill {skill_id}, its capability/tool requirements, "
+                "and the attached managed workspace before action execution."
+            ),
+        )
+
+        try:
+            result = await self._run_action_skill(gateway_session_id, args)
+        except Exception as exc:
+            await self._record_pstack_lifecycle_tool_evidence(
+                gateway_session_id,
+                managed_session=managed,
+                tool_name="hirda_skill_run",
+                tool_class="execute",
+                status="failed",
+                detail=f"{type(exc).__name__}: {exc}"[:1000],
+            )
+            try:
+                failed = await self._checkpoint_active_pstack_task(
+                    gateway_session_id,
+                    phase="working",
+                    status="failed",
+                    evidence=(
+                        "Deterministic Skill action failed before verification: "
+                        f"{type(exc).__name__}: {exc}"
+                    )[:1000],
+                )
+                failed = await self._close_pstack_herdr_tab(
+                    {
+                        **failed,
+                        "status": "failed",
+                        "execution_state": "failed",
+                    }
+                )
+                await self._persist_active_pstack_task(
+                    gateway_session_id,
+                    failed,
+                )
+            except Exception:
+                pass
+            raise
+
+        action_result = result.get("result")
+        action_result = (
+            action_result if isinstance(action_result, dict) else {}
+        )
+        task_id = str(action_result.get("task_id") or "").strip()
+        action_status = str(action_result.get("status") or "").strip()
+        if not task_id or not action_status:
+            raise ManagedSessionError(
+                "skill_action_verification_missing_task_result"
+            )
+
+        await self._record_pstack_lifecycle_tool_evidence(
+            gateway_session_id,
+            managed_session=managed,
+            tool_name="hirda_skill_run",
+            tool_class="execute",
+            status="passed",
+            detail=(
+                f"Skill {skill_id} created governed task {task_id} "
+                f"with status {action_status}."
+            ),
+        )
+        await self._checkpoint_active_pstack_task(
+            gateway_session_id,
+            phase="working",
+            status="passed",
+            evidence=(
+                f"Deterministic Skill {skill_id} executed through HIRDA capability "
+                f"bindings and returned governed task {task_id}."
+            ),
+        )
+        await self._record_pstack_lifecycle_tool_evidence(
+            gateway_session_id,
+            managed_session=managed,
+            tool_name="hirda_skill_run.verify",
+            tool_class="execute",
+            status="passed",
+            detail=(
+                f"Verified Skill result task_id={task_id} status={action_status} "
+                "without bypassing HIRDA permissions or provider resolution."
+            ),
+        )
+        await self._checkpoint_active_pstack_task(
+            gateway_session_id,
+            phase="verified",
+            status="passed",
+            evidence=(
+                f"Deterministic verification confirmed Social Hub task {task_id} "
+                f"with status {action_status}."
+            ),
+        )
+        terminal = await self._checkpoint_active_pstack_task(
+            gateway_session_id,
+            phase="terminal",
+            status="passed",
+            evidence=(
+                f"Skill {skill_id} completed as governed deterministic action; "
+                "PStack lifecycle and disposable resources are terminal."
+            ),
+        )
+        return {
+            **result,
+            "pstack_task": terminal,
+        }
+
     async def _handle_management_tool(self, gateway_session_id: str, name: str, args: dict[str, Any]) -> Any:
         principal_id = await self.connector_principal_for_gateway(gateway_session_id)
 
         if name == "hirda_skill_run":
-            return await self._run_action_skill(gateway_session_id, args)
+            return await self._run_governed_action_skill(
+                gateway_session_id,
+                args,
+            )
 
         if name in PEER_TOOL_NAMES:
             peer_scope_id = await self.connector_peer_scope_for_gateway(gateway_session_id)
@@ -6257,6 +6446,7 @@ class GatewaySessionManager:
             and rpc_method == "tools/call"
             and tool_name
             and not tool_name.startswith("mcpstudio_")
+            and tool_name != "hirda_skill_run"
             and session.get("managed_session_id")
         ):
             if self.integrations is not None:
