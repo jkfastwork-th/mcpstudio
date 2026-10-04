@@ -34,10 +34,48 @@ def _json_object(text: str) -> dict[str, Any]:
     match = _JSON_OBJECT.search(str(text or "").strip())
     if not match:
         raise ValueError("distiller_json_missing")
-    decoded = json.loads(match.group(0))
+    raw_object = match.group(0)
+    try:
+        decoded = json.loads(raw_object)
+    except json.JSONDecodeError as exc:
+        if "control character" not in str(exc).casefold():
+            raise
+        decoded = json.loads(_escape_json_control_chars(raw_object))
     if not isinstance(decoded, dict):
         raise ValueError("distiller_json_root_invalid")
     return decoded
+
+
+def _escape_json_control_chars(text: str) -> str:
+    """Escape raw control characters that appear inside JSON strings."""
+    output: list[str] = []
+    in_string = False
+    escaped = False
+    escapes = {
+        "\b": "\\b",
+        "\f": "\\f",
+        "\n": "\\n",
+        "\r": "\\r",
+        "\t": "\\t",
+    }
+    for char in text:
+        if escaped:
+            output.append(char)
+            escaped = False
+            continue
+        if in_string and char == "\\":
+            output.append(char)
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            output.append(char)
+            continue
+        if in_string and ord(char) < 0x20:
+            output.append(escapes.get(char, f"\\u{ord(char):04x}"))
+            continue
+        output.append(char)
+    return "".join(output)
 
 
 def _experience_summary(item: dict[str, Any]) -> dict[str, Any]:

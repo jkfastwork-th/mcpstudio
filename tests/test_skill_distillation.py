@@ -56,6 +56,16 @@ class _HermesRouter:
         )
 
 
+class _HermesControlCharRouter(_HermesRouter):
+    async def execute(self, payload):
+        result = await super().execute(payload)
+        result.output = result.output.replace(
+            "Publish through governed Social Hub task ingress.",
+            "Publish through governed Social Hub task ingress.\nKeep review before external publish.",
+        )
+        return result
+
+
 def _seed_manifest():
     return {
         "schema": "hirda-skill-v2",
@@ -170,6 +180,40 @@ async def test_hermes_distills_certifies_and_promotes_skill_evolution(tmp_path):
     assert any(
         skill.id == "social.publish" and skill.version == "0.2.1"
         for skill in runtime.registry.snapshot()
+    )
+
+
+@pytest.mark.asyncio
+async def test_distillation_recovers_raw_control_characters_in_hermes_json(tmp_path):
+    root = tmp_path / "skills"
+    root.mkdir()
+    (root / "social.publish.yaml").write_text(
+        yaml.safe_dump(_seed_manifest(), sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    db = Database(str(tmp_path / "studio.sqlite3"))
+    await db.init()
+    for index in range(3):
+        await _record_experience(db, index)
+
+    runtime = SkillRuntime(enabled=True, path=root, base_dir=tmp_path)
+    manager = SkillDistillationManager(
+        db,
+        runtime,
+        _Resolver(),
+        _HermesControlCharRouter(),
+        min_experiences=3,
+        quality_threshold=0.8,
+    )
+
+    result = await manager.distill(
+        domain="social",
+        intent="publish_social_post",
+    )
+
+    assert result["status"] == "candidate_created"
+    assert result["candidate"]["manifest"]["description"].endswith(
+        "Keep review before external publish."
     )
 
 
