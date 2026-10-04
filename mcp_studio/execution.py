@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -17,6 +18,200 @@ from .execution_environments import close_execution_environment
 TERMINAL_AGENT_STATES = {"idle", "done"}
 ACTIVE_AGENT_STATES = {"busy", "running", "working", "thinking", "executing", "active"}
 
+
+
+_RESULT_MARKER = re.compile(
+    r"(?im)^\s*HIRDA_TASK_RESULT:\s*(success|blocked|failed)\s*$"
+)
+_MODEL_PATTERNS = (
+    re.compile(r"\b(cx/[A-Za-z0-9._-]+(?:\[[^\]\s]+\])?)", re.I),
+    re.compile(r"\b(GPT-[A-Za-z0-9._-]+(?:\[[^\]\s]+\])?)", re.I),
+    re.compile(r"\b(claude-[A-Za-z0-9._-]+)\b", re.I),
+)
+_PENDING_PROMPTS = (
+    ("onboarding", re.compile(r"Teach auto mode about your environment\?", re.I)),
+    ("auth", re.compile(r"No access token found|Login required|re-authenticate", re.I)),
+    ("trust", re.compile(r"Trust this folder\?", re.I)),
+    ("approval", re.compile(r"Approve(?: this)?(?: tool| action)?\?", re.I)),
+    ("confirmation", re.compile(r"Enter to confirm\s*[·•]\s*Esc to cancel", re.I)),
+)
+_TOOL_FAILURE = re.compile(
+    r"repository tools are unavailable|tools are unavailable|session model is temporarily unavailable",
+    re.I,
+)
+
+
+def _decoded_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("result", "text", "output"):
+            item = value.get(key)
+            if isinstance(item, str):
+                return item
+        return "\n".join(
+            text
+            for text in (_decoded_text(item) for item in value.values())
+            if text
+        )
+    if isinstance(value, (list, tuple)):
+        return "\n".join(
+            text for text in (_decoded_text(item) for item in value) if text
+        )
+    return ""
+
+
+def _parse_runtime_readiness(
+    runtime_id: str,
+    decoded: Any,
+    *,
+    pane: dict[str, Any] | None = None,
+    require_auto_edit: bool = False,
+    expected_model: str | None = None,
+) -> dict[str, Any]:
+    text = _decoded_text(decoded)
+    model = None
+    for pattern in _MODEL_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            model = match.group(1)
+            break
+
+    effort = None
+    for pattern in (
+        re.compile(r"with\s+(extra high|high|medium|low)\s+effort", re.I),
+        re.compile(r"Reasoning effort:\s*(extra high|high|medium|low)", re.I),
+        re.compile(r"GPT-[A-Za-z0-9._-]+(?:\[[^\]\s]+\])?\s+(extra high|high|medium|low)\s*[·•]", re.I),
+    ):
+        match = pattern.search(text)
+        if match:
+            effort = match.group(1).casefold()
+            break
+
+    mode = None
+    auto_mode_enabled = None
+    mode_match = re.search(r"\b(auto|manual) mode on\b", text, re.I)
+    if mode_match:
+        mode = mode_match.group(1).casefold()
+        auto_mode_enabled = mode == "auto"
+
+    auto_edit_enabled = None
+    auto_edit_source = None
+    explicit_auto_edit = re.search(
+        r"\bauto edit\s*(?:=|:|is)?\s*(on|off|enabled|disabled)\b",
+        text,
+        re.I,
+    )
+    if explicit_auto_edit:
+        auto_edit_enabled = explicit_auto_edit.group(1).casefold() in {"on", "enabled"}
+        auto_edit_source = "explicit"
+    elif auto_mode_enabled is not None and runtime_id == "claude":
+        auto_edit_enabled = auto_mode_enabled
+        auto_edit_source = "claude_auto_mode"
+
+    pending_prompt = None
+    for kind, pattern in _PENDING_PROMPTS:
+        if pattern.search(text):
+            pending_prompt = kind
+            break
+
+    tools_ready: bool | None = None
+    if _TOOL_FAILURE.search(text):
+        tools_ready = False
+    elif text:
+        tools_ready = True
+
+    pane = pane or {}
+    pane_interactive = pane.get("interactive_ready")
+    interactive_ready = (
+        bool(pane_interactive)
+        if pane_interactive is not None
+        else True
+    )
+    if pending_prompt:
+        interactive_ready = False
+
+    expected_key = str(expected_model or "").strip().casefold()
+    observed_key = str(model or "").strip().casefold()
+    model_matches = not expected_key or observed_key == expected_key
+
+    reasons: list[str] = []
+    if not model:
+        reasons.append("model_unobserved")
+    if not model_matches:
+        reasons.append("model_mismatch")
+    if pending_prompt:
+        reasons.append(f"pending_prompt:{pending_prompt}")
+    if not interactive_ready:
+        reasons.append("interactive_not_ready")
+    if tools_ready is False:
+        reasons.append("tools_not_ready")
+    if require_auto_edit and auto_edit_enabled is not True:
+        reasons.append("auto_edit_not_ready")
+
+    return {
+        "schema": "hirda-runtime-readiness-v1",
+        "runtime": str(runtime_id or "").strip().casefold() or None,
+        "model": model,
+        "expected_model": expected_model,
+        "model_matches": model_matches,
+        "reasoning_effort": effort,
+        "mode": mode,
+        "auto_mode_enabled": auto_mode_enabled,
+        "auto_edit_enabled": auto_edit_enabled,
+        "auto_edit_source": auto_edit_source,
+        "interactive_ready": interactive_ready,
+        "pending_prompt": pending_prompt,
+        "tools_ready": tools_ready,
+        "require_auto_edit": bool(require_auto_edit),
+        "ready": not reasons,
+        "reasons": reasons,
+    }
+
+
+def _semantic_completion(decoded: Any) -> dict[str, Any]:
+    text = _decoded_text(decoded)
+    marker = _RESULT_MARKER.search(text)
+    status = marker.group(1).casefold() if marker else None
+    pending_prompt = None
+    for kind, pattern in _PENDING_PROMPTS:
+        if pattern.search(text):
+            pending_prompt = kind
+            break
+    tool_failure = bool(_TOOL_FAILURE.search(text))
+    if pending_prompt:
+        return {
+            "status": "blocked",
+            "reason": f"pending_prompt:{pending_prompt}",
+            "marker": status,
+        }
+    if tool_failure:
+        return {
+            "status": "blocked",
+            "reason": "tools_not_ready",
+            "marker": status,
+        }
+    if status in {"success", "blocked", "failed"}:
+        return {
+            "status": status,
+            "reason": None if status == "success" else f"agent_reported_{status}",
+            "marker": status,
+        }
+    return {
+        "status": "blocked",
+        "reason": "completion_marker_missing",
+        "marker": None,
+    }
+
+
+_RESULT_CONTRACT = """
+HIRDA EXECUTION RESULT CONTRACT:
+- Before becoming idle or done, end your final response with exactly one machine-readable line.
+- Use HIRDA_TASK_RESULT: success only when the requested task is actually complete.
+- Use HIRDA_TASK_RESULT: blocked when an approval, authentication, onboarding prompt, unavailable tool/model, or other dependency prevents completion.
+- Use HIRDA_TASK_RESULT: failed when execution failed and cannot safely continue.
+- Never report success merely because you reached an idle/done state.
+""".strip()
 
 class ToolSchemaError(RuntimeError):
     pass
@@ -600,6 +795,124 @@ class ExecutionSupervisor:
         )
         return refreshed
 
+
+    async def _probe_runtime_readiness(
+        self,
+        work: dict[str, Any],
+        pane: dict[str, Any],
+    ) -> dict[str, Any]:
+        runtime_id = str(
+            work.get("agent")
+            or work.get("requested_agent")
+            or pane.get("agent")
+            or ""
+        ).strip().casefold()
+        metadata = self._pstack_execution_metadata(work)
+        requirements = metadata.get("runtime_requirements")
+        requirements = requirements if isinstance(requirements, dict) else {}
+        runtime_selection = metadata.get("runtime_selection")
+        runtime_selection = (
+            runtime_selection if isinstance(runtime_selection, dict) else {}
+        )
+        expected_model = (
+            str(
+                requirements.get("model")
+                or runtime_selection.get("model")
+                or ""
+            ).strip()
+            or None
+        )
+        explicit_auto_edit = requirements.get("auto_edit")
+        require_auto_edit = (
+            bool(explicit_auto_edit)
+            if explicit_auto_edit is not None
+            else bool(metadata.get("pstack_task_id") and runtime_id == "claude")
+        )
+
+        tool = self.herdr.tool("herdr_read_agent")
+        decoded: Any = None
+        if not tool:
+            readiness = _parse_runtime_readiness(
+                runtime_id,
+                decoded,
+                pane=pane,
+                require_auto_edit=require_auto_edit,
+                expected_model=expected_model,
+            )
+            readiness["reasons"].append("readiness_probe_unavailable")
+            readiness["ready"] = False
+            return readiness
+
+        last: dict[str, Any] | None = None
+        for attempt in range(6):
+            args = build_tool_arguments(
+                tool,
+                pane=pane,
+                pane_id=pane.get("pane_id"),
+                agent=work.get("agent") or pane.get("agent"),
+            )
+            try:
+                raw = await self.herdr.client().call_tool(
+                    "herdr_read_agent",
+                    args,
+                    client_name="mcp-studio-runtime-readiness",
+                )
+                decoded = _decode_text_content(raw)
+            except Exception as exc:
+                decoded = {"read_error": str(exc)}
+            last = _parse_runtime_readiness(
+                runtime_id,
+                decoded,
+                pane=pane,
+                require_auto_edit=require_auto_edit,
+                expected_model=expected_model,
+            )
+            last["attempt"] = attempt + 1
+            if last["ready"]:
+                break
+            hard_reasons = {
+                reason
+                for reason in last["reasons"]
+                if reason != "model_unobserved"
+            }
+            if hard_reasons:
+                break
+            await asyncio.sleep(0.5)
+
+        readiness = last or _parse_runtime_readiness(
+            runtime_id,
+            decoded,
+            pane=pane,
+            require_auto_edit=require_auto_edit,
+            expected_model=expected_model,
+        )
+        await self.db.update_work_execution(
+            work["id"],
+            execution_patch={"runtime_readiness": readiness},
+        )
+        await self.db.add_event(
+            "execution.runtime_readiness",
+            (
+                f"{work['id']} runtime readiness "
+                f"{'passed' if readiness.get('ready') else 'blocked'}"
+            ),
+            severity="info" if readiness.get("ready") else "warning",
+            server_id=work["server_id"],
+            data={
+                "work_id": work["id"],
+                "pane": pane.get("pane_id"),
+                "runtime": runtime_id,
+                "model": readiness.get("model"),
+                "reasoning_effort": readiness.get("reasoning_effort"),
+                "mode": readiness.get("mode"),
+                "auto_edit_enabled": readiness.get("auto_edit_enabled"),
+                "pending_prompt": readiness.get("pending_prompt"),
+                "ready": readiness.get("ready"),
+                "reasons": readiness.get("reasons"),
+            },
+        )
+        return readiness
+
     async def dispatch(
         self,
         work_id: str,
@@ -689,12 +1002,45 @@ class ExecutionSupervisor:
                 )
                 raise
 
+            readiness = await self._probe_runtime_readiness(work, pane)
+            if not readiness.get("ready"):
+                await self.db.update_work_execution(
+                    work_id,
+                    execution_state="stalled",
+                    failure_class="runtime_not_ready",
+                    execution_patch={"runtime_readiness": readiness},
+                )
+                await self.db.mark_worker_degraded_for_work(work_id)
+                await self._patch_pstack_from_work(
+                    work,
+                    status="blocked",
+                    execution_state="stalled",
+                )
+                await self.db.add_event(
+                    "execution.runtime_not_ready",
+                    f"{work_id} runtime readiness gate blocked dispatch.",
+                    severity="warning",
+                    server_id=work["server_id"],
+                    data={
+                        "work_id": work_id,
+                        "runtime": readiness.get("runtime"),
+                        "model": readiness.get("model"),
+                        "reasons": readiness.get("reasons"),
+                        "pending_prompt": readiness.get("pending_prompt"),
+                    },
+                )
+                raise RuntimeError(
+                    "runtime readiness gate failed: "
+                    + ",".join(readiness.get("reasons") or ["unknown"])
+                )
+
+            dispatch_instruction = f"{instruction}\n\n{_RESULT_CONTRACT}"
             args = build_tool_arguments(
                 tool,
                 pane=pane,
                 pane_id=pane.get("pane_id"),
                 agent=work.get("agent") or pane.get("agent"),
-                prompt=instruction,
+                prompt=dispatch_instruction,
             )
             baseline = {
                 "pane_id": pane.get("pane_id"),
@@ -702,7 +1048,7 @@ class ExecutionSupervisor:
                 "state_change_seq": pane.get("state_change_seq"),
                 "agent_status": pane.get("agent_status"),
                 "saw_activity": False,
-                "dispatch_args": {k: "<instruction>" if v == instruction else v for k, v in args.items()},
+                "dispatch_args": {k: "<instruction>" if v == dispatch_instruction else v for k, v in args.items()},
             }
             await self.db.update_work_execution(
                 work_id,
@@ -866,28 +1212,74 @@ class ExecutionSupervisor:
         except Exception as exc:
             return {"read_error": str(exc)}
 
-    async def _complete_from_agent(self, work: dict[str, Any], pane: dict[str, Any]) -> dict[str, Any]:
+    async def _complete_from_agent(
+        self,
+        work: dict[str, Any],
+        pane: dict[str, Any],
+    ) -> dict[str, Any]:
         output = await self._try_read_result(work, pane)
+        semantic = _semantic_completion(output)
+        execution = dict(work.get("execution") or {})
         result = {
             "source": "herdr",
             "pane": pane.get("pane_id"),
             "agent": pane.get("agent") or work.get("agent"),
             "agent_status": pane.get("agent_status"),
             "revision": pane.get("revision"),
+            "runtime_readiness": execution.get("runtime_readiness"),
+            "semantic_completion": semantic,
             "output": output,
         }
-        item = await self.db.finish_work(work["id"], state="completed", result=result)
+
+        if semantic.get("status") == "success":
+            item = await self.db.finish_work(
+                work["id"],
+                state="completed",
+                result=result,
+            )
+            await self._patch_pstack_from_work(
+                item,
+                status="waiting",
+                execution_state="completed",
+            )
+            self.snapshot["completed"] += 1
+            await self.db.add_event(
+                "execution.completed",
+                f"{work['id']} completed on {pane.get('pane_id')}",
+                server_id=work["server_id"],
+                data={
+                    "work_id": work["id"],
+                    "worker_id": work.get("worker_id"),
+                    "pane": pane.get("pane_id"),
+                    "semantic_completion": semantic,
+                },
+            )
+            self.scheduler.kick()
+            return item
+
+        reason = str(semantic.get("reason") or "semantic_completion_failed")
+        item = await self.db.finish_work(
+            work["id"],
+            state="failed",
+            result=result,
+            error=reason,
+        )
         await self._patch_pstack_from_work(
             item,
-            status="waiting",
-            execution_state="completed",
+            status="blocked",
+            execution_state="failed",
         )
-        self.snapshot["completed"] += 1
         await self.db.add_event(
-            "execution.completed",
-            f"{work['id']} completed on {pane.get('pane_id')}",
+            "execution.semantic_completion_failed",
+            f"{work['id']} did not satisfy semantic completion: {reason}",
+            severity="warning",
             server_id=work["server_id"],
-            data={"work_id": work["id"], "worker_id": work.get("worker_id"), "pane": pane.get("pane_id")},
+            data={
+                "work_id": work["id"],
+                "worker_id": work.get("worker_id"),
+                "pane": pane.get("pane_id"),
+                "semantic_completion": semantic,
+            },
         )
         self.scheduler.kick()
         return item

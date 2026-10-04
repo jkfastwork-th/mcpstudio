@@ -9,6 +9,8 @@ from mcp_studio.execution import (
     ToolSchemaError,
     build_tool_arguments,
     classify_failure,
+    _parse_runtime_readiness,
+    _semantic_completion,
 )
 
 
@@ -60,7 +62,7 @@ class FakeClient:
         if name == "herdr_prompt_agent":
             return {"content": [{"type": "text", "text": '{"accepted":true}'}]}
         if name == "herdr_read_agent":
-            return {"content": [{"type": "text", "text": "M3_CERT_OK"}]}
+            return {"content": [{"type": "text", "text": "Claude Code v2.1.289\ncx/gpt-6-luna[1m] with medium effort\nauto mode on\nM3_CERT_OK\nHIRDA_TASK_RESULT: success"}]}
         return {}
 
 
@@ -162,6 +164,71 @@ def test_timeout_classified_ambiguous():
     assert classify_failure(httpx.ReadTimeout("timeout")) == "dispatch_uncertain"
 
 
+def test_runtime_readiness_parses_model_effort_and_auto_edit():
+    readiness = _parse_runtime_readiness(
+        "claude",
+        {
+            "result": (
+                "Claude Code v2.1.289\n"
+                "cx/gpt-6-luna[1m] with medium effort · API Usage Billing\n"
+                "auto mode on\n"
+            )
+        },
+        pane={"interactive_ready": True},
+        require_auto_edit=True,
+    )
+
+    assert readiness["ready"] is True
+    assert readiness["model"] == "cx/gpt-6-luna[1m]"
+    assert readiness["reasoning_effort"] == "medium"
+    assert readiness["mode"] == "auto"
+    assert readiness["auto_edit_enabled"] is True
+    assert readiness["pending_prompt"] is None
+
+
+def test_runtime_readiness_blocks_on_onboarding_prompt():
+    readiness = _parse_runtime_readiness(
+        "claude",
+        {
+            "result": (
+                "Claude Code v2.1.289\n"
+                "cx/gpt-6-luna[1m] with medium effort\n"
+                "auto mode on\n"
+                "Teach auto mode about your environment?\n"
+                "Enter to confirm · Esc to cancel\n"
+            )
+        },
+        pane={"interactive_ready": True},
+        require_auto_edit=True,
+    )
+
+    assert readiness["ready"] is False
+    assert readiness["pending_prompt"] == "onboarding"
+    assert "pending_prompt:onboarding" in readiness["reasons"]
+    assert readiness["interactive_ready"] is False
+
+
+def test_semantic_completion_requires_machine_readable_result_marker():
+    assert _semantic_completion({"result": "finished"}) == {
+        "status": "blocked",
+        "reason": "completion_marker_missing",
+        "marker": None,
+    }
+    assert _semantic_completion(
+        {"result": "done\nHIRDA_TASK_RESULT: success"}
+    )["status"] == "success"
+    blocked = _semantic_completion(
+        {
+            "result": (
+                "Teach auto mode about your environment?\n"
+                "HIRDA_TASK_RESULT: success"
+            )
+        }
+    )
+    assert blocked["status"] == "blocked"
+    assert blocked["reason"] == "pending_prompt:onboarding"
+
+
 @pytest.mark.asyncio
 async def test_dispatch_bootstraps_hirda_selected_runtime_before_prompt(tmp_path):
     db = Database(str(tmp_path / "studio.sqlite3"))
@@ -215,7 +282,8 @@ async def test_dispatch_bootstraps_hirda_selected_runtime_before_prompt(tmp_path
 
     assert herdr.starts
     assert herdr.starts[0][1:] == ("claude", "wF:p1", 30000)
-    assert herdr.calls[0][0] == "herdr_prompt_agent"
+    assert herdr.calls[0][0] == "herdr_read_agent"
+    assert herdr.calls[1][0] == "herdr_prompt_agent"
     assert dispatched["execution_state"] == "waiting_agent"
     assert dispatched["agent"] == "claude"
 
@@ -232,7 +300,8 @@ async def test_dispatch_then_monitor_completion_releases_worker(tmp_path):
     dispatched = await supervisor.dispatch(running["id"], explicit=True)
     assert dispatched["execution_state"] == "waiting_agent"
     assert dispatched["dispatch_attempts"] == 1
-    assert herdr.calls[0][0] == "herdr_prompt_agent"
+    assert herdr.calls[0][0] == "herdr_read_agent"
+    assert herdr.calls[1][0] == "herdr_prompt_agent"
 
     # Agent has changed revision and returned to idle: this proves activity
     # happened after the dispatch and is safe to treat as terminal.
@@ -249,6 +318,112 @@ async def test_dispatch_then_monitor_completion_releases_worker(tmp_path):
     assert worker["state"] == "idle"
     assert worker["workspace"] is None
     assert scheduler.kicks == 1
+
+
+@pytest.mark.asyncio
+async def test_dispatch_blocks_when_runtime_has_pending_onboarding_prompt(tmp_path):
+    db = Database(str(tmp_path / "studio.sqlite3"))
+    await db.init()
+    running = await create_running_herdr_work(db)
+
+    class OnboardingClient(FakeClient):
+        async def call_tool(self, name, arguments, client_name="test"):
+            self.calls.append((name, arguments, client_name))
+            if name == "herdr_read_agent":
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": (
+                            "Claude Code v2.1.289\n"
+                            "cx/gpt-6-luna[1m] with medium effort\n"
+                            "auto mode on\n"
+                            "Teach auto mode about your environment?\n"
+                            "Enter to confirm · Esc to cancel"
+                        ),
+                    }]
+                }
+            return {"content": [{"type": "text", "text": '{"accepted":true}'}]}
+
+    class OnboardingHerdr(FakeHerdr):
+        def client(self):
+            return OnboardingClient(self.calls)
+
+    herdr = OnboardingHerdr()
+    supervisor = ExecutionSupervisor(
+        studio_settings(),
+        db,
+        herdr,
+        FakeScheduler(),
+    )
+
+    with pytest.raises(RuntimeError, match="runtime readiness gate failed"):
+        await supervisor.dispatch(running["id"], explicit=True)
+
+    blocked = await db.get_work(running["id"])
+    assert blocked["execution_state"] == "stalled"
+    assert blocked["failure_class"] == "runtime_not_ready"
+    readiness = blocked["execution"]["runtime_readiness"]
+    assert readiness["model"] == "cx/gpt-6-luna[1m]"
+    assert readiness["pending_prompt"] == "onboarding"
+    assert readiness["ready"] is False
+    assert not [
+        call for call in herdr.calls if call[0] == "herdr_prompt_agent"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_terminal_agent_without_success_marker_fails_semantic_completion(tmp_path):
+    db = Database(str(tmp_path / "studio.sqlite3"))
+    await db.init()
+    running = await create_running_herdr_work(db)
+
+    class MissingMarkerClient(FakeClient):
+        async def call_tool(self, name, arguments, client_name="test"):
+            self.calls.append((name, arguments, client_name))
+            if name == "herdr_prompt_agent":
+                return {"content": [{"type": "text", "text": '{"accepted":true}'}]}
+            if name == "herdr_read_agent":
+                read_count = len(
+                    [call for call in self.calls if call[0] == "herdr_read_agent"]
+                )
+                text = (
+                    "Claude Code v2.1.289\n"
+                    "cx/gpt-6-luna[1m] with medium effort\n"
+                    "auto mode on"
+                    if read_count == 1
+                    else "Task looked done but emitted no completion marker."
+                )
+                return {"content": [{"type": "text", "text": text}]}
+            return {}
+
+    class MissingMarkerHerdr(FakeHerdr):
+        def client(self):
+            return MissingMarkerClient(self.calls)
+
+    herdr = MissingMarkerHerdr()
+    scheduler = FakeScheduler()
+    supervisor = ExecutionSupervisor(
+        studio_settings(read_result=True),
+        db,
+        herdr,
+        scheduler,
+    )
+
+    await supervisor.dispatch(running["id"], explicit=True)
+    pane = herdr.snapshot["panes"]["panes"][0]
+    pane["revision"] = 11
+    pane["state_change_seq"] = 21
+    pane["agent_status"] = "done"
+
+    await supervisor.run_once()
+    finished = await db.get_work(running["id"])
+
+    assert finished["state"] == "failed"
+    assert finished["execution_state"] == "failed"
+    assert finished["error"] == "completion_marker_missing"
+    assert finished["result"]["semantic_completion"]["status"] == "blocked"
+    worker = await db.get_worker("worker-1")
+    assert worker["state"] == "idle"
 
 
 @pytest.mark.asyncio
@@ -311,6 +486,18 @@ async def test_confirmed_agent_not_found_is_not_running_and_safe_redispatches(tm
                             '{"error":"HERDR_COMMAND_FAILED","message":"Herdr exited with 1",'
                             '"stderr":{"error":{"code":"agent_not_found",'
                             '"message":"agent target stale-pane not found"}}}'
+                        ),
+                    }]
+                }
+            if name == "herdr_read_agent":
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": (
+                            "Claude Code v2.1.289\n"
+                            "cx/gpt-6-luna[1m] with medium effort\n"
+                            "auto mode on\n"
+                            "HIRDA_TASK_RESULT: success"
                         ),
                     }]
                 }
