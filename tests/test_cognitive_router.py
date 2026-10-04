@@ -443,6 +443,8 @@ async def test_execute_bootstraps_isolated_principal_pane_when_missing():
 
     assert result.status == "success"
     assert result.runtime == "hermes"
+    assert result.provider == "9router"
+    assert result.model == "cx/gpt-6-luna[1m]"
     assert result.output == "BOOTSTRAPPED_RESULT"
     assert len(herdr.created_tabs) == 1
     assert herdr.created_tabs[0][1] == "/work/social"

@@ -1353,8 +1353,9 @@ class CognitiveRouter:
         }
 
 
-    def _runtime_bootstrap_agent_args(self, runtime_id: str) -> list[str]:
-        """Return HIRDA-owned CLI launch constraints for isolated runtimes."""
+
+    def _runtime_bootstrap_contract(self, runtime_id: str) -> dict[str, str]:
+        """Return HIRDA-owned attribution for an isolated runtime launch."""
         runtime_key = str(runtime_id or "").strip().casefold()
         raw_bindings = getattr(self.studio, "cognitive_runtime_bindings", {})
         selected: Any = None
@@ -1363,19 +1364,30 @@ class CognitiveRouter:
                 if str(key or "").strip().casefold() == runtime_key:
                     selected = value
                     break
-        if not isinstance(selected, dict):
-            return []
-
-        if runtime_key != "hermes":
-            return []
+        if not isinstance(selected, dict) or runtime_key != "hermes":
+            return {}
 
         provider = str(selected.get("launch_provider") or "").strip()
         model = str(selected.get("launch_model") or "").strip()
-        reasoning = str(selected.get("launch_reasoning") or "").strip().casefold()
+        reasoning = str(
+            selected.get("launch_reasoning") or ""
+        ).strip().casefold()
         if bool(provider) != bool(model):
             raise CognitiveRouterError(
                 "cognitive_runtime_bootstrap_launch_contract_incomplete"
             )
+        return {
+            "provider": provider,
+            "model": model,
+            "reasoning": reasoning,
+        }
+
+    def _runtime_bootstrap_agent_args(self, runtime_id: str) -> list[str]:
+        """Return HIRDA-owned CLI launch constraints for isolated runtimes."""
+        contract = self._runtime_bootstrap_contract(runtime_id)
+        provider = contract.get("provider", "")
+        model = contract.get("model", "")
+        reasoning = contract.get("reasoning", "")
 
         args: list[str] = []
         if provider and model:
@@ -4004,6 +4016,24 @@ class CognitiveRouter:
                     pane_lock.release()
 
             await self._clear_runtime_backoff(runtime_id)
+            bootstrap_pane_id = str(
+                (bootstrap_tab or {}).get("root_pane_id") or ""
+            ).strip()
+            bootstrap_attribution = (
+                self._runtime_bootstrap_contract(runtime_id)
+                if bootstrap_pane_id and pane_key == bootstrap_pane_id
+                else {}
+            )
+            effective_provider = str(
+                bootstrap_attribution.get("provider")
+                or candidate.get("provider")
+                or ""
+            ) or None
+            effective_model = str(
+                bootstrap_attribution.get("model")
+                or candidate.get("model")
+                or ""
+            ) or None
             attempts.append(
                 {
                     "attempt_id": attempt_id,
@@ -4020,8 +4050,8 @@ class CognitiveRouter:
                 output=output,
                 lane=str(plan["lane"]),
                 runtime=runtime_id,
-                provider=str(candidate.get("provider") or "") or None,
-                model=str(candidate.get("model") or "") or None,
+                provider=effective_provider,
+                model=effective_model,
                 degraded=index > 0,
                 fallback_used=index > 0,
                 attempts=tuple(attempts),
