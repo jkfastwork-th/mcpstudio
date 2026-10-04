@@ -1,503 +1,458 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
 import os
 import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 
 from mcp_studio.integrations import IntegrationManifest
 
+_TOOLS = ("social_task_create", "social_task_attach_asset", "social_task_status")
+_CHANNELS = ("facebook", "instagram")
+_MAX_ASSET_BYTES = 25 * 1024 * 1024
+_MAX_ASSET_BASE64_CHARS = 4 * ((_MAX_ASSET_BYTES + 2) // 3)
 _DEFAULT_BASE_URL = "http://127.0.0.1:8790"
 _DEFAULT_TOKEN_FILE = Path("~/.config/social-hub/ingress-token").expanduser()
-_MAX_ASSET_BYTES = 25 * 1024 * 1024  # 25 MiB
-
-
-def _max_asset_base64_chars() -> int:
-    return 4 * ((_MAX_ASSET_BYTES + 2) // 3)
-
-
-_MAX_ASSET_BASE64_CHARS = _max_asset_base64_chars()
 _TASK_ID_PATTERN = r"^task_[0-9a-f]{16}$"
-_TASK_ID_RE = re.compile(_TASK_ID_PATTERN)
-_ASSET_NAME_RE = re.compile(r"^[A-Za-z0-9._-](?:[A-Za-z0-9._ -]{0,254}[A-Za-z0-9._-])?$")
-_ALLOWED_CHANNELS = {"facebook", "instagram"}
-_ALLOWED_RUN_MODES = {"now", "scheduled"}
-_FORCED_SOURCE_APP = "chatgpt_web"
-_SKILL_SOURCE_APP = "hirda_skill"
-_FORCED_REQUESTED_BY = "jack"
-_FORCED_ASSIGNED_AGENT = "fern"
+_SAFE_TASK_ID = re.compile(_TASK_ID_PATTERN)
+_ASSET_NAME_RE = re.compile(
+    r"^[A-Za-z0-9._-](?:[A-Za-z0-9._ -]{0,253}[A-Za-z0-9._-])?$"
+)
 _ALLOWED_PUBLISH_POLICIES = {"auto", "review", "draft"}
 _ALLOWED_COMMENT_POLICIES = {"off", "track", "auto"}
 
 
-class SocialHubTaskAdapterError(RuntimeError):
-    pass
+class SocialHubTaskError(RuntimeError):
+    """Sanitized errors from local Social Hub task ingress."""
 
 
-def _descriptor_create() -> dict[str, Any]:
-    return {
-        "name": "social_task_create",
-        "description": "Create a social media task in the Social Hub for Fern to execute.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "instructions": {"type": "string", "minLength": 1, "maxLength": 8000},
-                "title": {"type": "string", "maxLength": 240},
-                "channels": {
-                    "type": "array",
-                    "items": {"type": "string", "enum": sorted(_ALLOWED_CHANNELS)},
-                    "uniqueItems": True,
-                    "minItems": 1,
-                    "maxItems": 2,
+SocialHubTaskAdapterError = SocialHubTaskError
+
+
+def _tool_descriptors() -> list[dict[str, Any]]:
+    common = {"openWorldHint": True, "destructiveHint": False}
+    return [
+        {
+            "name": "social_task_create",
+            "description": "Create a Social Hub publishing task for Jack, executed by Fern.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "instructions": {"type": "string", "minLength": 1, "maxLength": 12000},
+                    "title": {"type": "string", "maxLength": 240},
+                    "channels": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": list(_CHANNELS)},
+                        "uniqueItems": True,
+                        "minItems": 1,
+                        "maxItems": 2,
+                    },
+                    "run_mode": {"type": "string", "enum": ["now", "scheduled"], "default": "now"},
+                    "scheduled_at": {"type": ["string", "null"], "maxLength": 100},
+                    "publish_policy": {
+                        "type": "string",
+                        "enum": sorted(_ALLOWED_PUBLISH_POLICIES),
+                        "default": "review",
+                    },
+                    "comment_policy": {
+                        "type": "string",
+                        "enum": sorted(_ALLOWED_COMMENT_POLICIES),
+                        "default": "track",
+                    },
+                    "watch_after_publish": {"type": "boolean"},
+                    "auto_reply": {"type": "boolean"},
+                    "hold_for_asset": {"type": "boolean", "default": False},
+                    "correlation_id": {"type": ["string", "null"], "maxLength": 160},
                 },
-                "run_mode": {"type": "string", "enum": sorted(_ALLOWED_RUN_MODES), "default": "now"},
-                "scheduled_at": {"type": "string"},
-                "publish_policy": {
-                    "type": "string",
-                    "enum": sorted(_ALLOWED_PUBLISH_POLICIES),
-                    "default": "review",
-                },
-                "comment_policy": {
-                    "type": "string",
-                    "enum": sorted(_ALLOWED_COMMENT_POLICIES),
-                    "default": "track",
-                },
-                "watch_after_publish": {"type": "boolean", "default": True},
-                "auto_reply": {"type": "boolean", "default": False},
-                "hold_for_asset": {"type": "boolean", "default": False},
-                "correlation_id": {"type": ["string", "null"], "maxLength": 160},
+                "required": ["instructions", "channels"],
+                "additionalProperties": False,
             },
-            "required": ["instructions", "channels"],
-            "additionalProperties": False,
+            "annotations": {**common, "readOnlyHint": False, "idempotentHint": True},
         },
-        "annotations": {
-            "readOnlyHint": False,
-            "destructiveHint": False,
-            "idempotentHint": True,
-            "openWorldHint": True,
-        },
-    }
-
-
-def _descriptor_attach() -> dict[str, Any]:
-    return {
-        "name": "social_task_attach_asset",
-        "description": "Attach a base64-encoded asset (image/video) to an existing social task.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "minLength": 21, "maxLength": 21, "pattern": _TASK_ID_PATTERN},
-                "asset_base64": {"type": "string", "minLength": 1, "maxLength": _MAX_ASSET_BASE64_CHARS},
-                "asset_name": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 256,
-                    "description": "ASCII filename using letters, digits, spaces, dot, underscore, and hyphen.",
+        {
+            "name": "social_task_attach_asset",
+            "description": "Attach base64-encoded asset bytes to a Social Hub task.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "minLength": 21,
+                        "maxLength": 21,
+                        "pattern": _TASK_ID_PATTERN,
+                    },
+                    "asset_base64": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": _MAX_ASSET_BASE64_CHARS,
+                    },
+                    "asset_name": {"type": "string", "minLength": 1, "maxLength": 255},
+                    "asset_channel": {"type": "string", "enum": list(_CHANNELS)},
+                    "content_type": {"type": "string", "minLength": 1, "maxLength": 255},
                 },
-                "asset_channel": {"type": "string", "enum": sorted(_ALLOWED_CHANNELS)},
-                "content_type": {"type": "string", "minLength": 1, "maxLength": 128},
+                "required": ["task_id", "asset_base64", "asset_name", "asset_channel", "content_type"],
+                "additionalProperties": False,
             },
-            "required": ["task_id", "asset_base64", "asset_name", "asset_channel", "content_type"],
-            "additionalProperties": False,
+            "annotations": {**common, "readOnlyHint": False, "idempotentHint": False},
         },
-        "annotations": {
-            "readOnlyHint": False,
-            "destructiveHint": False,
-            "idempotentHint": False,
-            "openWorldHint": True,
-        },
-    }
-
-
-def _descriptor_status() -> dict[str, Any]:
-    return {
-        "name": "social_task_status",
-        "description": "Read the status of a social media task.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "minLength": 21, "maxLength": 21, "pattern": _TASK_ID_PATTERN},
+        {
+            "name": "social_task_status",
+            "description": "Read the status of a Social Hub task.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "minLength": 21,
+                        "maxLength": 21,
+                        "pattern": _TASK_ID_PATTERN,
+                    }
+                },
+                "required": ["task_id"],
+                "additionalProperties": False,
             },
-            "required": ["task_id"],
-            "additionalProperties": False,
+            "annotations": {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "openWorldHint": True,
+            },
         },
-        "annotations": {
-            "readOnlyHint": True,
-            "destructiveHint": False,
-            "idempotentHint": True,
-            "openWorldHint": False,
-        },
-    }
+    ]
 
 
-_TOOL_CATALOG = {
-    "social_task_create": _descriptor_create(),
-    "social_task_attach_asset": _descriptor_attach(),
-    "social_task_status": _descriptor_status(),
-}
-
-
-def _deterministic_correlation_id(context: dict[str, Any], content: dict[str, Any]) -> str:
-    """Generate a deterministic bounded correlation ID from context + content."""
-    turn_id = str(context.get("turn_id") or "").strip()
-    task_id = str(context.get("task_id") or "").strip()
-    gateway_session = str(context.get("gateway_session_id") or "").strip()
-    content_digest = hashlib.sha256(
-        json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()[:16]
-    context_part = f"{turn_id}:{task_id}:{gateway_session}"
-    context_digest = hashlib.sha256(context_part.encode("utf-8")).hexdigest()[:16]
-    return f"sht-{context_digest}-{content_digest}"
+_DESCRIPTORS = {item["name"]: item for item in _tool_descriptors()}
 
 
 class SocialHubTaskIntegration:
     def __init__(self) -> None:
-        self.base_url = str(os.getenv("HIRDA_SOCIAL_HUB_URL", _DEFAULT_BASE_URL) or _DEFAULT_BASE_URL).strip()
-        configured_token = str(os.getenv("HIRDA_SOCIAL_HUB_TOKEN_FILE", "") or "").strip()
-        self.token_file = Path(configured_token).expanduser() if configured_token else _DEFAULT_TOKEN_FILE
-        self.timeout_sec = max(1.0, float(os.getenv("HIRDA_SOCIAL_HUB_TIMEOUT_SEC", "8") or 8))
+        self.base_url = str(
+            os.getenv("HIRDA_SOCIAL_HUB_BASE_URL")
+            or os.getenv("HIRDA_SOCIAL_HUB_URL")
+            or _DEFAULT_BASE_URL
+        ).strip().rstrip("/")
+        token_path = str(os.getenv("HIRDA_SOCIAL_HUB_TOKEN_FILE", "") or "").strip()
+        self.token_file = Path(token_path).expanduser() if token_path else _DEFAULT_TOKEN_FILE
+        try:
+            self.timeout_sec = min(30.0, max(1.0, float(os.getenv("HIRDA_SOCIAL_HUB_TIMEOUT_SEC", "8"))))
+        except (TypeError, ValueError):
+            self.timeout_sec = 8.0
         self.manifest = IntegrationManifest.from_mapping({
             "id": "social-hub-task",
-            "name": "Social Hub Task Connector",
-            "capabilities": [
-                "social_hub_task",
-                "social_media_scheduling",
-                "social_hub_task_ingress",
-            ],
-            "runtime": {"type": "local-http", "authority": "hirda-gated-backend"},
-            "tools": list(_TOOL_CATALOG),
-            "permissions": {
-                "social_task_create": "write",
-                "social_task_attach_asset": "write",
-                "social_task_status": "read",
-            },
+            "name": "Social Hub Task Ingress",
+            "capabilities": ["social_hub_task_ingress"],
+            "runtime": {"type": "local-http", "authority": "hirda"},
+            "tools": list(_TOOLS),
+            "permissions": {"social_task_create": "write", "social_task_attach_asset": "write", "social_task_status": "read"},
             "health": {"type": "adapter_probe"},
-            "routing": {"mode": "communication-backend", "preferred_lanes": ["claude", "codex", "hermes"]},
-            "metadata": {
-                "backend_capability": True,
-                "executor_identity": "fern",
-                "owner_social_accounts": True,
-                "runtime_authority": "hirda",
-                "governance_authority": False,
-                "external_action_authority": False,
-            },
+            "routing": {"mode": "local-http-backend", "preferred_lanes": ["chatgpt"]},
+            "metadata": {"executor_identity": "fern", "owner_social_accounts": True, "runtime_authority": "hirda", "governance_authority": False},
         })
 
     def _endpoint_ok(self) -> bool:
-        parsed = urlsplit(self.base_url)
-        return (
-            parsed.scheme == "http"
-            and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
-            and not parsed.username
-            and not parsed.password
-        )
+        try:
+            parsed = urlsplit(self.base_url)
+            return (parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+                    and parsed.path in {"", "/"}
+                    and not parsed.username and not parsed.password and not parsed.query and not parsed.fragment)
+        except ValueError:
+            return False
 
     def _token(self) -> str:
         try:
-            value = self.token_file.read_text(encoding="utf-8").strip()
-        except OSError as error:
-            raise SocialHubTaskAdapterError("social_hub_token_unavailable") from error
-        if not value:
-            raise SocialHubTaskAdapterError("social_hub_token_invalid")
-        return value
-
-    def _token_available(self) -> bool:
-        try:
-            return bool(self._token())
-        except SocialHubTaskAdapterError:
-            return False
-
-    def _headers(self) -> dict[str, str]:
-        return {
-            "X-Social-Hub-Ingress-Token": self._token(),
-            "Accept": "application/json",
-        }
+            token = self.token_file.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError) as exc:
+            raise SocialHubTaskError("social_hub_token_unavailable") from exc
+        if not token or len(token) > 4096 or any(ord(char) < 32 or ord(char) == 127 for char in token):
+            raise SocialHubTaskError("social_hub_token_invalid")
+        return token
 
     async def validate(self) -> dict[str, Any]:
-        token_available = self._token_available()
+        loopback = self._endpoint_ok()
+        try:
+            token_available = bool(self._token())
+        except SocialHubTaskError:
+            token_available = False
         return {
-            "ok": self._endpoint_ok() and token_available,
-            "endpoint_loopback": self._endpoint_ok(),
+            "ok": loopback and token_available,
+            "endpoint_loopback": loopback,
             "token_available": token_available,
-            "executor_identity": "fern",
             "runtime_authority": "hirda",
+            "governance_authority": False,
         }
 
     async def certify(self) -> dict[str, Any]:
-        # No network call, no publish side effect — pure local validation.
-        token_available = self._token_available()
-        return {
-            "ok": self._endpoint_ok() and token_available,
-            "network_call": False,
-            "executor_identity": "fern",
-        }
+        valid = await self.validate()
+        return {"ok": valid["ok"], "endpoint_loopback": valid["endpoint_loopback"],
+                "token_available": valid["token_available"], "network_call": False,
+                "external_publication": False}
 
     async def status(self) -> dict[str, Any]:
-        validation = await self.validate()
-        return {
-            **validation,
-            "schema": "hirda-social-hub-task-status-v1",
-            "base_url": self.base_url,
-            "token_file": str(self.token_file),
-            "governance_authority": False,
-            "external_action_authority": False,
-        }
+        return {"schema": "hirda-social-hub-task-status-v1", **(await self.validate()),
+                "executor_identity": "fern", "owner_social_accounts": True}
 
     async def list_tools(self) -> list[dict[str, Any]]:
-        return [dict(_TOOL_CATALOG[name]) for name in ("social_task_create", "social_task_attach_asset", "social_task_status")]
+        return [dict(_DESCRIPTORS[name]) for name in _TOOLS]
+
+    @staticmethod
+    def _bounded_result(
+        response: httpx.Response,
+        *,
+        default_status: str,
+        operation: str = "request",
+    ) -> dict[str, Any]:
+        if response.status_code < 200 or response.status_code >= 300:
+            raise SocialHubTaskError(
+                f"social_hub_{operation}_failed:{response.status_code}"
+            )
+        if len(response.content) > 1_048_576:
+            raise SocialHubTaskError("social_hub_response_too_large")
+        try:
+            data = response.json()
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise SocialHubTaskError("social_hub_invalid_response") from exc
+        if not isinstance(data, dict):
+            raise SocialHubTaskError("social_hub_response_not_object")
+
+        task = data.get("task") if isinstance(data.get("task"), dict) else {}
+        result: dict[str, Any] = {"status": default_status}
+        for key in (
+            "task_id",
+            "correlation_id",
+            "asset_id",
+            "created_at",
+            "updated_at",
+            "run_mode",
+        ):
+            value = data.get(key)
+            if value is None:
+                value = task.get(key)
+            if isinstance(value, (str, int, float, bool)) and len(str(value)) <= 512:
+                result[key] = value
+        if isinstance(data.get("status"), (str, int, float, bool)):
+            result["status"] = data["status"]
+        if task:
+            result["task"] = dict(task)
+        if isinstance(data.get("duplicate_suppressed"), bool):
+            result["duplicate_suppressed"] = data["duplicate_suppressed"]
+        result["schema"] = "hirda-social-hub-task-result-v1"
+        return result
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        content: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        operation: str = "request",
+    ) -> dict[str, Any]:
+        if not self._endpoint_ok():
+            raise SocialHubTaskError("social_hub_endpoint_not_loopback")
+        request_headers = {"X-Social-Hub-Ingress-Token": self._token(), "Accept": "application/json"}
+        request_headers.update(headers or {})
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_sec, follow_redirects=False) as client:
+                response = await client.request(method, self.base_url + path, json=json_body,
+                                                content=content, headers=request_headers)
+        except httpx.HTTPError as exc:
+            raise SocialHubTaskError("social_hub_request_failed") from exc
+        return self._bounded_result(
+            response,
+            default_status="ok",
+            operation=operation,
+        )
 
     async def call_tool(self, name: str, arguments: dict[str, Any], *, context: dict[str, Any]) -> dict[str, Any]:
-        if name == "social_task_create":
-            return await self._create_task(arguments, context)
-        if name == "social_task_attach_asset":
-            return await self._attach_asset(arguments)
-        if name == "social_task_status":
-            return await self._task_status(arguments)
-        raise SocialHubTaskAdapterError("social_hub_tool_unknown")
-
-    async def _create_task(self, arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         if not self._endpoint_ok():
-            raise SocialHubTaskAdapterError("social_hub_endpoint_not_loopback")
+            raise SocialHubTaskError("social_hub_endpoint_not_loopback")
+        if name not in _DESCRIPTORS:
+            raise SocialHubTaskError("social_hub_tool_unknown")
+        if not isinstance(arguments, dict):
+            raise SocialHubTaskError("social_hub_arguments_invalid")
+        if name == "social_task_create":
+            instructions = arguments.get("instructions")
+            if not isinstance(instructions, str) or not instructions.strip() or len(instructions) > 12000:
+                raise SocialHubTaskError("social_hub_instructions_invalid")
+            title = arguments.get("title")
+            if title is not None and (not isinstance(title, str) or len(title) > 240):
+                raise SocialHubTaskError("social_hub_title_invalid")
+            channels = arguments.get("channels", [])
+            if (
+                not isinstance(channels, list)
+                or not channels
+                or len(channels) > 2
+                or len(set(channels)) != len(channels)
+                or any(c not in _CHANNELS for c in channels)
+            ):
+                raise SocialHubTaskError("social_hub_channels_invalid")
+            run_mode = arguments.get("run_mode", "now")
+            scheduled_at = arguments.get("scheduled_at")
+            if run_mode not in {"now", "scheduled"}:
+                raise SocialHubTaskError("social_hub_run_mode_invalid")
+            if run_mode == "scheduled" and (
+                not isinstance(scheduled_at, str) or not scheduled_at.strip()
+            ):
+                raise SocialHubTaskError("social_hub_scheduled_at_required")
+            if run_mode == "now" and scheduled_at not in (None, ""):
+                raise SocialHubTaskError("social_hub_schedule_invalid")
+            for key in ("watch_after_publish", "auto_reply", "hold_for_asset"):
+                if key in arguments and not isinstance(arguments[key], bool):
+                    raise SocialHubTaskError("social_hub_boolean_invalid")
 
-        instructions = str(arguments.get("instructions") or "").strip()
-        if not instructions or len(instructions) > 8000:
-            raise SocialHubTaskAdapterError("social_hub_instructions_invalid")
+            skill_id = str(context.get("skill_id") or "").strip()
+            source_app = "hirda_skill" if skill_id else "chatgpt_web"
+            publish_policy = str(
+                arguments.get("publish_policy") or "review"
+            ).strip().casefold()
+            if publish_policy not in _ALLOWED_PUBLISH_POLICIES:
+                raise SocialHubTaskError("social_hub_publish_policy_invalid")
 
-        title = str(arguments.get("title") or "").strip() or None
-        if title and len(title) > 240:
-            raise SocialHubTaskAdapterError("social_hub_title_invalid")
+            explicit_comment_policy = str(
+                arguments.get("comment_policy") or ""
+            ).strip().casefold()
+            if explicit_comment_policy:
+                comment_policy = explicit_comment_policy
+            elif "watch_after_publish" in arguments or "auto_reply" in arguments:
+                watch_requested = bool(arguments.get("watch_after_publish", True))
+                auto_requested = bool(arguments.get("auto_reply", False))
+                comment_policy = (
+                    "off"
+                    if not watch_requested
+                    else ("auto" if auto_requested else "track")
+                )
+            else:
+                comment_policy = "track"
+            if comment_policy not in _ALLOWED_COMMENT_POLICIES:
+                raise SocialHubTaskError("social_hub_comment_policy_invalid")
+            watch_after_publish = comment_policy != "off"
+            auto_reply = comment_policy == "auto"
 
-        channels = arguments.get("channels") or []
-        if not isinstance(channels, list) or not channels:
-            raise SocialHubTaskAdapterError("social_hub_channels_invalid")
-        channels = [str(c).strip().lower() for c in channels]
-        if len(set(channels)) != len(channels) or any(c not in _ALLOWED_CHANNELS for c in channels):
-            raise SocialHubTaskAdapterError("social_hub_channels_invalid")
-
-        run_mode = str(arguments.get("run_mode") or "now").strip().lower()
-        if run_mode not in _ALLOWED_RUN_MODES:
-            raise SocialHubTaskAdapterError("social_hub_run_mode_invalid")
-
-        scheduled_at = str(arguments.get("scheduled_at") or "").strip() or None
-        if run_mode == "scheduled" and not scheduled_at:
-            raise SocialHubTaskAdapterError("social_hub_scheduled_at_required")
-
-        skill_id = str(context.get("skill_id") or "").strip()
-        source_app = _SKILL_SOURCE_APP if skill_id else _FORCED_SOURCE_APP
-
-        publish_policy = str(
-            arguments.get("publish_policy")
-            or ("review" if skill_id else "review")
-        ).strip().casefold()
-        if publish_policy not in _ALLOWED_PUBLISH_POLICIES:
-            raise SocialHubTaskAdapterError("social_hub_publish_policy_invalid")
-
-        explicit_comment_policy = str(
-            arguments.get("comment_policy") or ""
-        ).strip().casefold()
-        if explicit_comment_policy:
-            comment_policy = explicit_comment_policy
-        elif "watch_after_publish" in arguments or "auto_reply" in arguments:
-            watch_requested = bool(arguments.get("watch_after_publish", True))
-            auto_requested = bool(arguments.get("auto_reply", False))
-            comment_policy = (
-                "off"
-                if not watch_requested
-                else ("auto" if auto_requested else "track")
-            )
-        else:
-            comment_policy = "track"
-        if comment_policy not in _ALLOWED_COMMENT_POLICIES:
-            raise SocialHubTaskAdapterError("social_hub_comment_policy_invalid")
-        watch_after_publish = comment_policy != "off"
-        auto_reply = comment_policy == "auto"
-        hold_for_asset = bool(arguments.get("hold_for_asset", False))
-
-        raw_correlation_id = arguments.get("correlation_id")
-        if raw_correlation_id is not None and len(str(raw_correlation_id)) > 160:
-            raise SocialHubTaskAdapterError("social_hub_correlation_id_invalid")
-        correlation_id = str(raw_correlation_id or "").strip() or None
-        if not correlation_id:
-            content = {
-                "instructions": instructions,
-                "title": title,
+            supplied_id = arguments.get("correlation_id")
+            if supplied_id is not None and (not isinstance(supplied_id, str) or not supplied_id.strip() or len(supplied_id) > 160):
+                raise SocialHubTaskError("social_hub_correlation_id_invalid")
+            if supplied_id:
+                correlation_id = supplied_id.strip()
+            else:
+                stable_context = next((str(context.get(key)).strip() for key in ("turn_id", "task_id", "gateway_session_id", "session_id", "managed_session_id") if context.get(key)), "no-context")
+                task_content = {
+                    "instructions": instructions.strip(),
+                    "title": title,
+                    "channels": channels,
+                    "run_mode": run_mode,
+                    "scheduled_at": scheduled_at,
+                    "publish_policy": publish_policy,
+                    "comment_policy": comment_policy,
+                    "hold_for_asset": arguments.get("hold_for_asset", False),
+                }
+                content_digest = hashlib.sha256(json.dumps(task_content, sort_keys=True,
+                    ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()[:20]
+                context_digest = hashlib.sha256(stable_context.encode()).hexdigest()[:20]
+                correlation_id = f"sht-{context_digest}-{content_digest}"
+            payload = {
+                "instructions": instructions.strip(),
                 "channels": channels,
                 "run_mode": run_mode,
-                "scheduled_at": scheduled_at,
+                "scheduled_at": scheduled_at if run_mode == "scheduled" else None,
+                "task_type": "publish",
                 "publish_policy": publish_policy,
+                "target_identity": "owner_social",
                 "comment_policy": comment_policy,
                 "watch_after_publish": watch_after_publish,
                 "auto_reply": auto_reply,
-                "hold_for_asset": hold_for_asset,
+                "hold_for_asset": arguments.get("hold_for_asset", False),
+                "correlation_id": correlation_id,
+                "source_app": source_app,
+                "requested_by": "jack",
+                "assigned_agent": "fern",
+                "skill_id": skill_id,
+                "conversation_id": str(context.get("conversation_id") or "")[:160],
+                "parent_request_id": str(context.get("parent_request_id") or "")[:160],
             }
-            correlation_id = _deterministic_correlation_id(context, content)
-
-        payload = {
-            "instructions": instructions,
-            "title": title,
-            "channels": channels,
-            "run_mode": run_mode,
-            "scheduled_at": scheduled_at,
-            "task_type": "publish",
-            "publish_policy": publish_policy,
-            "target_identity": "owner_social",
-            "comment_policy": comment_policy,
-            "watch_after_publish": watch_after_publish,
-            "auto_reply": auto_reply,
-            "hold_for_asset": hold_for_asset,
-            "correlation_id": correlation_id,
-            "source_app": source_app,
-            "requested_by": _FORCED_REQUESTED_BY,
-            "assigned_agent": _FORCED_ASSIGNED_AGENT,
-            "skill_id": skill_id,
-            "conversation_id": str(context.get("conversation_id") or "")[:160],
-            "parent_request_id": str(context.get("parent_request_id") or "")[:160],
-        }
-
-        async with httpx.AsyncClient(timeout=self.timeout_sec) as client:
-            response = await client.post(
-                f"{self.base_url}/api/social/ingress/tasks",
-                json=payload,
-                headers=self._headers(),
+            if title is not None:
+                payload["title"] = title
+            result = await self._request(
+                "POST",
+                "/api/social/ingress/tasks",
+                json_body=payload,
+                operation="create",
             )
-        result = self._response_object(response, "create")
-        if response.status_code < 200 or response.status_code >= 300:
-            raise SocialHubTaskAdapterError(f"social_hub_create_failed:{response.status_code}")
-        task = result.get("task", result)
-        if not isinstance(task, dict):
-            raise SocialHubTaskAdapterError("social_hub_create_response_invalid")
-        task_id = task.get("task_id", task.get("id"))
-        if not isinstance(task_id, str) or not _TASK_ID_RE.fullmatch(task_id):
-            raise SocialHubTaskAdapterError("social_hub_create_response_invalid")
-        duplicate_suppressed = bool(result.get("duplicate_suppressed", task.get("duplicate_suppressed", False)))
-        task_status = task.get("status") or task.get("state")
-        if not isinstance(task_status, str) or not task_status.strip():
-            task_status = "duplicate_suppressed" if duplicate_suppressed else "created"
-        return {
-            "schema": "hirda-social-hub-task-create-v1",
-            "status": task_status,
-            "task_id": task_id,
-            "duplicate_suppressed": duplicate_suppressed,
-            "correlation_id": correlation_id,
-            "source_app": source_app,
-            "requested_by": _FORCED_REQUESTED_BY,
-            "assigned_agent": _FORCED_ASSIGNED_AGENT,
-            "skill_id": skill_id,
-            "publish_policy": publish_policy,
-            "comment_policy": comment_policy,
-            "governance_authority": False,
-            "external_action_authority": False,
-        }
-
-    async def _attach_asset(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        if not self._endpoint_ok():
-            raise SocialHubTaskAdapterError("social_hub_endpoint_not_loopback")
-
-        task_id = str(arguments.get("task_id") or "")
-        if not _TASK_ID_RE.fullmatch(task_id):
-            raise SocialHubTaskAdapterError("social_hub_task_id_invalid")
-
-        asset_b64_value = arguments.get("asset_base64")
-        if not isinstance(asset_b64_value, str):
-            raise SocialHubTaskAdapterError("social_hub_asset_invalid")
-        asset_b64 = asset_b64_value
-        if len(asset_b64) > _max_asset_base64_chars():
-            raise SocialHubTaskAdapterError("social_hub_asset_too_large")
-        if not asset_b64.strip():
-            raise SocialHubTaskAdapterError("social_hub_asset_invalid")
-
-        asset_name = str(arguments.get("asset_name") or "")
-        if not _ASSET_NAME_RE.fullmatch(asset_name) or asset_name in {".", ".."}:
-            raise SocialHubTaskAdapterError("social_hub_asset_name_invalid")
-
-        asset_channel = str(arguments.get("asset_channel") or "").strip().lower()
-        if asset_channel not in _ALLOWED_CHANNELS:
-            raise SocialHubTaskAdapterError("social_hub_asset_channel_invalid")
-
-        content_type = str(arguments.get("content_type") or "").strip()
-        if not content_type or len(content_type) > 128:
-            raise SocialHubTaskAdapterError("social_hub_content_type_invalid")
-
+            task_result = result.get("task") if isinstance(result.get("task"), dict) else {}
+            task_status = str(
+                task_result.get("status") or result.get("status") or "created"
+            )
+            return {
+                **result,
+                "status": task_status,
+                "correlation_id": correlation_id,
+                "source_app": source_app,
+                "requested_by": "jack",
+                "assigned_agent": "fern",
+                "skill_id": skill_id,
+                "publish_policy": publish_policy,
+                "comment_policy": comment_policy,
+            }
+        task_id = arguments.get("task_id")
+        if not isinstance(task_id, str) or not _SAFE_TASK_ID.fullmatch(task_id):
+            raise SocialHubTaskError("social_hub_task_id_invalid")
+        encoded_id = quote(task_id, safe="")
+        if name == "social_task_status":
+            result = await self._request(
+                "GET",
+                f"/api/social/ingress/tasks/{encoded_id}",
+                operation="status",
+            )
+            result["status"] = "ok"
+            result["task_id"] = task_id
+            return result
+        encoded = arguments.get("asset_base64")
+        filename = arguments.get("asset_name")
+        channel = arguments.get("asset_channel")
+        content_type = arguments.get("content_type")
+        if not isinstance(encoded, str) or not encoded:
+            raise SocialHubTaskError("social_hub_asset_invalid")
+        if len(encoded) > 4 * ((_MAX_ASSET_BYTES + 2) // 3):
+            raise SocialHubTaskError("social_hub_asset_too_large")
         try:
-            raw_bytes = base64.b64decode(asset_b64, validate=True)
-        except Exception as error:
-            raise SocialHubTaskAdapterError("social_hub_asset_not_base64") from error
-
-        if len(raw_bytes) > _MAX_ASSET_BYTES:
-            raise SocialHubTaskAdapterError("social_hub_asset_too_large")
-
-        headers = {
-            **self._headers(),
-            "X-Asset-Name": asset_name,
-            "X-Asset-Channel": asset_channel,
-            "Content-Type": content_type,
-        }
-
-        async with httpx.AsyncClient(timeout=self.timeout_sec) as client:
-            response = await client.post(
-                f"{self.base_url}/api/social/ingress/tasks/{task_id}/assets",
-                content=raw_bytes,
-                headers=headers,
-            )
-        result = self._response_object(response, "attach")
-        if response.status_code < 200 or response.status_code >= 300:
-            raise SocialHubTaskAdapterError(f"social_hub_attach_failed:{response.status_code}")
-        return {
-            "schema": "hirda-social-hub-task-attach-v1",
-            "status": "attached",
-            "task_id": task_id,
-            "asset_name": asset_name,
-            "asset_channel": asset_channel,
-            "content_type": content_type,
-            "size_bytes": len(raw_bytes),
-            "governance_authority": False,
-            "external_action_authority": False,
-        }
-
-    async def _task_status(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        if not self._endpoint_ok():
-            raise SocialHubTaskAdapterError("social_hub_endpoint_not_loopback")
-
-        task_id = str(arguments.get("task_id") or "")
-        if not _TASK_ID_RE.fullmatch(task_id):
-            raise SocialHubTaskAdapterError("social_hub_task_id_invalid")
-
-        async with httpx.AsyncClient(timeout=self.timeout_sec) as client:
-            response = await client.get(
-                f"{self.base_url}/api/social/ingress/tasks/{task_id}",
-                headers=self._headers(),
-            )
-        result = self._response_object(response, "status")
-        if response.status_code < 200 or response.status_code >= 300:
-            raise SocialHubTaskAdapterError(f"social_hub_status_failed:{response.status_code}")
-        task = result.get("task", result)
-        if not isinstance(task, dict):
-            raise SocialHubTaskAdapterError("social_hub_status_response_invalid")
-        return {
-            "schema": "hirda-social-hub-task-status-v1",
-            "status": "ok",
-            "task_id": task_id,
-            "task": task,
-            "governance_authority": False,
-            "external_action_authority": False,
-        }
-
-    @staticmethod
-    def _response_object(response: httpx.Response, operation: str) -> dict[str, Any]:
-        try:
-            result = response.json()
-        except ValueError:
-            raise SocialHubTaskAdapterError(
-                f"social_hub_{operation}_invalid_response:{response.status_code}"
-            ) from None
-        if not isinstance(result, dict):
-            raise SocialHubTaskAdapterError(
-                f"social_hub_{operation}_response_not_object:{response.status_code}"
-            )
+            asset = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise SocialHubTaskError("social_hub_asset_not_base64") from exc
+        if not asset or len(asset) > _MAX_ASSET_BYTES:
+            raise SocialHubTaskError("social_hub_asset_too_large")
+        if (
+            not isinstance(filename, str)
+            or not _ASSET_NAME_RE.fullmatch(filename)
+            or filename in {".", ".."}
+        ):
+            raise SocialHubTaskError("social_hub_asset_name_invalid")
+        if channel not in _CHANNELS:
+            raise SocialHubTaskError("social_hub_asset_channel_invalid")
+        if (not isinstance(content_type, str) or not content_type.strip() or len(content_type) > 255
+                or any(ord(char) < 32 or ord(char) == 127 for char in content_type)):
+            raise SocialHubTaskError("social_hub_asset_content_type_invalid")
+        result = await self._request(
+            "POST",
+            f"/api/social/ingress/tasks/{encoded_id}/assets",
+            content=asset,
+            headers={
+                "X-Asset-Name": filename.strip(),
+                "X-Asset-Channel": channel,
+                "Content-Type": content_type.strip(),
+            },
+            operation="attach",
+        )
+        result["status"] = "attached"
+        result["task_id"] = task_id
+        result["asset_name"] = filename.strip()
+        result["asset_channel"] = channel
+        result["content_type"] = content_type.strip()
+        result["size_bytes"] = len(asset)
         return result
