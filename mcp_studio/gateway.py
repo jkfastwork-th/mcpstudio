@@ -76,6 +76,9 @@ CONTROL_TOOL_NAMES = (
     *PEER_TOOL_NAMES,
     "mcpstudio_pstack_status",
     "mcpstudio_pstack_checkpoint",
+    "mcpstudio_skill_resolve",
+    "mcpstudio_skill_run",
+    "mcpstudio_skill_inspect",
     "mcpstudio_lane_status",
     "mcpstudio_set_lane_state",
     "mcpstudio_list_capsules",
@@ -138,6 +141,7 @@ class GatewaySessionManager:
         self.scheduler: Any | None = None
         self.execution: Any | None = None
         self.cognitive_router: Any | None = None
+        self.skill_gateway: Any | None = None
         self.mcp_events = McpEventService(settings, db)
         # Live transports are process-local and only accelerate delivery. The
         # durable peer inbox remains the source of truth.
@@ -995,6 +999,48 @@ class GatewaySessionManager:
                 },
             },
             {
+                "name": "mcpstudio_skill_resolve",
+                "description": "Resolve a human intent to declarative HIRDA Skills and capability bindings without executing external actions.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "intent": {"type": "string", "maxLength": 240},
+                        "skill_id": {"type": "string", "maxLength": 128},
+                        "domain": {"type": "string", "maxLength": 120},
+                        "input": {"type": "object"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "mcpstudio_skill_run",
+                "description": "Resolve and run a HIRDA Skill through the attached managed workspace. Opens a governed PStack task; Skills never own runtime, model, machine, provider, permission, or dispatch authority.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "intent": {"type": "string", "maxLength": 240},
+                        "skill_id": {"type": "string", "maxLength": 128},
+                        "domain": {"type": "string", "maxLength": 120},
+                        "input": {"type": "object"},
+                        "priority": {"type": "integer", "minimum": 0, "maximum": 100, "default": 50},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "mcpstudio_skill_inspect",
+                "description": "Inspect one HIRDA Skill manifest, requirements, provenance, and recent certified experiences without executing it.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "skill_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                        "experience_limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
+                    },
+                    "required": ["skill_id"],
+                    "additionalProperties": False,
+                },
+            },
+            {
                 "name": "mcpstudio_lane_status",
                 "description": "Show HIRDA routing state for Claude, Codex, and Hermes lanes. Only normal lanes accept new work.",
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -1309,9 +1355,81 @@ class GatewaySessionManager:
             return []
         return self.integrations.backend_tools()
 
+
+    def _skill_managed_backend_tool_names(self) -> set[str]:
+        """Hide low-level backend tools that active Skills encapsulate."""
+        if self.skill_runtime is None or self.integrations is None:
+            return set()
+        try:
+            skills = self.skill_runtime.registry.snapshot()
+        except Exception:
+            return set()
+
+        backend_tools: list[dict[str, Any]] = []
+        try:
+            backend_tools = list(self.integrations.backend_tools())
+        except Exception:
+            backend_tools = []
+
+        hidden: set[str] = set()
+        for skill in skills:
+            for required_tool in getattr(skill, "required_tools", ()):
+                required_name = str(required_tool or "").strip()
+                if not required_name:
+                    continue
+
+                # Prefer provider metadata when available because it preserves the
+                # canonical IntegrationManager mapping from abstract tool id to
+                # exposed backend name.
+                provider_names: set[str] = set()
+                resolver = getattr(self.integrations, "tool_providers", None)
+                if callable(resolver):
+                    try:
+                        providers = resolver(required_name)
+                    except Exception:
+                        providers = []
+                    for provider in providers:
+                        if not provider.get("available"):
+                            continue
+                        tool = provider.get("tool")
+                        tool = tool if isinstance(tool, dict) else {}
+                        exposed_name = str(tool.get("name") or "").strip()
+                        if exposed_name:
+                            provider_names.add(exposed_name)
+
+                # Some integration shims expose only backend_tools()/is_backend_tool
+                # and not the richer provider index. Fall back to the HIRDA backend
+                # naming contract so ChatGPT still sees the governed Skill entry
+                # point instead of the low-level tool it encapsulates.
+                suffix = f"__{required_name}"
+                for tool in backend_tools:
+                    exposed_name = str(tool.get("name") or "").strip()
+                    if (
+                        exposed_name == required_name
+                        or exposed_name.endswith(suffix)
+                    ):
+                        provider_names.add(exposed_name)
+
+                hidden.update(provider_names)
+        return hidden
+
     def _all_local_tools(self) -> list[dict[str, Any]]:
         management = self._ordered_management_tools()
-        backends = self._ordered_backend_tools()
+        hidden_resolver = getattr(
+            self,
+            "_skill_managed_backend_tool_names",
+            None,
+        )
+        hidden_skill_backends = (
+            hidden_resolver()
+            if callable(hidden_resolver)
+            else set()
+        )
+        backends = [
+            tool
+            for tool in self._ordered_backend_tools()
+            if str(tool.get("name") or "") not in hidden_skill_backends
+        ]
 
         # Keep only the three workspace-selection controls ahead of the native
         # provider. Some MCP clients prioritize or truncate the beginning of a
@@ -3831,6 +3949,21 @@ class GatewaySessionManager:
                     "pstack_runtime": runtime_id,
                     "runtime_authority": "hirda",
                     "runtime_selection": runtime_plan,
+                    "skill_invocation": (
+                        dict(task_value.get("skill_invocation") or {})
+                        if isinstance(task_value.get("skill_invocation"), dict)
+                        else {}
+                    ),
+                    "skill_resolution": (
+                        dict(task_value.get("skill_resolution") or {})
+                        if isinstance(task_value.get("skill_resolution"), dict)
+                        else {}
+                    ),
+                    "capability_resolution": (
+                        dict(task_value.get("capability_resolution") or {})
+                        if isinstance(task_value.get("capability_resolution"), dict)
+                        else {}
+                    ),
                     "dedupe_key": f"pstack:{task_id}",
                 },
             },
@@ -3938,6 +4071,7 @@ class GatewaySessionManager:
         managed_session: dict[str, Any],
         goal: str,
         resume_context: dict[str, Any] | None = None,
+        task_overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         if self.integrations is None:
             return None
@@ -4064,11 +4198,30 @@ class GatewaySessionManager:
                 "lifecycle": lifecycle_for_workflow(routed.get("workflow")),
                 "opened_at": time.time(),
             }
+            if task_overrides:
+                protected = {
+                    "task_id",
+                    "trace_id",
+                    "goal",
+                    "workflow",
+                    "workspace_key",
+                    "managed_session_id",
+                    "gateway_session_id",
+                    "lifecycle",
+                    "opened_at",
+                }
+                task.update(
+                    {
+                        str(key): value
+                        for key, value in task_overrides.items()
+                        if str(key) not in protected
+                    }
+                )
             task["execution_environment"] = plan_execution_environment(
                 workspace=str(managed_session.get("project_path") or "").strip() or None,
                 managed_session=managed_session,
                 task_id=task_id,
-                runtime_constraints=(),
+                runtime_constraints=task.get("runtime_constraints") or (),
                 pstack_task=True,
             )
             task = await self._open_pstack_herdr_tab(
@@ -4800,6 +4953,95 @@ class GatewaySessionManager:
                 "handoff": self._public_session_handoff(observed) if observed else None,
                 "pstack_task": pstack_task,
             }
+        if name in {
+            "mcpstudio_skill_resolve",
+            "mcpstudio_skill_run",
+            "mcpstudio_skill_inspect",
+        }:
+            if self.skill_gateway is None:
+                raise ManagedSessionError("HIRDA Skill Gateway is unavailable")
+            if name == "mcpstudio_skill_inspect":
+                return await self.skill_gateway.inspect(
+                    skill_id=str(args.get("skill_id") or ""),
+                    experience_limit=int(args.get("experience_limit") or 10),
+                )
+
+            gateway = await self.db.get_gateway_session(gateway_session_id)
+            managed_id = str(gateway.get("managed_session_id") or "").strip()
+            managed = (
+                await self.db.get_managed_session(managed_id)
+                if managed_id else None
+            )
+            workspace = (
+                str((managed or {}).get("project_path") or "").strip()
+                or None
+            )
+            input_data = args.get("input")
+            input_data = input_data if isinstance(input_data, dict) else {}
+            intent = str(args.get("intent") or "").strip() or None
+            skill_id = str(args.get("skill_id") or "").strip() or None
+            domain = str(args.get("domain") or "").strip() or None
+
+            if name == "mcpstudio_skill_resolve":
+                return self.skill_gateway.resolve(
+                    intent=intent,
+                    input_data=input_data,
+                    workspace=workspace,
+                    domain=domain,
+                    skill_id=skill_id,
+                )
+
+            if managed is None:
+                raise ManagedSessionError(
+                    "skill.run requires an attached managed workspace"
+                )
+            active = await self._active_pstack_gateway_task(
+                gateway_session_id,
+                managed_session=managed,
+            )
+            if active:
+                lifecycle = ensure_pstack_lifecycle(
+                    active.get("lifecycle"),
+                    workflow=str(active.get("workflow") or "feature"),
+                )
+                if (
+                    str(active.get("status") or "").casefold()
+                    not in {"completed", "expired", "failed", "cancelled"}
+                    and str(lifecycle.get("status") or "").casefold()
+                    not in {"completed", "blocked"}
+                ):
+                    raise PstackLifecycleError(
+                        "PSTACK_ACTIVE_TASK_CONFLICT",
+                        (
+                            "skill.run will not replace an active PStack task; "
+                            "finish or terminalize the current task first."
+                        ),
+                    )
+
+            prepared = self.skill_gateway.prepare_run(
+                intent=intent,
+                input_data=input_data,
+                workspace=str(managed.get("project_path") or ""),
+                domain=domain,
+                skill_id=skill_id,
+                priority=int(args.get("priority") or 50),
+            )
+            task = await self._open_pstack_gateway_task(
+                gateway_session_id,
+                managed_session=managed,
+                goal=str(prepared["goal"]),
+                task_overrides=dict(prepared["task_overrides"]),
+            )
+            task = self._require_pstack_admission(task)
+            return {
+                "schema": "hirda-skill-run-v1",
+                "invocation": prepared["invocation"],
+                "resolution": prepared["resolution"],
+                "pstack_task": task,
+                "work_id": (task or {}).get("work_id"),
+                "status": (task or {}).get("status"),
+            }
+
         if name == "mcpstudio_pstack_status":
             gateway = await self.db.get_gateway_session(gateway_session_id)
             managed_id = str(gateway.get("managed_session_id") or "").strip()

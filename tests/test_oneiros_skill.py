@@ -36,8 +36,8 @@ from mcp_studio.skills import SkillRegistry
 def registry() -> SkillRegistry:
     loaded = SkillRegistry()
     skills = loaded.load_directory(SKILLS_ROOT)
-    assert len(skills) == 1
-    assert skills[0].id == SKILL_ID
+    oneiros = [skill for skill in skills if skill.id == SKILL_ID]
+    assert len(oneiros) == 1
     return loaded
 
 
@@ -46,9 +46,8 @@ def _selected(resolution):
 
 
 def test_real_skills_directory_contains_exactly_one_oneiros_skill(registry):
-    skills = registry.snapshot()
+    skills = [skill for skill in registry.snapshot() if skill.id == SKILL_ID]
     assert len(skills) == 1
-    assert skills[0].id == SKILL_ID
     assert skills[0].version == "0.1.0"
 
 

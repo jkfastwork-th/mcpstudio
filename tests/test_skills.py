@@ -105,6 +105,54 @@ def test_rejects_authority_executable_and_secret_like_fields(tmp_path, field, va
         SkillRegistry().load_directory(tmp_path)
 
 
+def test_manifest_v2_supports_intent_permissions_and_provenance(tmp_path):
+    payload = manifest(
+        schema="hirda-skill-v2",
+        id="social.publish",
+        name="Social Publish",
+        version="0.2.0",
+        description="Publish through governed Social Hub ingress.",
+        intents=["publish_social_post"],
+        permission_requirements=["social.publish"],
+        runtime_constraints=["tool_use"],
+        provenance={
+            "origin": "seed",
+            "distillation_status": "certified_seed",
+        },
+    )
+    write_manifest(tmp_path, payload)
+
+    registry = SkillRegistry()
+    registry.load_directory(tmp_path)
+    skill = registry.snapshot()[0]
+
+    assert skill.schema == "hirda-skill-v2"
+    assert skill.intents == ("publish_social_post",)
+    assert skill.permission_requirements == ("social.publish",)
+    assert skill.runtime_constraints == ("tool_use",)
+    assert skill.provenance["origin"] == "seed"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("runtime", "claude"),
+        ("model", "cx/gpt-6-luna[1m]"),
+        ("machine", "JKFASTDEV"),
+        ("provider", "social-hub-task"),
+    ],
+)
+def test_manifest_v2_rejects_execution_authority_fields(tmp_path, field, value):
+    payload = manifest(
+        schema="hirda-skill-v2",
+        intents=["publish_social_post"],
+        **{field: value},
+    )
+    write_manifest(tmp_path, payload)
+    with pytest.raises(SkillManifestError):
+        SkillRegistry().load_directory(tmp_path)
+
+
 @pytest.mark.parametrize("field", [
     "model", "models", "runtime", "runtimes", "machine", "machines", "agent",
     "agents", "permission", "permissions", "provider", "router", "routing",

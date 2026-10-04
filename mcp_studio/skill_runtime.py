@@ -145,6 +145,10 @@ class SkillRuntime:
                 task_text,
                 workspace=enriched.get("workspace"),
                 domain=domain,
+                intent=(
+                    str(metadata.get("skill_intent") or "").strip()
+                    or None
+                ),
                 explicit_skill_ids=explicit_ids,
                 advisory_skill_ids=advisory_ids,
             )
@@ -230,10 +234,13 @@ def _serialize_resolution(
                 "id": match.skill.id,
                 "name": match.skill.name,
                 "version": match.skill.version,
+                "schema": match.skill.schema,
                 "scope": {"kind": match.skill.scope.kind, "value": match.skill.scope.value},
                 "source": match.skill.source,
                 "explicit": bool(match.explicit),
                 "advisory": bool(match.advisory),
+                "intent_match": bool(match.intent_match),
+                "intents": list(match.skill.intents),
                 "trigger_matches": list(match.trigger_matches),
             }
             for match in resolution.matches
@@ -242,6 +249,7 @@ def _serialize_resolution(
         "required_capabilities": list(resolution.required_capabilities),
         "required_tools": list(resolution.required_tools),
         "runtime_constraints": list(resolution.runtime_constraints),
+        "permission_requirements": list(resolution.permission_requirements),
         "policy_hints": list(resolution.policy_hints),
         "workflow_steps": list(resolution.workflow_steps),
         "verification_checks": list(resolution.verification_checks),
@@ -266,6 +274,7 @@ def _empty_resolution(
         "required_capabilities": [],
         "required_tools": [],
         "runtime_constraints": [],
+        "permission_requirements": [],
         "policy_hints": [],
         "workflow_steps": [],
         "verification_checks": [],

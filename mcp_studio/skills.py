@@ -20,8 +20,9 @@ _EXECUTABLE_KEYS = {"code", "executable", "adapter", "command", "commands", "scr
 _SECRET_KEY = re.compile(r"(?:secret|token|password|credential|authorization|api[_-]?key|private[_-]?key)", re.I)
 _TOP_LEVEL_KEYS = {
     "schema", "id", "name", "version", "description", "scope", "triggers",
-    "required_capabilities", "required_tools", "runtime_constraints", "policy_hints",
-    "workflow_steps", "verification_checks", "metadata",
+    "intents", "required_capabilities", "required_tools", "runtime_constraints",
+    "permission_requirements", "policy_hints", "workflow_steps",
+    "verification_checks", "provenance", "metadata",
 }
 _SCOPE_RANK = {"global": 0, "domain": 1, "workspace": 2}
 _GLOBAL_STOP_WORDS = {
@@ -63,13 +64,17 @@ class SkillDefinition:
     version: str
     description: str
     scope: SkillScope
+    schema: str = "hirda-skill-v1"
     triggers: tuple[str, ...] = ()
+    intents: tuple[str, ...] = ()
     required_capabilities: tuple[str, ...] = ()
     required_tools: tuple[str, ...] = ()
     runtime_constraints: tuple[str, ...] = ()
+    permission_requirements: tuple[str, ...] = ()
     policy_hints: tuple[str, ...] = ()
     workflow_steps: tuple[str, ...] = ()
     verification_checks: tuple[str, ...] = ()
+    provenance: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     metadata: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     source: str = "memory"
 
@@ -81,9 +86,12 @@ class SkillDefinition:
         for name in ("name", "version", "description"):
             if not str(getattr(self, name) or "").strip():
                 raise ValueError(f"{name}_required")
+        if self.schema not in {"hirda-skill-v1", "hirda-skill-v2"}:
+            raise ValueError("skill_schema_invalid")
         for name in (
-            "triggers", "required_capabilities", "required_tools", "runtime_constraints",
-            "policy_hints", "workflow_steps", "verification_checks",
+            "triggers", "intents", "required_capabilities", "required_tools",
+            "runtime_constraints", "permission_requirements", "policy_hints",
+            "workflow_steps", "verification_checks",
         ):
             values = tuple(getattr(self, name))
             normalized = [normalize_goal(value) for value in values]
@@ -92,9 +100,13 @@ class SkillDefinition:
             if len(normalized) != len(set(normalized)):
                 raise ValueError(f"{name}_contains_duplicate_item")
             object.__setattr__(self, name, tuple(value.strip() for value in values))
+        if not isinstance(self.provenance, Mapping):
+            raise ValueError("provenance_must_be_mapping")
         if not isinstance(self.metadata, Mapping):
             raise ValueError("metadata_must_be_mapping")
+        _check_forbidden_keys(self.provenance)
         _check_forbidden_keys(self.metadata)
+        object.__setattr__(self, "provenance", _freeze(self.provenance))
         object.__setattr__(self, "metadata", _freeze(self.metadata))
 
 
@@ -103,6 +115,7 @@ class SkillMatch:
     skill: SkillDefinition
     explicit: bool
     trigger_matches: tuple[str, ...]
+    intent_match: bool
     advisory: bool
     scope_rank: int
     rank: tuple[int, ...]
@@ -115,6 +128,7 @@ class SkillResolution:
     required_capabilities: tuple[str, ...]
     required_tools: tuple[str, ...]
     runtime_constraints: tuple[str, ...]
+    permission_requirements: tuple[str, ...]
     policy_hints: tuple[str, ...]
     workflow_steps: tuple[str, ...]
     verification_checks: tuple[str, ...]
@@ -213,8 +227,16 @@ def _parse_manifest(raw: Any, *, source: str) -> SkillDefinition:
     unknown = set(raw) - _TOP_LEVEL_KEYS
     if unknown:
         raise SkillManifestError("manifest_field_unknown:" + ",".join(sorted(map(str, unknown))))
-    if raw.get("schema") != "hirda-skill-v1":
+    schema = str(raw.get("schema") or "").strip()
+    if schema not in {"hirda-skill-v1", "hirda-skill-v2"}:
         raise SkillManifestError("manifest_schema_invalid")
+    if schema == "hirda-skill-v1":
+        v2_only = {"intents", "permission_requirements", "provenance"} & set(raw)
+        if v2_only:
+            raise SkillManifestError(
+                "manifest_v2_field_requires_v2_schema:"
+                + ",".join(sorted(v2_only))
+            )
     skill_id = str(raw.get("id") or "").strip()
     if not _SKILL_ID.fullmatch(skill_id):
         raise SkillManifestError("skill_id_invalid")
@@ -237,7 +259,10 @@ def _parse_manifest(raw: Any, *, source: str) -> SkillDefinition:
         scope = SkillScope(scope_kind, scope_raw.get("value"))
     except ValueError as exc:
         raise SkillManifestError(str(exc)) from exc
+    provenance = raw.get("provenance") or {}
     metadata = raw.get("metadata") or {}
+    if not isinstance(provenance, Mapping):
+        raise SkillManifestError("provenance_must_be_mapping")
     if not isinstance(metadata, Mapping):
         raise SkillManifestError("metadata_must_be_mapping")
     return SkillDefinition(
@@ -246,16 +271,32 @@ def _parse_manifest(raw: Any, *, source: str) -> SkillDefinition:
         version=raw["version"].strip(),
         description=raw["description"].strip(),
         scope=scope,
+        schema=schema,
         triggers=_string_list(raw.get("triggers"), "triggers"),
+        intents=_string_list(raw.get("intents"), "intents"),
         required_capabilities=_string_list(raw.get("required_capabilities"), "required_capabilities"),
         required_tools=_string_list(raw.get("required_tools"), "required_tools"),
         runtime_constraints=_string_list(raw.get("runtime_constraints"), "runtime_constraints"),
+        permission_requirements=_string_list(
+            raw.get("permission_requirements"),
+            "permission_requirements",
+        ),
         policy_hints=_string_list(raw.get("policy_hints"), "policy_hints"),
         workflow_steps=_string_list(raw.get("workflow_steps"), "workflow_steps"),
         verification_checks=_string_list(raw.get("verification_checks"), "verification_checks"),
+        provenance=_freeze(provenance),
         metadata=_freeze(metadata),
         source=source,
     )
+
+
+def parse_skill_manifest(
+    raw: Mapping[str, Any],
+    *,
+    source: str = "memory",
+) -> SkillDefinition:
+    """Validate one manifest using the same fail-closed rules as file loading."""
+    return _parse_manifest(raw, source=source)
 
 
 class SkillRegistry:
@@ -325,20 +366,40 @@ class SkillRegistry:
         *,
         workspace: str | None = None,
         domain: str | None = None,
+        intent: str | None = None,
         explicit_skill_ids: Iterable[str] = (),
         advisory_skill_ids: Iterable[str] = (),
     ) -> SkillResolution:
         text = normalize_goal(task_text)
-        explicit = tuple(dict.fromkeys(str(value).strip() for value in explicit_skill_ids if str(value).strip()))
-        advisory = {str(value).strip() for value in advisory_skill_ids if str(value).strip()}
+        intent_key = normalize_goal(intent or "")
+        explicit = tuple(
+            dict.fromkeys(
+                str(value).strip()
+                for value in explicit_skill_ids
+                if str(value).strip()
+            )
+        )
+        advisory = {
+            str(value).strip()
+            for value in advisory_skill_ids
+            if str(value).strip()
+        }
         explicit_set = set(explicit)
 
         def applicable(skill: SkillDefinition) -> bool:
             if skill.scope.kind == "global":
                 return True
             if skill.scope.kind == "workspace":
-                return workspace is not None and normalize_goal(skill.scope.value) == normalize_goal(workspace)
-            return domain is not None and normalize_goal(skill.scope.value) == normalize_goal(domain)
+                return (
+                    workspace is not None
+                    and normalize_goal(skill.scope.value)
+                    == normalize_goal(workspace)
+                )
+            return (
+                domain is not None
+                and normalize_goal(skill.scope.value)
+                == normalize_goal(domain)
+            )
 
         variants: dict[str, list[SkillDefinition]] = {}
         for skill in self._skills.values():
@@ -346,42 +407,91 @@ class SkillRegistry:
                 variants.setdefault(skill.id, []).append(skill)
         selected: list[SkillDefinition] = []
         for skills in variants.values():
-            selected.append(max(skills, key=lambda skill: (
-                _SCOPE_RANK[skill.scope.kind],
-                normalize_goal(skill.scope.value or ""),
-                skill.source,
-            )))
+            selected.append(
+                max(
+                    skills,
+                    key=lambda skill: (
+                        _SCOPE_RANK[skill.scope.kind],
+                        normalize_goal(skill.scope.value or ""),
+                        skill.source,
+                    ),
+                )
+            )
 
         unresolved = tuple(
-            skill_id for skill_id in explicit
-            if skill_id not in variants
+            skill_id for skill_id in explicit if skill_id not in variants
         )
 
         matches: list[SkillMatch] = []
         for skill in selected:
             trigger_matches = tuple(
-                trigger for trigger in skill.triggers
-                if normalize_goal(trigger) and _phrase_matches(text, normalize_goal(trigger))
+                trigger
+                for trigger in skill.triggers
+                if normalize_goal(trigger)
+                and _phrase_matches(text, normalize_goal(trigger))
+            )
+            intent_match = bool(
+                intent_key
+                and any(
+                    normalize_goal(candidate) == intent_key
+                    for candidate in skill.intents
+                )
             )
             is_explicit = skill.id in explicit_set
             is_advisory = skill.id in advisory
-            if skill.triggers and not trigger_matches and not is_explicit and not is_advisory:
+            if (
+                skill.triggers
+                and not trigger_matches
+                and not intent_match
+                and not is_explicit
+                and not is_advisory
+            ):
+                continue
+            if (
+                skill.intents
+                and not intent_match
+                and not trigger_matches
+                and not is_explicit
+                and not is_advisory
+            ):
                 continue
             scope_rank = _SCOPE_RANK[skill.scope.kind]
-            # The explicit and scope tiers are stronger than advisory hints.
-            rank = (int(is_explicit), scope_rank, int(bool(trigger_matches)), len(trigger_matches), int(is_advisory))
-            matches.append(SkillMatch(skill, is_explicit, trigger_matches, is_advisory, scope_rank, rank))
-        matches.sort(key=lambda match: (
-            tuple(-value for value in match.rank),
-            match.skill.id,
-            normalize_goal(match.skill.scope.value or ""),
-        ))
+            rank = (
+                int(is_explicit),
+                scope_rank,
+                int(intent_match),
+                int(bool(trigger_matches)),
+                len(trigger_matches),
+                int(is_advisory),
+            )
+            matches.append(
+                SkillMatch(
+                    skill,
+                    is_explicit,
+                    trigger_matches,
+                    intent_match,
+                    is_advisory,
+                    scope_rank,
+                    rank,
+                )
+            )
+        matches.sort(
+            key=lambda match: (
+                tuple(-value for value in match.rank),
+                match.skill.id,
+                normalize_goal(match.skill.scope.value or ""),
+            )
+        )
         return SkillResolution(
             matches=tuple(matches),
             unresolved_explicit_ids=unresolved,
             required_capabilities=_aggregate(matches, "required_capabilities"),
             required_tools=_aggregate(matches, "required_tools"),
             runtime_constraints=_aggregate(matches, "runtime_constraints"),
+            permission_requirements=_aggregate(
+                matches,
+                "permission_requirements",
+            ),
             policy_hints=_aggregate(matches, "policy_hints"),
             workflow_steps=_aggregate(matches, "workflow_steps"),
             verification_checks=_aggregate(matches, "verification_checks"),

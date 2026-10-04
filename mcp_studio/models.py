@@ -132,6 +132,12 @@ class AIQualityCertificationSubmit(BaseModel):
     notes: str | None = Field(default=None, max_length=8000)
 
 
+class SkillDistillationRunRequest(BaseModel):
+    domain: str = Field(min_length=1, max_length=120)
+    intent: str = Field(min_length=1, max_length=160)
+    min_experiences: int | None = Field(default=None, ge=2, le=100)
+
+
 class WorkFinish(BaseModel):
     result: dict[str, Any] = Field(default_factory=dict)
 

@@ -159,8 +159,10 @@ def test_enabled_runtime_resolves_scope_precedence_and_unresolved_explicit(tmp_p
     assert resolution["unresolved_explicit_ids"] == ["missing.skill"]
     assert resolution["selected"] == [{
         "id": "review.skill", "name": "review.skill skill", "version": "1",
+        "schema": "hirda-skill-v1",
         "scope": {"kind": "workspace", "value": "repo-a"}, "source": str(root / "workspace.yaml"),
-        "explicit": True, "advisory": False, "trigger_matches": ["review changes"],
+        "explicit": True, "advisory": False, "intent_match": False, "intents": [],
+        "trigger_matches": ["review changes"],
     }]
     assert resolution["required_tools"] == ["git diff"]
     assert payload["metadata"]["domain"] == "engineering"
