@@ -770,11 +770,11 @@ async def skills_registry_status():
             "activation_mode": (
                 "scope-default"
                 if not skill.triggers and not skill.intents
-                else "intent-or-triggered"
+                else "triggered"
             ),
         })
     return {
-        "schema": "hirda-skill-registry-status-v2",
+        "schema": "hirda-skill-registry-status-v1",
         "enabled": bool(skill_runtime.enabled),
         "registry_status": state.status,
         "error_code": state.error_code,
