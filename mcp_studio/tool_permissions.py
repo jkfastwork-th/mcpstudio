@@ -40,7 +40,7 @@ _EXECUTE_TOOLS = {
     "mcpstudio_use_workspace", "mcpstudio_create_session", "mcpstudio_use_session", "mcpstudio_bind_machine", "mcpstudio_discover_machines", "mcpstudio_approve_machine",
     "mcpstudio_handoff_session", "mcpstudio_accept_handoff", "mcpstudio_report_context_usage",
     "mcpstudio_pstack_checkpoint",
-    "mcpstudio_skill_run",
+    "mcpstudio_skill_run", "hirda_skill_run",
     "mcpstudio_world_authoring_preview", "mcpstudio_world_authoring_audit",
     "mcpstudio_close_session", "mcpstudio_detach_session",
     "mcpstudio_certify_language_runtime_recovery",
