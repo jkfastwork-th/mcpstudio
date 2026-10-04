@@ -123,3 +123,47 @@ def test_native_computer_tools_are_prioritized_after_workspace_selection_control
         "hirda__desktop_commander__read_file",
         "hirda__openbrowser__navigate",
     ]
+
+
+def test_skill_gateway_controls_are_prioritized_before_native_provider_tools():
+    class CatalogFixture:
+        def _ordered_management_tools(self):
+            return [
+                {"name": "mcpstudio_use_workspace"},
+                {"name": "mcpstudio_create_session"},
+                {"name": "mcpstudio_use_session"},
+                {"name": "hirda_skill_run"},
+                {"name": "mcpstudio_pstack_status"},
+                {"name": "mcpstudio_pstack_checkpoint"},
+                {"name": "mcpstudio_skill_resolve"},
+                {"name": "mcpstudio_skill_run"},
+                {"name": "mcpstudio_skill_inspect"},
+                {"name": "mcpstudio_lane_status"},
+            ]
+
+        def _ordered_backend_tools(self):
+            return [
+                {"name": "hirda__hirda_native_computer__read_file"},
+                {"name": "hirda__hirda_native_computer__start_process"},
+                {"name": "hirda__desktop_commander__read_file"},
+            ]
+
+    names = [
+        tool["name"]
+        for tool in GatewaySessionManager._all_local_tools(CatalogFixture())
+    ]
+    assert names[:9] == [
+        "mcpstudio_use_workspace",
+        "mcpstudio_create_session",
+        "mcpstudio_use_session",
+        "hirda_skill_run",
+        "mcpstudio_pstack_status",
+        "mcpstudio_pstack_checkpoint",
+        "mcpstudio_skill_resolve",
+        "mcpstudio_skill_run",
+        "mcpstudio_skill_inspect",
+    ]
+    assert names[9:11] == [
+        "hirda__hirda_native_computer__read_file",
+        "hirda__hirda_native_computer__start_process",
+    ]

@@ -114,7 +114,7 @@ def test_skill_run_is_priority_control_tool(tmp_path):
         skill_runtime=runtime(),
     )
     names = [item["name"] for item in manager._all_local_tools()]
-    assert "hirda_skill_run" in names
+    assert names[0] == "hirda_skill_run"
     assert "hirda__social_hub_task__social_task_create" not in names
 
 

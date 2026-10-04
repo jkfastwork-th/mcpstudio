@@ -268,6 +268,43 @@ async def test_disconnect_removes_transport(tmp_path, monkeypatch):
     assert ("oauth-b", "scope-main") not in gateway._peer_notify_transports
 
 
+
+@pytest.mark.asyncio
+async def test_tool_catalog_change_notification_is_enqueued_once(tmp_path, monkeypatch):
+    _, gateway = await _make_gateway(
+        tmp_path,
+        monkeypatch,
+        principal="oauth-a",
+        scope="scope-main",
+    )
+    queue: asyncio.Queue[dict] = asyncio.Queue()
+    session = {
+        "metadata": {
+            "initialize_response": {
+                "tool_catalog_hash": "stale-catalog-hash",
+            }
+        }
+    }
+
+    assert await gateway._queue_tool_catalog_refresh_if_needed(
+        "gws-test",
+        session,
+        queue,
+    ) is True
+    notice = queue.get_nowait()
+    assert notice == {
+        "jsonrpc": "2.0",
+        "method": "notifications/tools/list_changed",
+    }
+
+    assert await gateway._queue_tool_catalog_refresh_if_needed(
+        "gws-test",
+        session,
+        queue,
+    ) is False
+    assert queue.empty()
+
+
 def test_initialize_augmentation_advertises_logging_capability():
     """Initialize response advertises logging capability alongside tools.listChanged."""
     payload = {

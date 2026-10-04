@@ -149,6 +149,7 @@ class GatewaySessionManager:
             tuple[str, str], set[asyncio.Queue[dict[str, Any]]]
         ] = {}
         self._peer_notify_seen: dict[asyncio.Queue[dict[str, Any]], dict[str, None]] = {}
+        self._tool_catalog_notify_seen: dict[str, str] = {}
 
     @staticmethod
     def _peer_notification(message: dict[str, Any]) -> dict[str, Any]:
@@ -167,6 +168,35 @@ class GatewaySessionManager:
                 },
             },
         }
+
+    @staticmethod
+    def _tool_list_changed_notification() -> dict[str, Any]:
+        return {
+            "jsonrpc": "2.0",
+            "method": "notifications/tools/list_changed",
+        }
+
+    async def _queue_tool_catalog_refresh_if_needed(
+        self,
+        gateway_session_id: str,
+        session: dict[str, Any],
+        queue: asyncio.Queue[dict[str, Any]],
+    ) -> bool:
+        metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
+        initialize_response = (
+            metadata.get("initialize_response")
+            if isinstance(metadata.get("initialize_response"), dict)
+            else {}
+        )
+        cached_hash = str(initialize_response.get("tool_catalog_hash") or "").strip()
+        current_hash = self._tool_catalog_hash()
+        if not cached_hash or cached_hash == current_hash:
+            return False
+        if self._tool_catalog_notify_seen.get(gateway_session_id) == current_hash:
+            return False
+        await queue.put(self._tool_list_changed_notification())
+        self._tool_catalog_notify_seen[gateway_session_id] = current_hash
+        return True
 
     async def _notify_peer_message(self, message: dict[str, Any]) -> None:
         """Best-effort live notify; never changes the durable inbox record."""
@@ -1431,27 +1461,46 @@ class GatewaySessionManager:
             if str(tool.get("name") or "") not in hidden_skill_backends
         ]
 
-        # Keep only the three workspace-selection controls ahead of the native
-        # provider. Some MCP clients prioritize or truncate the beginning of a
-        # large tools/list response. Native Computer must therefore be surfaced
-        # before the rest of the control/backend catalog so Desktop Commander
-        # does not become the only visible computer provider by accident.
+        # Keep the workspace selectors and governed Skill entry point at the
+        # very front of the catalog. Some MCP clients cache or truncate large
+        # tools/list responses; hirda_skill_run is the intended high-level
+        # action surface and must not be buried behind provider-specific tools.
         selection_names = set(CONTROL_TOOL_NAMES[:3])
+        skill_entry_names = {"hirda_skill_run"}
         pstack_gate_names = {
             "mcpstudio_pstack_status",
             "mcpstudio_pstack_checkpoint",
+        }
+        skill_gateway_names = {
+            "mcpstudio_skill_resolve",
+            "mcpstudio_skill_run",
+            "mcpstudio_skill_inspect",
         }
         selection = [
             tool for tool in management
             if str(tool.get("name") or "") in selection_names
         ]
+        skill_entry = [
+            tool for tool in management
+            if str(tool.get("name") or "") in skill_entry_names
+        ]
         pstack_gate = [
             tool for tool in management
             if str(tool.get("name") or "") in pstack_gate_names
         ]
+        skill_gateway = [
+            tool for tool in management
+            if str(tool.get("name") or "") in skill_gateway_names
+        ]
+        protected_management = (
+            selection_names
+            | skill_entry_names
+            | pstack_gate_names
+            | skill_gateway_names
+        )
         remaining_management = [
             tool for tool in management
-            if str(tool.get("name") or "") not in selection_names | pstack_gate_names
+            if str(tool.get("name") or "") not in protected_management
         ]
         native_backend = [
             tool for tool in backends
@@ -1467,7 +1516,9 @@ class GatewaySessionManager:
         ]
         return (
             selection
+            + skill_entry
             + pstack_gate
+            + skill_gateway
             + native_backend
             + remaining_management
             + remaining_backend
@@ -7089,6 +7140,11 @@ class GatewaySessionManager:
             if principal and scope:
                 peer_identity = (principal, scope)
                 peer_queue = await self._connect_peer_notify_transport(principal, scope)
+                await self._queue_tool_catalog_refresh_if_needed(
+                    gateway_session_id,
+                    session,
+                    peer_queue,
+                )
         async def body_iter() -> AsyncIterator[bytes]:
             collected = bytearray()
             completed = False
