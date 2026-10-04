@@ -1355,9 +1355,72 @@ class GatewaySessionManager:
             return []
         return self.integrations.backend_tools()
 
+
+    def _skill_managed_backend_tool_names(self) -> set[str]:
+        """Hide low-level backend tools that active Skills encapsulate."""
+        if self.skill_runtime is None or self.integrations is None:
+            return set()
+        try:
+            skills = self.skill_runtime.registry.snapshot()
+        except Exception:
+            return set()
+
+        backend_tools: list[dict[str, Any]] = []
+        try:
+            backend_tools = list(self.integrations.backend_tools())
+        except Exception:
+            backend_tools = []
+
+        hidden: set[str] = set()
+        for skill in skills:
+            for required_tool in getattr(skill, "required_tools", ()):
+                required_name = str(required_tool or "").strip()
+                if not required_name:
+                    continue
+
+                # Prefer provider metadata when available because it preserves the
+                # canonical IntegrationManager mapping from abstract tool id to
+                # exposed backend name.
+                provider_names: set[str] = set()
+                resolver = getattr(self.integrations, "tool_providers", None)
+                if callable(resolver):
+                    try:
+                        providers = resolver(required_name)
+                    except Exception:
+                        providers = []
+                    for provider in providers:
+                        if not provider.get("available"):
+                            continue
+                        tool = provider.get("tool")
+                        tool = tool if isinstance(tool, dict) else {}
+                        exposed_name = str(tool.get("name") or "").strip()
+                        if exposed_name:
+                            provider_names.add(exposed_name)
+
+                # Some integration shims expose only backend_tools()/is_backend_tool
+                # and not the richer provider index. Fall back to the HIRDA backend
+                # naming contract so ChatGPT still sees the governed Skill entry
+                # point instead of the low-level tool it encapsulates.
+                suffix = f"__{required_name}"
+                for tool in backend_tools:
+                    exposed_name = str(tool.get("name") or "").strip()
+                    if (
+                        exposed_name == required_name
+                        or exposed_name.endswith(suffix)
+                    ):
+                        provider_names.add(exposed_name)
+
+                hidden.update(provider_names)
+        return hidden
+
     def _all_local_tools(self) -> list[dict[str, Any]]:
         management = self._ordered_management_tools()
-        backends = self._ordered_backend_tools()
+        hidden_skill_backends = self._skill_managed_backend_tool_names()
+        backends = [
+            tool
+            for tool in self._ordered_backend_tools()
+            if str(tool.get("name") or "") not in hidden_skill_backends
+        ]
 
         # Keep only the three workspace-selection controls ahead of the native
         # provider. Some MCP clients prioritize or truncate the beginning of a

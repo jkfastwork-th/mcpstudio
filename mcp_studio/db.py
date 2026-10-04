@@ -400,6 +400,25 @@ class Database:
                         ON skill_experiences(domain, intent, created_at DESC);
                     CREATE INDEX IF NOT EXISTS idx_skill_experiences_work
                         ON skill_experiences(work_id);
+                    CREATE TABLE IF NOT EXISTS skill_candidates (
+                        id TEXT PRIMARY KEY,
+                        skill_id TEXT NOT NULL,
+                        operation TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        manifest_json TEXT NOT NULL DEFAULT '{}',
+                        source_experience_ids_json TEXT NOT NULL DEFAULT '[]',
+                        distiller_runtime TEXT NOT NULL,
+                        distiller_model TEXT,
+                        distiller_result_json TEXT NOT NULL DEFAULT '{}',
+                        certification_json TEXT NOT NULL DEFAULT '{}',
+                        promoted_path TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_skill_candidates_status
+                        ON skill_candidates(status, updated_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_skill_candidates_skill
+                        ON skill_candidates(skill_id, updated_at DESC);
                     CREATE TABLE IF NOT EXISTS connectivity_tunnels (
                         id TEXT PRIMARY KEY,
                         provider TEXT NOT NULL,
@@ -3083,6 +3102,198 @@ class Database:
                 return items
 
         return await self._run(op)
+
+
+    @staticmethod
+    def _skill_candidate_item(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "skill_id": row["skill_id"],
+            "operation": row["operation"],
+            "status": row["status"],
+            "manifest": json.loads(row["manifest_json"] or "{}"),
+            "source_experience_ids": json.loads(
+                row["source_experience_ids_json"] or "[]"
+            ),
+            "distiller_runtime": row["distiller_runtime"],
+            "distiller_model": row["distiller_model"],
+            "distiller_result": json.loads(
+                row["distiller_result_json"] or "{}"
+            ),
+            "certification": json.loads(
+                row["certification_json"] or "{}"
+            ),
+            "promoted_path": row["promoted_path"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    async def create_skill_candidate(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = _now()
+        candidate_id = str(
+            payload.get("id") or f"skill-cand-{uuid.uuid4().hex[:16]}"
+        )
+        manifest = dict(payload.get("manifest") or {})
+        skill_id = str(
+            payload.get("skill_id") or manifest.get("id") or ""
+        ).strip()
+        if not skill_id:
+            raise ValueError("skill_candidate_skill_id_required")
+        operation = str(payload.get("operation") or "create").strip().casefold()
+        if operation not in {"create", "update"}:
+            raise ValueError("skill_candidate_operation_invalid")
+        status = str(payload.get("status") or "candidate").strip().casefold()
+        if status not in {
+            "candidate",
+            "certified",
+            "rejected",
+            "promoted",
+        }:
+            raise ValueError("skill_candidate_status_invalid")
+
+        def op() -> None:
+            with self._connect() as db:
+                db.execute(
+                    """INSERT INTO skill_candidates
+                       (id, skill_id, operation, status, manifest_json,
+                        source_experience_ids_json, distiller_runtime,
+                        distiller_model, distiller_result_json,
+                        certification_json, promoted_path, created_at,
+                        updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        candidate_id,
+                        skill_id,
+                        operation,
+                        status,
+                        json.dumps(manifest, ensure_ascii=False),
+                        json.dumps(
+                            list(payload.get("source_experience_ids") or []),
+                            ensure_ascii=False,
+                        ),
+                        str(payload.get("distiller_runtime") or "hermes"),
+                        (
+                            str(payload.get("distiller_model"))
+                            if payload.get("distiller_model") is not None
+                            else None
+                        ),
+                        json.dumps(
+                            dict(payload.get("distiller_result") or {}),
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            dict(payload.get("certification") or {}),
+                            ensure_ascii=False,
+                        ),
+                        payload.get("promoted_path"),
+                        now,
+                        now,
+                    ),
+                )
+
+        await self._run(op)
+        return await self.get_skill_candidate(candidate_id)
+
+    async def get_skill_candidate(
+        self,
+        candidate_id: str,
+    ) -> dict[str, Any]:
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT * FROM skill_candidates WHERE id=?",
+                    (candidate_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(candidate_id)
+                return self._skill_candidate_item(row)
+
+        return await self._run(op)
+
+    async def list_skill_candidates(
+        self,
+        *,
+        status: str | None = None,
+        skill_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        bounded = max(1, min(int(limit or 100), 500))
+
+        def op() -> list[dict[str, Any]]:
+            with self._connect() as db:
+                clauses: list[str] = []
+                values: list[Any] = []
+                if status:
+                    clauses.append("status=?")
+                    values.append(str(status).strip().casefold())
+                if skill_id:
+                    clauses.append("skill_id=?")
+                    values.append(str(skill_id).strip())
+                query = "SELECT * FROM skill_candidates"
+                if clauses:
+                    query += " WHERE " + " AND ".join(clauses)
+                query += " ORDER BY updated_at DESC LIMIT ?"
+                values.append(bounded)
+                rows = db.execute(query, tuple(values)).fetchall()
+                return [self._skill_candidate_item(row) for row in rows]
+
+        return await self._run(op)
+
+    async def update_skill_candidate(
+        self,
+        candidate_id: str,
+        *,
+        status: str | None = None,
+        certification: dict[str, Any] | None = None,
+        promoted_path: str | None = None,
+    ) -> dict[str, Any]:
+        current = await self.get_skill_candidate(candidate_id)
+        next_status = str(status or current["status"]).strip().casefold()
+        if next_status not in {
+            "candidate",
+            "certified",
+            "rejected",
+            "promoted",
+        }:
+            raise ValueError("skill_candidate_status_invalid")
+        now = _now()
+        certification_value = (
+            certification
+            if certification is not None
+            else current.get("certification") or {}
+        )
+        next_path = (
+            promoted_path
+            if promoted_path is not None
+            else current.get("promoted_path")
+        )
+
+        def op() -> None:
+            with self._connect() as db:
+                cursor = db.execute(
+                    """UPDATE skill_candidates
+                       SET status=?, certification_json=?,
+                           promoted_path=?, updated_at=?
+                       WHERE id=?""",
+                    (
+                        next_status,
+                        json.dumps(
+                            dict(certification_value or {}),
+                            ensure_ascii=False,
+                        ),
+                        next_path,
+                        now,
+                        candidate_id,
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    raise KeyError(candidate_id)
+
+        await self._run(op)
+        return await self.get_skill_candidate(candidate_id)
 
     async def create_work(self, payload: dict[str, Any], default_server_id: str) -> dict[str, Any]:
         work_id = f"work-{uuid.uuid4().hex[:16]}"

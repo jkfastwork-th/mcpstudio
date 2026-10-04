@@ -1,7 +1,7 @@
-schema: hirda-skill-v1
+schema: hirda-skill-v2
 id: social.publish
 name: Social Publish
-version: 0.1.0
+version: 0.2.0
 description: Create a governed Social Hub publish task from a natural-language publishing request.
 scope:
   kind: global
@@ -15,10 +15,17 @@ triggers:
   - โพสต์ลง instagram
   - สร้างโพสต์ social
   - ช่วยโพสต์เรื่องนี้
+intents:
+  - publish_social_post
+  - schedule_social_post
 required_capabilities:
   - social_hub_task_ingress
 required_tools:
   - social_task_create
+runtime_constraints:
+  - tool_use
+permission_requirements:
+  - social.publish
 policy_hints:
   - Create a Social Hub task instead of controlling the browser or social website directly.
   - Default to review before publish unless the user explicitly requests automatic publication.
@@ -37,6 +44,10 @@ verification_checks:
   - The created task records the social.publish skill provenance.
   - Review and comment policies match the user request or the safe defaults.
   - No direct browser publication occurs inside the skill dispatcher.
+provenance:
+  origin: seed
+  distillation_status: certified_seed
+  pilot: social_hub
 metadata:
   domain: social
   task_contract: social-publish-v2

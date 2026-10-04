@@ -290,6 +290,15 @@ def _parse_manifest(raw: Any, *, source: str) -> SkillDefinition:
     )
 
 
+def parse_skill_manifest(
+    raw: Mapping[str, Any],
+    *,
+    source: str = "memory",
+) -> SkillDefinition:
+    """Validate one manifest using the same fail-closed rules as file loading."""
+    return _parse_manifest(raw, source=source)
+
+
 class SkillRegistry:
     def __init__(self) -> None:
         self._skills: dict[tuple[str, str, str], SkillDefinition] = {}

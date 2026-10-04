@@ -32,7 +32,7 @@ from .agent_runtimes import AgentRuntimeInventory
 from .models import (
     SessionCreate, SessionHeartbeat, WorkerBind, WorkerHeartbeat, WorkerStatePatch,
     WorkSubmit, WorkFinish, WorkFail, WorkDetach, AlertAcknowledge, RetryDispatch, FaultInject, BatchDispatch,
-    RoutineCreate, RoutineUpdate, AIQualityCertificationSubmit,
+    RoutineCreate, RoutineUpdate, AIQualityCertificationSubmit, SkillDistillationRunRequest,
     SessionReclaim, OAuthClientCreate, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate, ManagedSessionMachineUpdate, MachineCapabilityRouteRequest, MachineEnrollmentApprove, MachineEnrollmentReject, DevicePairingStart, DevicePairingVerify, DevicePairingApprove, DevicePairingReject, DeviceRevoke,
     GraftConfigureRequest, GraftQueryRequest, GraftRollbackRequest, ComputerRepairRequest, ManagedGatewayAttach, GatewayContextUsageReport, SessionHandoffPrepareRequest,
     CapsuleCreate, CapsuleStageUpdate, CapsuleHandoff, CapsuleHandoffAck, CapsuleContractUpdate,
@@ -42,6 +42,7 @@ from .settings import Settings, load_settings
 from .capabilities import CapabilityResolver, build_capability_registry
 from .skill_runtime import SkillRequestError, SkillRuntime
 from .skill_gateway import SkillGateway
+from .skill_distillation import SkillDistillationManager
 from .execution_environments import plan_execution_environment
 from .workers import WorkerManager
 from .scheduler import Scheduler
@@ -201,6 +202,12 @@ cognitive_router = CognitiveRouter(
     hermes_groups,
 )
 gateway_sessions.cognitive_router = cognitive_router
+skill_distillation = SkillDistillationManager(
+    db,
+    skill_runtime,
+    capability_resolver,
+    cognitive_router,
+)
 routines = RoutineManager(
     settings,
     db,
@@ -4186,9 +4193,11 @@ async def ai_quality_certification(
         execution_certification=execution_cert,
         quality_certification=result,
     )
+    distillation_queued = skill_distillation.kick(experience)
     return {
         **result,
         "skill_experience": experience,
+        "skill_distillation_queued": distillation_queued,
     }
 
 
@@ -4206,6 +4215,64 @@ async def list_skill_experiences(
             limit=limit,
         ),
     }
+
+
+@app.get("/api/skill-candidates")
+async def list_skill_candidates(
+    status: str | None = None,
+    skill_id: str | None = None,
+    limit: int = 100,
+):
+    return {
+        "schema": "hirda-skill-candidate-list-v1",
+        "items": await db.list_skill_candidates(
+            status=status,
+            skill_id=skill_id,
+            limit=limit,
+        ),
+    }
+
+
+@app.get("/api/skill-candidates/{candidate_id}")
+async def get_skill_candidate(candidate_id: str):
+    try:
+        return await db.get_skill_candidate(candidate_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown skill candidate")
+
+
+@app.post("/api/skill-distillation/run")
+async def run_skill_distillation(payload: SkillDistillationRunRequest):
+    try:
+        return await skill_distillation.distill(
+            domain=payload.domain,
+            intent=payload.intent,
+            min_experiences=payload.min_experiences,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.post("/api/skill-candidates/{candidate_id}/certify")
+async def certify_skill_candidate(candidate_id: str):
+    try:
+        return await skill_distillation.certify_candidate(candidate_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown skill candidate")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/skill-candidates/{candidate_id}/promote")
+async def promote_skill_candidate(candidate_id: str):
+    try:
+        return await skill_distillation.promote_candidate(candidate_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown skill candidate")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @app.get("/api/skill-experiences/{experience_id}")

@@ -115,10 +115,7 @@ def test_skill_run_is_priority_control_tool(tmp_path):
     )
     names = [item["name"] for item in manager._all_local_tools()]
     assert "hirda_skill_run" in names
-    assert names.index("hirda_skill_run") < names.index(
-        "hirda__social_hub_task__social_task_create"
-    )
-    assert names.index("hirda_skill_run") <= 3
+    assert "hirda__social_hub_task__social_task_create" not in names
 
 
 @pytest.mark.asyncio
