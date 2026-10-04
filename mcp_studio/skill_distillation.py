@@ -251,7 +251,9 @@ class SkillDistillationManager:
             f"Domain: {domain}\nIntent: {intent}\n"
             f"Existing skill id (keep exactly when present): {expected_id or 'none'}\n"
             + (
-                "Existing canonical dependency ids must be preserved exactly: "
+                "Existing Skill identity/boundary contracts must be preserved exactly: "
+                f"scope={{'kind': '{existing.scope.kind}', 'value': {existing.scope.value!r}}}; "
+                f"intents={list(existing.intents)}; "
                 f"required_capabilities={list(existing.required_capabilities)}; "
                 f"required_tools={list(existing.required_tools)}.\n"
                 if existing is not None
@@ -299,6 +301,15 @@ class SkillDistillationManager:
             # the distiller to rewrite. Skill evolution may improve workflow,
             # policy, and verification, but it must preserve canonical
             # capability/tool ids until HIRDA explicitly evolves the binding.
+            proposed["scope"] = {
+                "kind": existing.scope.kind,
+                **(
+                    {"value": existing.scope.value}
+                    if existing.scope.value is not None
+                    else {}
+                ),
+            }
+            proposed["intents"] = list(existing.intents)
             proposed["required_capabilities"] = list(
                 existing.required_capabilities
             )

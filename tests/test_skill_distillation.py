@@ -70,6 +70,11 @@ class _HermesDescriptiveDependencyRouter(_HermesRouter):
     async def execute(self, payload):
         result = await super().execute(payload)
         decoded = json.loads(result.output)
+        decoded["scope"] = {
+            "kind": "domain",
+            "value": "wrong-domain",
+        }
+        decoded["intents"] = ["unrelated_intent"]
         decoded["required_capabilities"] = [
             "Create a social publishing task through governed ingress"
         ]
@@ -261,8 +266,12 @@ async def test_skill_evolution_preserves_existing_canonical_dependency_ids(tmp_p
     )
     manifest = result["candidate"]["manifest"]
 
+    assert manifest["scope"] == {"kind": "global"}
+    assert manifest["intents"] == ["publish_social_post"]
     assert manifest["required_capabilities"] == ["social_hub_task_ingress"]
     assert manifest["required_tools"] == ["social_task_create"]
+    assert "scope={'kind': 'global', 'value': None}" in router.requests[0]["prompt"]
+    assert "publish_social_post" in router.requests[0]["prompt"]
     assert "social_hub_task_ingress" in router.requests[0]["prompt"]
     assert "social_task_create" in router.requests[0]["prompt"]
 
