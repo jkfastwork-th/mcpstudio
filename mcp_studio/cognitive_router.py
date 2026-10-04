@@ -74,6 +74,9 @@ _CAPABILITIES = {
     "research",
 }
 _DEPTHS = {"auto", "fast", "deep"}
+_SYSTEM_PRINCIPAL_PANE_PREFIXES: dict[tuple[str, str], tuple[str, ...]] = {
+    ("hermes", "hirda-skill-distiller"): ("hirda-skill-hermes",),
+}
 
 
 class CognitiveRouterError(RuntimeError):
@@ -1334,6 +1337,12 @@ class CognitiveRouter:
             for value in values("pane_name_prefixes")
         ]
         pane_name_prefixes.extend(principal_prefixes)
+        pane_name_prefixes.extend(
+            prefix
+            for (system_runtime, _), prefixes in _SYSTEM_PRINCIPAL_PANE_PREFIXES.items()
+            if system_runtime == runtime_id.casefold()
+            for prefix in prefixes
+        )
 
         return {
             "pane_ids": values("pane_ids"),
@@ -1399,12 +1408,10 @@ class CognitiveRouter:
                     if configured:
                         return configured
 
-        system_principals = {
-            ("hermes", "hirda-skill-distiller"): (
-                "hirda-skill-hermes",
-            ),
-        }
-        return system_principals.get((runtime_key, principal_key), ())
+        return _SYSTEM_PRINCIPAL_PANE_PREFIXES.get(
+            (runtime_key, principal_key),
+            (),
+        )
 
     def _pane_claimed_by_any_principal(
         self,

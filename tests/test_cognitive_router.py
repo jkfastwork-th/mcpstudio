@@ -454,6 +454,8 @@ def test_skill_distiller_system_principal_is_hermes_only_allowlisted():
         "claude",
         "hirda-skill-distiller",
     ) == ()
+    hermes_selectors = router._runtime_pane_selectors("hermes")
+    assert "hirda-skill-hermes" in hermes_selectors["pane_name_prefixes"]
 
 
 @pytest.mark.asyncio
