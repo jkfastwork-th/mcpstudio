@@ -1353,6 +1353,38 @@ class CognitiveRouter:
         }
 
 
+    def _runtime_bootstrap_agent_args(self, runtime_id: str) -> list[str]:
+        """Return HIRDA-owned CLI launch constraints for isolated runtimes."""
+        runtime_key = str(runtime_id or "").strip().casefold()
+        raw_bindings = getattr(self.studio, "cognitive_runtime_bindings", {})
+        selected: Any = None
+        if isinstance(raw_bindings, dict):
+            for key, value in raw_bindings.items():
+                if str(key or "").strip().casefold() == runtime_key:
+                    selected = value
+                    break
+        if not isinstance(selected, dict):
+            return []
+
+        if runtime_key != "hermes":
+            return []
+
+        provider = str(selected.get("launch_provider") or "").strip()
+        model = str(selected.get("launch_model") or "").strip()
+        reasoning = str(selected.get("launch_reasoning") or "").strip().casefold()
+        if bool(provider) != bool(model):
+            raise CognitiveRouterError(
+                "cognitive_runtime_bootstrap_launch_contract_incomplete"
+            )
+
+        args: list[str] = []
+        if provider and model:
+            args.extend(["--provider", provider, "--model", model])
+        if reasoning:
+            args.extend(["--reasoning", reasoning])
+        return args
+
+
     def _request_principal_id(
         self,
         request: CognitiveRequest | None,
@@ -2757,6 +2789,7 @@ class CognitiveRouter:
                 kind=runtime_id,
                 pane_id=pane_id,
                 timeout_ms=min(30000, max(1000, int(request.timeout_seconds * 1000))),
+                agent_args=self._runtime_bootstrap_agent_args(runtime_id),
             )
             await self.herdr.refresh()
             routed_request = replace(

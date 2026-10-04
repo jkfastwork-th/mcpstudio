@@ -353,7 +353,15 @@ class BootstrapPrincipalHerdr(FakeHerdr):
         )
         return tab
 
-    async def start_agent_in_pane(self, *, name, kind, pane_id, timeout_ms=30000):
+    async def start_agent_in_pane(
+        self,
+        *,
+        name,
+        kind,
+        pane_id,
+        timeout_ms=30000,
+        agent_args=None,
+    ):
         pane = self.find_pane(pane_id=pane_id)
         assert pane is not None
         pane.update(
@@ -370,6 +378,7 @@ class BootstrapPrincipalHerdr(FakeHerdr):
                 "kind": kind,
                 "pane_id": pane_id,
                 "timeout_ms": timeout_ms,
+                "agent_args": list(agent_args or []),
             }
         )
         return {
@@ -404,6 +413,9 @@ async def test_execute_bootstraps_isolated_principal_pane_when_missing():
                 "fern": ["hirda-fern-hermes"],
                 "nova": ["hirda-nova-hermes"],
             },
+            "launch_provider": "9router",
+            "launch_model": "cx/gpt-6-luna[1m]",
+            "launch_reasoning": "medium",
         },
         "claude": {
             "machine_id": "openclaw",
@@ -437,6 +449,14 @@ async def test_execute_bootstraps_isolated_principal_pane_when_missing():
     assert len(herdr.started_agents) == 1
     assert herdr.started_agents[0]["name"].startswith("hirda-fern-hermes")
     assert herdr.started_agents[0]["pane_id"] == "wH:pC"
+    assert herdr.started_agents[0]["agent_args"] == [
+        "--provider",
+        "9router",
+        "--model",
+        "cx/gpt-6-luna[1m]",
+        "--reasoning",
+        "medium",
+    ]
     assert len(herdr.closed_tabs) == 1
 
 
