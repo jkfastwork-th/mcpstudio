@@ -1415,7 +1415,16 @@ class GatewaySessionManager:
 
     def _all_local_tools(self) -> list[dict[str, Any]]:
         management = self._ordered_management_tools()
-        hidden_skill_backends = self._skill_managed_backend_tool_names()
+        hidden_resolver = getattr(
+            self,
+            "_skill_managed_backend_tool_names",
+            None,
+        )
+        hidden_skill_backends = (
+            hidden_resolver()
+            if callable(hidden_resolver)
+            else set()
+        )
         backends = [
             tool
             for tool in self._ordered_backend_tools()
