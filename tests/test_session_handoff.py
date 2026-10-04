@@ -475,6 +475,46 @@ async def test_claim_handoff_binds_target_closes_source_and_consumes_token(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_use_session_accepts_handoff_token_when_accept_tool_is_not_exposed(
+    tmp_path: Path,
+    monkeypatch,
+):
+    _, db, manager, managed, source_gateway, target_gateway, _, _ = await setup_pair(
+        tmp_path
+    )
+
+    async def must_not_open(*args, **kwargs):
+        raise AssertionError("handoff compatibility claim must not open a new upstream")
+
+    async def fake_close(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(manager, "_open_upstream_session", must_not_open)
+    monkeypatch.setattr(manager, "_close_upstream_session", fake_close)
+
+    prepared = await manager.prepare_session_handoff(
+        source_gateway["id"],
+        summary="Continue the active HIRDA task from a fresh ChatGPT conversation.",
+    )
+
+    claimed = await manager._handle_management_tool(
+        target_gateway["id"],
+        "mcpstudio_use_session",
+        {"session": prepared["claim_token"]},
+    )
+
+    assert claimed["ownership_transferred"] is True
+    assert claimed["compatibility_tool"] == "mcpstudio_use_session"
+    assert claimed["resolution"]["reason"] == "handoff-token-compatibility"
+    target = await db.get_gateway_session(target_gateway["id"])
+    source = await db.get_gateway_session(source_gateway["id"])
+    assert target["managed_session_id"] == managed["id"]
+    assert source["managed_session_id"] is None
+    handoff = await db.get_session_handoff(prepared["handoff"]["id"])
+    assert handoff["state"] == "claimed"
+
+
+@pytest.mark.asyncio
 async def test_claim_handoff_transfer_failure_keeps_source_owner_and_releases_token(tmp_path: Path, monkeypatch):
     _, db, manager, managed, source_gateway, target_gateway, source_studio, target_studio = await setup_pair(tmp_path)
 

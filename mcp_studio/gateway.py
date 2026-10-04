@@ -962,7 +962,7 @@ class GatewaySessionManager:
             },
             {
                 "name": "mcpstudio_use_session",
-                "description": "Attach this MCP transport to an existing managed session. Accepts an id/name or plain-language continuation request for resolution. A concrete request may open/adopt a Pstack engineering task; attaching by session alone never creates a task. Conversation-local binding and explicit names take precedence; ambiguous cross-session requests fail closed and return candidates.",
+                "description": "Attach this MCP transport to an existing managed session. Accepts an id/name, plain-language continuation request, or a single-use msh_ session handoff claim token for compatibility when mcpstudio_accept_handoff is not exposed by the client. A concrete request may open/adopt a Pstack engineering task; attaching by session alone never creates a task. Conversation-local binding and explicit names take precedence; ambiguous cross-session requests fail closed and return candidates.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -5211,6 +5211,24 @@ class GatewaySessionManager:
         if name == "mcpstudio_use_session":
             selector = str(args.get("session") or "").strip()
             natural_request = str(args.get("request") or "").strip()
+            if selector.startswith("msh_"):
+                if natural_request:
+                    raise ManagedSessionError(
+                        "request must be omitted when claiming a session handoff token"
+                    )
+                claimed = await self.accept_session_handoff(
+                    gateway_session_id,
+                    token=selector,
+                    actor="chatgpt/mcp",
+                )
+                return {
+                    **claimed,
+                    "resolution": {
+                        "confidence": 1.0,
+                        "reason": "handoff-token-compatibility",
+                    },
+                    "compatibility_tool": "mcpstudio_use_session",
+                }
             if selector:
                 try:
                     target = await self._resolve_managed_session(selector, principal_id=principal_id)
