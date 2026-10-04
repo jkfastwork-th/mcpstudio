@@ -3208,6 +3208,44 @@ class Database:
         await self._run(op)
         return await self.get_work(work_id)
 
+
+    async def update_queued_work_wait(
+        self,
+        work_id: str,
+        *,
+        execution_state: str,
+        wait_detail: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist scheduler wait diagnostics while a work item remains queued."""
+        now = _now()
+
+        def op() -> None:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT * FROM work_items WHERE id=?",
+                    (work_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(work_id)
+                if row["state"] != "queued":
+                    raise ValueError(f"work {work_id} is not queued")
+                execution = json.loads(row["execution_json"] or "{}")
+                execution["scheduler_wait"] = dict(wait_detail or {})
+                db.execute(
+                    """UPDATE work_items
+                       SET execution_state=?, execution_json=?, updated_at=?
+                       WHERE id=?""",
+                    (
+                        str(execution_state or "waiting_scheduler"),
+                        json.dumps(execution, ensure_ascii=False),
+                        now,
+                        work_id,
+                    ),
+                )
+
+        await self._run(op)
+        return await self.get_work(work_id)
+
     async def mark_worker_degraded_for_work(self, work_id: str) -> None:
         now = _now()
 

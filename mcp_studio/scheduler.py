@@ -110,6 +110,111 @@ class Scheduler:
         chosen = sorted(candidates, key=score)[0]
         return chosen.get("pane_id"), requested_agent or chosen.get("agent")
 
+
+    @staticmethod
+    def _scheduler_contract(work: dict[str, Any]) -> dict[str, Any]:
+        metadata = work.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        contract = metadata.get("scheduler_contract")
+        contract = contract if isinstance(contract, dict) else {}
+        depends_on = [
+            str(item).strip()
+            for item in (contract.get("depends_on") or [])
+            if str(item or "").strip()
+        ]
+        related_group = str(contract.get("related_group") or "").strip() or None
+        max_concurrency = contract.get("max_concurrency")
+        try:
+            max_concurrency = int(max_concurrency) if max_concurrency is not None else None
+        except (TypeError, ValueError):
+            max_concurrency = None
+        if max_concurrency is not None and max_concurrency < 1:
+            max_concurrency = None
+        priority_boost = contract.get("priority_boost", 0)
+        try:
+            priority_boost = int(priority_boost or 0)
+        except (TypeError, ValueError):
+            priority_boost = 0
+        jev = metadata.get("jev_triage")
+        jev = jev if isinstance(jev, dict) else {}
+        try:
+            priority_boost += int(jev.get("priority_delta") or 0)
+        except (TypeError, ValueError):
+            pass
+        if not related_group:
+            related_group = str(jev.get("related_group") or "").strip() or None
+        return {
+            "depends_on": depends_on,
+            "related_group": related_group,
+            "max_concurrency": max_concurrency,
+            "priority_boost": priority_boost,
+            "jev_advisory": jev,
+        }
+
+    async def _scheduler_gate(
+        self,
+        work: dict[str, Any],
+        *,
+        running_group_counts: dict[str, int],
+    ) -> tuple[bool, dict[str, Any]]:
+        contract = self._scheduler_contract(work)
+        pending_dependencies: list[str] = []
+        failed_dependencies: list[str] = []
+        for dependency_id in contract["depends_on"]:
+            try:
+                dependency = await self.db.get_work(dependency_id)
+            except KeyError:
+                pending_dependencies.append(dependency_id)
+                continue
+            state = str(dependency.get("state") or "").casefold()
+            if state == "completed":
+                continue
+            if state in {"failed", "cancelled", "detached"}:
+                failed_dependencies.append(dependency_id)
+            else:
+                pending_dependencies.append(dependency_id)
+
+        if failed_dependencies:
+            return False, {
+                "reason": "dependency_failed",
+                "dependencies": failed_dependencies,
+                "contract": contract,
+            }
+        if pending_dependencies:
+            return False, {
+                "reason": "waiting_dependency",
+                "dependencies": pending_dependencies,
+                "contract": contract,
+            }
+
+        group = contract.get("related_group")
+        limit = contract.get("max_concurrency")
+        if group and limit is not None:
+            active = int(running_group_counts.get(group, 0))
+            if active >= limit:
+                return False, {
+                    "reason": "waiting_concurrency",
+                    "related_group": group,
+                    "active": active,
+                    "limit": limit,
+                    "contract": contract,
+                }
+
+        return True, {"reason": None, "contract": contract}
+
+    @staticmethod
+    def _effective_priority(
+        work: dict[str, Any],
+        *,
+        running_groups: set[str],
+    ) -> int:
+        contract = Scheduler._scheduler_contract(work)
+        score = int(work.get("priority") or 0) + int(contract.get("priority_boost") or 0)
+        group = contract.get("related_group")
+        if group and group in running_groups:
+            score += 5
+        return score
+
     async def schedule_once(self) -> dict[str, int]:
         async with self._schedule_lock:
             routines = getattr(self, "routines", None)
@@ -121,8 +226,6 @@ class Scheduler:
                 if callable(enqueue_due):
                     await enqueue_due()
 
-            # Scheduler-managed logical workers need a heartbeat while a work item is
-            # assigned. M3 will replace this with execution-aware liveness.
             await self.db.heartbeat_running_work()
 
             if not self._upstream_available():
@@ -133,14 +236,58 @@ class Scheduler:
                 return {"started": 0, "queued": (await self.db.work_summary())["queue"]}
 
             queued = await self.db.queued_work(limit=self.settings.studio.scheduler_max_queue)
+            running = await self.db.list_work(
+                state="running",
+                limit=self.settings.studio.scheduler_max_queue,
+            )
+            running_group_counts: dict[str, int] = {}
+            for item in running:
+                group = self._scheduler_contract(item).get("related_group")
+                if group:
+                    running_group_counts[group] = running_group_counts.get(group, 0) + 1
+            running_groups = set(running_group_counts)
+
+            queued = sorted(
+                queued,
+                key=lambda item: (
+                    -self._effective_priority(item, running_groups=running_groups),
+                    str(item.get("queued_at") or ""),
+                    str(item.get("id") or ""),
+                ),
+            )
+
             started = 0
             free_workers = list(workers)
 
             for work in queued:
                 if not free_workers:
                     break
-                # Current worker pool belongs to one Serena server only.
                 if work.get("server_id") != self.settings.studio.worker_server_id:
+                    continue
+
+                eligible, gate = await self._scheduler_gate(
+                    work,
+                    running_group_counts=running_group_counts,
+                )
+                if not eligible:
+                    await self.db.update_queued_work_wait(
+                        work["id"],
+                        execution_state=str(gate.get("reason") or "waiting_scheduler"),
+                        wait_detail=gate,
+                    )
+                    await self.db.add_event(
+                        "scheduler.waiting",
+                        f"{work['id']} waiting: {gate.get('reason')}",
+                        server_id=work["server_id"],
+                        data={
+                            "work_id": work["id"],
+                            "reason": gate.get("reason"),
+                            "dependencies": gate.get("dependencies"),
+                            "related_group": gate.get("related_group"),
+                            "active": gate.get("active"),
+                            "limit": gate.get("limit"),
+                        },
+                    )
                     continue
 
                 pane, agent = self.resolve_binding(work)
@@ -150,14 +297,20 @@ class Scheduler:
                         work["id"], worker["id"], pane=pane, agent=agent
                     )
                 except LeaseConflict:
-                    # Do not let one workspace at the head of the queue block work
-                    # for other workspaces.
                     continue
                 except ValueError:
                     continue
 
                 free_workers.pop(0)
                 started += 1
+                contract = self._scheduler_contract(assigned)
+                related_group = contract.get("related_group")
+                if related_group:
+                    running_group_counts[related_group] = (
+                        running_group_counts.get(related_group, 0) + 1
+                    )
+                    running_groups.add(related_group)
+
                 metadata = assigned.get("metadata")
                 metadata = metadata if isinstance(metadata, dict) else {}
                 pstack_task_id = str(
@@ -167,9 +320,6 @@ class Scheduler:
                     metadata.get("pstack_trace_id") or ""
                 ).strip()
                 if pstack_task_id:
-                    # Worker assignment proves capacity reservation, not that an
-                    # agent is actually executing. PStack becomes RUNNING only
-                    # after ExecutionSupervisor confirms a successful dispatch.
                     await self.db.patch_pstack_task(
                         pstack_task_id,
                         {
@@ -198,6 +348,7 @@ class Scheduler:
                                 "metadata": {
                                     "worker_id": worker["id"],
                                     "pane": assigned.get("pane"),
+                                    "scheduler_contract": contract,
                                 },
                             },
                             stream_id=f"pstack:{pstack_trace_id}",
@@ -217,6 +368,11 @@ class Scheduler:
                         "pane": assigned.get("pane"),
                         "agent": assigned.get("agent"),
                         "priority": assigned["priority"],
+                        "effective_priority": self._effective_priority(
+                            assigned,
+                            running_groups=running_groups,
+                        ),
+                        "scheduler_contract": contract,
                     },
                 )
 

@@ -110,6 +110,55 @@ async def test_routine_definition_and_run_persist_pstack_routing_lineage(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_routine_propagates_scheduler_and_jev_advisory_contracts(tmp_path):
+    db = Database(str(tmp_path / "studio.sqlite3"))
+    await db.init()
+    manager = RoutineManager(
+        _settings(),
+        db,
+        cognitive_router=_Router(),
+        scheduler=_Kick(),
+        execution=_Kick(),
+    )
+
+    routine = await manager.create(
+        {
+            "name": "Grouped routine",
+            "enabled": True,
+            "cadence": "manual",
+            "interval_seconds": None,
+            "work_template": {
+                "label": "grouped work",
+                "workspace": "/ws/grouped",
+                "priority": 50,
+                "lease_mode": "write",
+                "dispatch_mode": "herdr",
+                "instruction": "Reply OK",
+                "metadata": {},
+            },
+            "metadata": {
+                "scheduler_contract": {
+                    "related_group": "social-hub",
+                    "max_concurrency": 1,
+                },
+                "jev_triage": {
+                    "priority_delta": 15,
+                    "related_group": "social-hub",
+                    "authority": "advisory_only",
+                },
+            },
+        }
+    )
+
+    triggered = await manager.trigger(routine["id"])
+    metadata = triggered["work"]["metadata"]
+    assert metadata["scheduler_contract"]["related_group"] == "social-hub"
+    assert metadata["scheduler_contract"]["max_concurrency"] == 1
+    assert metadata["jev_triage"]["priority_delta"] == 15
+    assert metadata["jev_triage"]["authority"] == "advisory_only"
+
+
+@pytest.mark.asyncio
 async def test_interval_routine_has_durable_next_run_and_no_immediate_duplicate(tmp_path):
     db = Database(str(tmp_path / "studio.sqlite3"))
     await db.init()

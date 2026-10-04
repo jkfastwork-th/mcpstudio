@@ -124,6 +124,17 @@ class RoutineManager:
         metadata = work_payload.get("metadata")
         metadata = metadata if isinstance(metadata, dict) else {}
         work_payload["metadata"] = metadata
+        routine_metadata = routine.get("metadata")
+        routine_metadata = (
+            routine_metadata if isinstance(routine_metadata, dict) else {}
+        )
+        for policy_key in ("scheduler_contract", "jev_triage"):
+            policy_value = routine_metadata.get(policy_key)
+            if (
+                policy_key not in metadata
+                and isinstance(policy_value, dict)
+            ):
+                metadata[policy_key] = copy.deepcopy(policy_value)
 
         runtime_plan = await self._runtime_plan(
             routine=routine,
