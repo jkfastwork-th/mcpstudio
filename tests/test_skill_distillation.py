@@ -66,6 +66,18 @@ class _HermesControlCharRouter(_HermesRouter):
         return result
 
 
+class _HermesDescriptiveDependencyRouter(_HermesRouter):
+    async def execute(self, payload):
+        result = await super().execute(payload)
+        decoded = json.loads(result.output)
+        decoded["required_capabilities"] = [
+            "Create a social publishing task through governed ingress"
+        ]
+        decoded["required_tools"] = ["Social task ingress"]
+        result.output = json.dumps(decoded)
+        return result
+
+
 def _seed_manifest():
     return {
         "schema": "hirda-skill-v2",
@@ -165,6 +177,8 @@ async def test_hermes_distills_certifies_and_promotes_skill_evolution(tmp_path):
     assert request["principal_id"] == "hirda-skill-distiller"
     assert request["allow_fallback"] is False
     assert "private-account-" not in request["prompt"]
+    assert "social_hub_task_ingress" in request["prompt"]
+    assert "social_task_create" in request["prompt"]
 
     certified = await manager.certify_candidate(candidate["id"])
     assert certified["status"] == "certified"
@@ -215,6 +229,74 @@ async def test_distillation_recovers_raw_control_characters_in_hermes_json(tmp_p
     assert result["candidate"]["manifest"]["description"].endswith(
         "Keep review before external publish."
     )
+
+
+@pytest.mark.asyncio
+async def test_skill_evolution_preserves_existing_canonical_dependency_ids(tmp_path):
+    root = tmp_path / "skills"
+    root.mkdir()
+    (root / "social.publish.yaml").write_text(
+        yaml.safe_dump(_seed_manifest(), sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    db = Database(str(tmp_path / "studio.sqlite3"))
+    await db.init()
+    for index in range(3):
+        await _record_experience(db, index)
+
+    runtime = SkillRuntime(enabled=True, path=root, base_dir=tmp_path)
+    router = _HermesDescriptiveDependencyRouter()
+    manager = SkillDistillationManager(
+        db,
+        runtime,
+        _Resolver(),
+        router,
+        min_experiences=3,
+        quality_threshold=0.8,
+    )
+
+    result = await manager.distill(
+        domain="social",
+        intent="publish_social_post",
+    )
+    manifest = result["candidate"]["manifest"]
+
+    assert manifest["required_capabilities"] == ["social_hub_task_ingress"]
+    assert manifest["required_tools"] == ["social_task_create"]
+    assert "social_hub_task_ingress" in router.requests[0]["prompt"]
+    assert "social_task_create" in router.requests[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_rejected_candidate_does_not_block_distillation_retry(tmp_path):
+    root = tmp_path / "skills"
+    root.mkdir()
+    (root / "social.publish.yaml").write_text(
+        yaml.safe_dump(_seed_manifest(), sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    db = Database(str(tmp_path / "studio.sqlite3"))
+    await db.init()
+    for index in range(3):
+        await _record_experience(db, index)
+
+    runtime = SkillRuntime(enabled=True, path=root, base_dir=tmp_path)
+    manager = SkillDistillationManager(
+        db,
+        runtime,
+        _Resolver(),
+        _HermesRouter(),
+        min_experiences=3,
+        quality_threshold=0.8,
+    )
+
+    first = await manager.distill(domain="social", intent="publish_social_post")
+    await db.update_skill_candidate(first["candidate"]["id"], status="rejected")
+
+    second = await manager.distill(domain="social", intent="publish_social_post")
+
+    assert second["status"] == "candidate_created"
+    assert second["candidate"]["id"] != first["candidate"]["id"]
 
 
 @pytest.mark.asyncio

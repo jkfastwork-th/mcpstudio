@@ -198,7 +198,10 @@ class SkillDistillationManager:
     ) -> bool:
         expected = set(experience_ids)
         for candidate in await self.db.list_skill_candidates(limit=200):
-            if set(candidate.get("source_experience_ids") or []) == expected:
+            if set(candidate.get("source_experience_ids") or []) != expected:
+                continue
+            status = str(candidate.get("status") or "").strip().casefold()
+            if status in {"candidate", "certified", "promoted"}:
                 return True
         return False
 
@@ -247,7 +250,14 @@ class SkillDistillationManager:
             "and provenance.\n"
             f"Domain: {domain}\nIntent: {intent}\n"
             f"Existing skill id (keep exactly when present): {expected_id or 'none'}\n"
-            "Required JSON keys: id,name,description,scope,triggers,intents,"
+            + (
+                "Existing canonical dependency ids must be preserved exactly: "
+                f"required_capabilities={list(existing.required_capabilities)}; "
+                f"required_tools={list(existing.required_tools)}.\n"
+                if existing is not None
+                else ""
+            )
+            + "Required JSON keys: id,name,description,scope,triggers,intents,"
             "required_capabilities,required_tools,runtime_constraints,"
             "permission_requirements,policy_hints,workflow_steps,"
             "verification_checks. Scope must be an object with kind global or "
@@ -285,6 +295,14 @@ class SkillDistillationManager:
         if existing is not None:
             proposed["id"] = existing.id
             proposed["version"] = _next_patch_version(existing.version)
+            # Dependency identifiers are HIRDA registry contracts, not prose for
+            # the distiller to rewrite. Skill evolution may improve workflow,
+            # policy, and verification, but it must preserve canonical
+            # capability/tool ids until HIRDA explicitly evolves the binding.
+            proposed["required_capabilities"] = list(
+                existing.required_capabilities
+            )
+            proposed["required_tools"] = list(existing.required_tools)
             operation = "update"
         else:
             proposed["version"] = "0.1.0"
