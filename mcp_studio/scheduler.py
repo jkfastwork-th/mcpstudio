@@ -112,6 +112,15 @@ class Scheduler:
 
     async def schedule_once(self) -> dict[str, int]:
         async with self._schedule_lock:
+            routines = getattr(self, "routines", None)
+            if routines is not None:
+                reconcile_runs = getattr(routines, "reconcile_runs", None)
+                if callable(reconcile_runs):
+                    await reconcile_runs()
+                enqueue_due = getattr(routines, "enqueue_due", None)
+                if callable(enqueue_due):
+                    await enqueue_due()
+
             # Scheduler-managed logical workers need a heartbeat while a work item is
             # assigned. M3 will replace this with execution-aware liveness.
             await self.db.heartbeat_running_work()

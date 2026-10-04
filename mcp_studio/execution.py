@@ -1320,7 +1320,7 @@ class ExecutionSupervisor:
             )
             await self._patch_pstack_from_work(
                 item,
-                status="waiting",
+                status="verification_required",
                 execution_state="completed",
             )
             self.snapshot["completed"] += 1

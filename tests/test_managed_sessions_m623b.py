@@ -73,9 +73,9 @@ async def test_schema_v6_managed_session_tables_and_gateway_columns(tmp_path: Pa
     db = Database(str(tmp_path / "db.sqlite3"))
     await db.init()
     status = await db.schema_status()
-    assert status["current_version"] == 14
-    assert status["expected_version"] == 14
-    assert status["migrations"][-1]["name"] == "hirda-mcp-events-webhooks-v1"
+    assert status["current_version"] == 15
+    assert status["expected_version"] == 15
+    assert status["migrations"][-1]["name"] == "hirda-routines-and-certification-v1"
 
     def inspect():
         with db._connect() as conn:

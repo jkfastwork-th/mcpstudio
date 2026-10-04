@@ -847,15 +847,29 @@ class _GatewayHerdr:
         }
 
 
-    async def reconcile_disposable_task_tabs(self, *, keep_tab_ids=None):
+    async def reconcile_disposable_task_tabs(
+        self,
+        *,
+        keep_tab_ids=None,
+        close_tab_ids=None,
+    ):
         self.keep_tab_ids = set(keep_tab_ids or set())
+        self.close_tab_ids = set(close_tab_ids or set())
         return {
             "scanned": 4,
             "candidates": 1,
-            "closed": 1,
-            "kept": len(self.keep_tab_ids),
+            "closed": 0,
+            "kept": len(self.keep_tab_ids) + 1,
             "protected": 2,
-            "closed_tabs": [{"tab_id": "wH:t-stale", "status": "closed"}],
+            "uncertain": 1,
+            "uncertain_tabs": [
+                {
+                    "tab_id": "wH:t-stale",
+                    "status": "open",
+                    "reconcile_disposition": "keep_report",
+                }
+            ],
+            "closed_tabs": [],
         }
 
 
@@ -941,6 +955,97 @@ async def test_rejected_pstack_dispatch_is_retired_and_requeued():
     assert reconciled["work_id"] != old["id"]
     assert gateway.db.work_items[reconciled["work_id"]]["state"] == "queued"
     assert any(kind == "pstack.execution.requeue" for kind, _, _ in gateway.db.events)
+
+
+@pytest.mark.asyncio
+async def test_runtime_not_ready_rotates_tab_and_selects_next_candidate():
+    gateway = object.__new__(GatewaySessionManager)
+    gateway.settings = SimpleNamespace(
+        studio=SimpleNamespace(worker_server_id="serena-8001")
+    )
+    gateway.db = _GatewayDb()
+    gateway.cognitive_router = _GatewayCognitiveRouter()
+    gateway.herdr = _GatewayHerdr()
+
+    old = await gateway.db.create_work(
+        {
+            "label": "old runtime-not-ready work",
+            "workspace": "/work/mcp-studio",
+            "priority": 50,
+            "lease_mode": "write",
+            "pane": "wH:p-old",
+            "agent": "claude",
+            "dispatch_mode": "herdr",
+            "instruction": "continue",
+            "metadata": {
+                "pstack_task_id": "TASK-FALLBACK",
+                "pstack_trace_id": "TRACE-FALLBACK",
+            },
+        },
+        "serena-8001",
+    )
+    gateway.db.work_items[old["id"]].update(
+        {
+            "state": "running",
+            "execution_state": "stalled",
+            "failure_class": "runtime_not_ready",
+            "execution": {
+                "runtime_readiness": {
+                    "ready": False,
+                    "reasons": ["pending_prompt:onboarding"],
+                }
+            },
+        }
+    )
+
+    task = {
+        "task_id": "TASK-FALLBACK",
+        "trace_id": "TRACE-FALLBACK",
+        "goal": "Continue on fallback runtime",
+        "status": "blocked",
+        "work_id": old["id"],
+        "runtime": "claude",
+        "workflow_directive": {"prompt": "continue"},
+        "managed_session_id": "ms-1",
+        "workspace_key": "mcp-studio",
+        "execution_environment": {
+            "mode": "private",
+            "status": "active",
+            "lifecycle": "disposable",
+        },
+        "herdr_tab": {
+            "status": "open",
+            "owner": "pstack",
+            "persistent": False,
+            "workspace_id": "wH",
+            "tab_id": "wH:t-old",
+            "root_pane_id": "wH:p-old",
+            "label": "[PStack] TASK-FALLBACK",
+        },
+    }
+
+    reconciled = await gateway._ensure_pstack_execution_work(
+        "gws-1",
+        task,
+        managed_session={
+            "id": "ms-1",
+            "workspace_key": "mcp-studio",
+            "project_path": "/work/mcp-studio",
+        },
+    )
+
+    assert gateway.db.work_items[old["id"]]["state"] == "failed"
+    assert "claude" in reconciled["runtime_exclusions"]
+    assert reconciled["runtime"] == "codex"
+    assert reconciled["runtime_selection"]["excluded"] == ["claude"]
+    assert reconciled["work_id"] != old["id"]
+    assert gateway.db.work_items[reconciled["work_id"]]["requested_agent"] == "codex"
+    assert gateway.herdr.closed[0]["tab_id"] == "wH:t-old"
+    assert gateway.herdr.created
+    assert any(
+        kind == "pstack.execution.runtime_fallback"
+        for kind, _, _ in gateway.db.events
+    )
 
 
 @pytest.mark.asyncio
@@ -1144,7 +1249,8 @@ async def test_terminal_reconciliation_closes_terminal_and_sweeps_stale_tabs():
     result = await gateway.reconcile_pstack_terminal_tabs()
 
     assert result["terminal_closed"] == 1
-    assert result["stale"]["closed"] == 1
+    assert result["stale"]["closed"] == 0
+    assert result["stale"]["uncertain"] == 1
     assert gateway.db.metadata["active_pstack_task"]["herdr_tab"]["status"] == "closed"
     assert gateway.herdr.closed[0]["tab_id"] == "wH:t-done"
     assert gateway.herdr.keep_tab_ids == set()

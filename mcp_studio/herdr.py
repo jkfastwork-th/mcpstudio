@@ -769,17 +769,29 @@ class HerdrManager:
         self,
         *,
         keep_tab_ids: set[str] | None = None,
+        close_tab_ids: set[str] | None = None,
     ) -> dict[str, Any]:
-        """Close stale PStack-owned tabs without touching persistent/user tabs."""
+        """Reconcile disposable PStack tabs without guessing ownership state.
+
+        Only tabs explicitly named in close_tab_ids are auto-closed. PStack-labelled
+        tabs that are neither protected nor referenced by canonical task state are
+        kept and reported as uncertain so a restart cannot destroy recoverable work.
+        """
         keep = {
             str(tab_id).strip()
             for tab_id in (keep_tab_ids or set())
+            if str(tab_id).strip()
+        }
+        close = {
+            str(tab_id).strip()
+            for tab_id in (close_tab_ids or set())
             if str(tab_id).strip()
         }
         payload = await self._run_cli_json("tab", "list")
         live_tabs = self._tabs_from_cli(payload)
         persistent = self._persistent_tab_labels()
         closed: list[dict[str, Any]] = []
+        uncertain: list[dict[str, Any]] = []
         kept = 0
         protected = 0
         candidates = 0
@@ -798,26 +810,29 @@ class HerdrManager:
                 continue
             if not label.startswith("[PStack] "):
                 continue
+
             candidates += 1
-            closed.append(
-                await self.close_task_tab(
-                    {
-                        "status": "open",
-                        "owner": "pstack",
-                        "persistent": False,
-                        "workspace_id": live.get("workspace_id"),
-                        "tab_id": tab_id,
-                        "label": label,
-                    }
-                )
-            )
+            candidate = {
+                "status": "open",
+                "owner": "pstack",
+                "persistent": False,
+                "workspace_id": live.get("workspace_id"),
+                "tab_id": tab_id,
+                "label": label,
+            }
+            if tab_id not in close:
+                uncertain.append({**candidate, "reconcile_disposition": "keep_report"})
+                continue
+            closed.append(await self.close_task_tab(candidate))
 
         return {
             "scanned": len(live_tabs),
             "candidates": candidates,
             "closed": len(closed),
-            "kept": kept,
+            "kept": kept + len(uncertain),
             "protected": protected,
+            "uncertain": len(uncertain),
+            "uncertain_tabs": uncertain,
             "closed_tabs": closed,
         }
 

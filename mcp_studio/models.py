@@ -105,6 +105,33 @@ class WorkSubmit(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+RoutineCadence = Literal["manual", "interval"]
+
+
+class RoutineCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    enabled: bool = True
+    cadence: RoutineCadence = "manual"
+    interval_seconds: int | None = Field(default=None, ge=60, le=31536000)
+    work: WorkSubmit
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RoutineUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    enabled: bool | None = None
+    interval_seconds: int | None = Field(default=None, ge=60, le=31536000)
+    metadata: dict[str, Any] | None = None
+
+
+class AIQualityCertificationSubmit(BaseModel):
+    score: float = Field(ge=0.0, le=1.0)
+    passed: bool
+    evaluator: str = Field(default="human", min_length=1, max_length=120)
+    rubric: str | None = Field(default=None, max_length=4000)
+    notes: str | None = Field(default=None, max_length=8000)
+
+
 class WorkFinish(BaseModel):
     result: dict[str, Any] = Field(default_factory=dict)
 

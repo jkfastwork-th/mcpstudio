@@ -32,6 +32,7 @@ from .agent_runtimes import AgentRuntimeInventory
 from .models import (
     SessionCreate, SessionHeartbeat, WorkerBind, WorkerHeartbeat, WorkerStatePatch,
     WorkSubmit, WorkFinish, WorkFail, WorkDetach, AlertAcknowledge, RetryDispatch, FaultInject, BatchDispatch,
+    RoutineCreate, RoutineUpdate, AIQualityCertificationSubmit,
     SessionReclaim, OAuthClientCreate, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate, ManagedSessionMachineUpdate, MachineCapabilityRouteRequest, MachineEnrollmentApprove, MachineEnrollmentReject, DevicePairingStart, DevicePairingVerify, DevicePairingApprove, DevicePairingReject, DeviceRevoke,
     GraftConfigureRequest, GraftQueryRequest, GraftRollbackRequest, ComputerRepairRequest, ManagedGatewayAttach, GatewayContextUsageReport, SessionHandoffPrepareRequest,
     CapsuleCreate, CapsuleStageUpdate, CapsuleHandoff, CapsuleHandoffAck, CapsuleContractUpdate,
@@ -44,6 +45,8 @@ from .execution_environments import plan_execution_environment
 from .workers import WorkerManager
 from .scheduler import Scheduler
 from .execution import ExecutionSupervisor
+from .routines import RoutineManager
+from .certification import certify_execution, certify_ai_quality
 from .connectivity import ConnectivityManager
 from .oauth import OAuthManager, OAuthError
 from .operations import OperationsManager
@@ -194,6 +197,14 @@ cognitive_router = CognitiveRouter(
     hermes_groups,
 )
 gateway_sessions.cognitive_router = cognitive_router
+routines = RoutineManager(
+    settings,
+    db,
+    cognitive_router=cognitive_router,
+    scheduler=scheduler,
+    execution=execution,
+)
+scheduler.routines = routines
 cognitive_observability = CognitiveObservability(
     db,
     agent_runtimes,
@@ -3966,6 +3977,198 @@ async def acknowledge_alert(alert_id: int, payload: AlertAcknowledge):
     )
     return item
 
+
+
+async def _prepare_routine_work_template(payload: WorkSubmit) -> dict[str, Any]:
+    if payload.dispatch_mode == "herdr" and not (payload.instruction or "").strip():
+        raise HTTPException(status_code=400, detail="Herdr dispatch requires instruction")
+    server_id = payload.server_id or settings.studio.worker_server_id
+    if server_id != settings.studio.worker_server_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Routine Scheduler currently supports only studio.worker_server_id",
+        )
+    try:
+        work_payload = skill_runtime.enrich_work_payload(payload.model_dump())
+    except SkillRequestError as exc:
+        raise HTTPException(status_code=400, detail="skill_request_invalid") from exc
+    metadata = work_payload.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    work_payload["metadata"] = metadata
+    metadata["capability_resolution"] = capability_resolver.resolve_skill_metadata(
+        metadata
+    )
+    skill_resolution = metadata.get("skill_resolution")
+    skill_resolution = (
+        skill_resolution if isinstance(skill_resolution, dict) else {}
+    )
+    constraints = list(skill_resolution.get("runtime_constraints") or ())
+    if any(
+        str(item).strip().casefold()
+        in {"computer.private", "private_computer", "isolation.private", "isolation.task"}
+        for item in constraints
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Routine templates cannot pre-claim private task isolation; "
+                "use a PStack-triggered routine workflow for private execution."
+            ),
+        )
+    metadata["execution_environment"] = plan_execution_environment(
+        workspace=str(work_payload.get("workspace") or "") or None,
+        runtime_constraints=constraints,
+        pstack_task=False,
+    )
+    return work_payload
+
+
+@app.get("/api/routines")
+async def list_routines(enabled: bool | None = None):
+    return {
+        "schema": "hirda-routines-v1",
+        "items": await db.list_routines(enabled=enabled),
+    }
+
+
+@app.post("/api/routines")
+async def create_routine(payload: RoutineCreate):
+    work_template = await _prepare_routine_work_template(payload.work)
+    item = await routines.create(
+        {
+            "name": payload.name,
+            "enabled": payload.enabled,
+            "cadence": payload.cadence,
+            "interval_seconds": payload.interval_seconds,
+            "work_template": work_template,
+            "metadata": payload.metadata,
+        }
+    )
+    await db.add_event(
+        "routine.created",
+        f"Routine {item['id']} created.",
+        data={
+            "routine_id": item["id"],
+            "cadence": item["cadence"],
+            "enabled": item["enabled"],
+        },
+        stream_id=f"routine:{item['id']}",
+        correlation_id=item["id"],
+    )
+    return item
+
+
+@app.get("/api/routines/{routine_id}")
+async def get_routine(routine_id: str):
+    try:
+        return await db.get_routine(routine_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown routine")
+
+
+@app.patch("/api/routines/{routine_id}")
+async def update_routine(routine_id: str, payload: RoutineUpdate):
+    patch = payload.model_dump(exclude_none=True)
+    try:
+        return await db.update_routine(routine_id, patch)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown routine")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/routines/{routine_id}/run")
+async def trigger_routine(routine_id: str):
+    try:
+        return await routines.trigger(routine_id, trigger="manual")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown routine")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/routines/{routine_id}/runs")
+async def list_routine_runs(routine_id: str, limit: int = 100):
+    try:
+        await db.get_routine(routine_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown routine")
+    return {
+        "schema": "hirda-routine-runs-v1",
+        "routine_id": routine_id,
+        "items": await db.list_routine_runs(routine_id, limit=min(max(limit, 1), 500)),
+    }
+
+
+@app.post("/api/routines/run-due")
+async def run_due_routines():
+    result = await routines.enqueue_due()
+    scheduler.kick()
+    execution.kick()
+    return {"schema": "hirda-routine-tick-v1", **result}
+
+
+async def _canonical_pstack_task_for_work(work: dict[str, Any]) -> dict[str, Any] | None:
+    metadata = work.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    task_id = str(metadata.get("pstack_task_id") or "").strip()
+    if not task_id:
+        return None
+    rows: list[dict[str, Any]] = list(await db.list_sessions(limit=500))
+    rows.extend(await db.list_gateway_sessions(limit=500))
+    rows.extend(await db.list_managed_sessions(limit=500))
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        row_metadata = row.get("metadata")
+        row_metadata = row_metadata if isinstance(row_metadata, dict) else {}
+        task = row_metadata.get("active_pstack_task")
+        if isinstance(task, dict) and str(task.get("task_id") or "").strip() == task_id:
+            candidates.append(task)
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda task: (
+            int(((task.get("lifecycle") or {}).get("revision") or 0)),
+            float(((task.get("lifecycle") or {}).get("updated_at") or 0.0)),
+        ),
+    )
+
+
+@app.get("/api/certification/execution/{work_id}")
+async def execution_certification(work_id: str):
+    try:
+        work = await db.get_work(work_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown work item")
+    task = await _canonical_pstack_task_for_work(work)
+    return certify_execution(work, pstack_task=task)
+
+
+@app.post("/api/certification/ai-quality/{work_id}")
+async def ai_quality_certification(
+    work_id: str,
+    payload: AIQualityCertificationSubmit,
+):
+    try:
+        work = await db.get_work(work_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown work item")
+    task = await _canonical_pstack_task_for_work(work)
+    execution_cert = certify_execution(work, pstack_task=task)
+    result = certify_ai_quality(
+        work,
+        payload.model_dump(),
+        execution_certification=execution_cert,
+    )
+    await db.add_event(
+        "certification.ai_quality",
+        f"AI quality certification for {work_id}: {result['outcome']}.",
+        data=result,
+        stream_id=f"work:{work_id}",
+        correlation_id=work_id,
+    )
+    return result
 
 @app.post("/api/scheduler/run")
 async def run_scheduler_once():

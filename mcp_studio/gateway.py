@@ -3217,7 +3217,7 @@ class GatewaySessionManager:
                 "keep_tab_count": len(keep_tab_ids),
                 "stale": {
                     key: stale.get(key)
-                    for key in ("scanned", "candidates", "closed", "kept", "protected")
+                    for key in ("scanned", "candidates", "closed", "kept", "protected", "uncertain")
                 },
             },
         )
@@ -3415,7 +3415,7 @@ class GatewaySessionManager:
             # Scheduler assignment/reservation is not proof of live execution.
             return "waiting", execution_state or "assigned"
         if work_state == "completed":
-            return "waiting", execution_state or "completed"
+            return "verification_required", execution_state or "completed"
         if work_state == "failed":
             return "failed", execution_state or "failed"
         if work_state in {"cancelled", "detached"}:
@@ -3431,6 +3431,23 @@ class GatewaySessionManager:
         if isinstance(result, dict) and result.get("error"):
             return True
         return execution.get("dispatch_rejected") is True
+
+
+    @staticmethod
+    def _pstack_work_needs_runtime_fallback(work: dict[str, Any]) -> bool:
+        failure_class = str(work.get("failure_class") or "").strip().casefold()
+        execution_state = str(work.get("execution_state") or "").strip().casefold()
+        execution = work.get("execution")
+        execution = execution if isinstance(execution, dict) else {}
+        readiness = execution.get("runtime_readiness")
+        readiness = readiness if isinstance(readiness, dict) else {}
+        return (
+            failure_class == "runtime_not_ready"
+            or (
+                execution_state == "stalled"
+                and readiness.get("ready") is False
+            )
+        )
 
     async def _select_pstack_execution_runtime(
         self,
@@ -3486,7 +3503,22 @@ class GatewaySessionManager:
                 "authority": "hirda",
             }
 
+        candidates = [
+            str(item).strip().casefold()
+            for item in (plan.get("candidates") or [])
+            if str(item).strip()
+        ]
+        excluded = {
+            str(item).strip().casefold()
+            for item in (task.get("runtime_exclusions") or [])
+            if str(item).strip()
+        }
         runtime = str(plan.get("runtime") or "").strip().casefold() or None
+        if runtime in excluded:
+            runtime = next(
+                (candidate for candidate in candidates if candidate not in excluded),
+                None,
+            )
         return {
             "runtime": runtime,
             "reason": None if runtime else "runtime_unavailable",
@@ -3494,7 +3526,8 @@ class GatewaySessionManager:
             "lane": plan.get("lane"),
             "semantic_routing": plan.get("semantic_routing"),
             "supervisor_policy": plan.get("supervisor_policy"),
-            "candidates": list(plan.get("candidates") or []),
+            "candidates": candidates,
+            "excluded": sorted(excluded),
         }
 
     async def _ensure_pstack_execution_work(
@@ -3527,7 +3560,66 @@ class GatewaySessionManager:
             except KeyError:
                 work = None
             if work is not None:
-                if self._pstack_work_has_rejected_dispatch(work):
+                if self._pstack_work_needs_runtime_fallback(work):
+                    previous_runtime = str(
+                        work.get("agent")
+                        or work.get("requested_agent")
+                        or task_value.get("runtime")
+                        or ""
+                    ).strip().casefold()
+                    if str(work.get("state") or "").casefold() == "running":
+                        try:
+                            await self.db.finish_work(
+                                existing_work_id,
+                                state="failed",
+                                error="Runtime readiness failed; safe HIRDA fallback requeue",
+                            )
+                        except (KeyError, ValueError):
+                            pass
+                    closed_task = await self._close_pstack_herdr_tab(task_value)
+                    exclusions = {
+                        str(item).strip().casefold()
+                        for item in (task_value.get("runtime_exclusions") or [])
+                        if str(item).strip()
+                    }
+                    if previous_runtime:
+                        exclusions.add(previous_runtime)
+                    task_value = {
+                        **closed_task,
+                        "work_id": None,
+                        "status": "waiting",
+                        "execution_state": "runtime_fallback",
+                        "runtime_exclusions": sorted(exclusions),
+                        "fallback_from_work_id": existing_work_id,
+                    }
+                    task_value = await self._open_pstack_herdr_tab(
+                        task_value,
+                        managed_session=managed_session,
+                    )
+                    await self.db.add_event(
+                        "pstack.execution.runtime_fallback",
+                        f"PStack task {task_id} is failing over from {previous_runtime or 'unknown'}.",
+                        severity="warning",
+                        data={
+                            "task_id": task_id,
+                            "trace_id": trace_id,
+                            "work_id": existing_work_id,
+                            "excluded_runtimes": sorted(exclusions),
+                            "actor": "hirda",
+                            "phase": "runtime_fallback",
+                            "title": "Runtime fallback",
+                            "detail": (
+                                "HIRDA retired a runtime-not-ready work item, "
+                                "rotated the disposable task tab, and will select "
+                                "the next eligible runtime candidate."
+                            ),
+                            "status": "waiting",
+                            "trace_status": "waiting",
+                        },
+                        stream_id=f"pstack:{trace_id}",
+                        correlation_id=trace_id,
+                    )
+                elif self._pstack_work_has_rejected_dispatch(work):
                     if str(work.get("state") or "").casefold() == "running":
                         try:
                             await self.db.finish_work(

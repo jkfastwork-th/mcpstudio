@@ -321,7 +321,7 @@ async def test_close_task_tab_refuses_fern_and_nova():
 
 
 @pytest.mark.asyncio
-async def test_reconcile_disposable_task_tabs_closes_only_stale_pstack_tabs():
+async def test_reconcile_disposable_task_tabs_keeps_uncertain_orphans_by_default():
     manager = object.__new__(HerdrManager)
     closed = []
 
@@ -346,7 +346,39 @@ async def test_reconcile_disposable_task_tabs_closes_only_stale_pstack_tabs():
         keep_tab_ids={"wH:t3"}
     )
 
+    assert closed == []
+    assert result["closed"] == 0
+    assert result["kept"] == 2
+    assert result["protected"] == 2
+    assert result["uncertain"] == 1
+    assert result["uncertain_tabs"][0]["tab_id"] == "wH:t4"
+    assert result["uncertain_tabs"][0]["reconcile_disposition"] == "keep_report"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_disposable_task_tabs_closes_only_explicit_terminal_tabs():
+    manager = object.__new__(HerdrManager)
+    closed = []
+
+    async def run_cli(*args, timeout_seconds=15.0):
+        if args == ("tab", "list"):
+            return {
+                "result": {"tabs": [
+                    {"tab_id": "wH:t3", "label": "[PStack] TASK-A", "workspace_id": "wH"},
+                    {"tab_id": "wH:t4", "label": "[PStack] TASK-DONE", "workspace_id": "wH"},
+                ]}
+            }
+        if args[:2] == ("tab", "close"):
+            closed.append(args[2])
+            return {"ok": True}
+        raise AssertionError(args)
+
+    manager._run_cli_json = run_cli
+    result = await manager.reconcile_disposable_task_tabs(
+        keep_tab_ids={"wH:t3"},
+        close_tab_ids={"wH:t4"},
+    )
+
     assert closed == ["wH:t4"]
     assert result["closed"] == 1
-    assert result["kept"] == 1
-    assert result["protected"] == 2
+    assert result["uncertain"] == 0

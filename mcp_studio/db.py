@@ -347,6 +347,37 @@ class Database:
                         next_retry_at TEXT,
                         execution_json TEXT NOT NULL DEFAULT '{}'
                     );
+                    CREATE TABLE IF NOT EXISTS routines (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        cadence TEXT NOT NULL DEFAULT 'manual',
+                        interval_seconds INTEGER,
+                        work_template_json TEXT NOT NULL DEFAULT '{}',
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        next_run_at TEXT,
+                        last_run_at TEXT,
+                        last_status TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS routine_runs (
+                        id TEXT PRIMARY KEY,
+                        routine_id TEXT NOT NULL,
+                        scheduled_for TEXT,
+                        started_at TEXT NOT NULL,
+                        finished_at TEXT,
+                        status TEXT NOT NULL,
+                        work_id TEXT,
+                        pstack_task_id TEXT,
+                        evidence_json TEXT NOT NULL DEFAULT '{}',
+                        error TEXT,
+                        FOREIGN KEY(routine_id) REFERENCES routines(id)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_routines_due
+                        ON routines(enabled, next_run_at);
+                    CREATE INDEX IF NOT EXISTS idx_routine_runs_routine
+                        ON routine_runs(routine_id, started_at DESC);
                     CREATE TABLE IF NOT EXISTS connectivity_tunnels (
                         id TEXT PRIMARY KEY,
                         provider TEXT NOT NULL,
@@ -812,6 +843,10 @@ class Database:
                     "INSERT OR IGNORE INTO schema_migrations(version, name, applied_at) VALUES(14, 'hirda-mcp-events-webhooks-v1', ?)",
                     (now,),
                 )
+                db.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version, name, applied_at) VALUES(15, 'hirda-routines-and-certification-v1', ?)",
+                    (now,),
+                )
 
                 db.executescript(
                     """
@@ -1262,7 +1297,7 @@ class Database:
                 integrity = db.execute("PRAGMA quick_check").fetchone()[0]
                 return {
                     "current_version": int(rows[-1]["version"]) if rows else 0,
-                    "expected_version": 14,
+                    "expected_version": 15,
                     "integrity": integrity,
                     "migrations": [dict(r) for r in rows],
                 }
@@ -2539,6 +2574,332 @@ class Database:
             return updated
 
         return await self._run(op)
+
+
+    @staticmethod
+    def _routine_item(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["enabled"] = bool(item.get("enabled"))
+        item["work_template"] = json.loads(item.pop("work_template_json") or "{}")
+        item["metadata"] = json.loads(item.pop("metadata_json") or "{}")
+        return item
+
+    async def create_routine(self, payload: dict[str, Any]) -> dict[str, Any]:
+        routine_id = f"routine-{uuid.uuid4().hex[:16]}"
+        now = _now()
+        cadence = str(payload.get("cadence") or "manual").strip().casefold()
+        interval_seconds = payload.get("interval_seconds")
+        next_run_at = None
+        if bool(payload.get("enabled", True)) and cadence == "interval":
+            seconds = int(interval_seconds or 0)
+            if seconds < 60:
+                raise ValueError("interval routine requires interval_seconds >= 60")
+            next_run_at = (
+                datetime.now(timezone.utc) + timedelta(seconds=seconds)
+            ).isoformat()
+
+        def op() -> None:
+            with self._connect() as db:
+                db.execute(
+                    """INSERT INTO routines
+                    (id, name, enabled, cadence, interval_seconds,
+                     work_template_json, metadata_json, created_at, updated_at,
+                     next_run_at, last_run_at, last_status)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        routine_id,
+                        str(payload["name"]).strip(),
+                        1 if payload.get("enabled", True) else 0,
+                        cadence,
+                        int(interval_seconds) if interval_seconds is not None else None,
+                        json.dumps(payload.get("work_template") or {}, ensure_ascii=False),
+                        json.dumps(payload.get("metadata") or {}, ensure_ascii=False),
+                        now,
+                        now,
+                        next_run_at,
+                        None,
+                        None,
+                    ),
+                )
+
+        await self._run(op)
+        return await self.get_routine(routine_id)
+
+    async def get_routine(self, routine_id: str) -> dict[str, Any]:
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT * FROM routines WHERE id=?",
+                    (routine_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(routine_id)
+                return self._routine_item(row)
+
+        return await self._run(op)
+
+    async def list_routines(self, *, enabled: bool | None = None) -> list[dict[str, Any]]:
+        def op() -> list[dict[str, Any]]:
+            with self._connect() as db:
+                if enabled is None:
+                    rows = db.execute(
+                        "SELECT * FROM routines ORDER BY created_at DESC"
+                    ).fetchall()
+                else:
+                    rows = db.execute(
+                        "SELECT * FROM routines WHERE enabled=? ORDER BY created_at DESC",
+                        (1 if enabled else 0,),
+                    ).fetchall()
+                return [self._routine_item(row) for row in rows]
+
+        return await self._run(op)
+
+    async def update_routine(
+        self,
+        routine_id: str,
+        patch: dict[str, Any],
+    ) -> dict[str, Any]:
+        current = await self.get_routine(routine_id)
+        name = str(patch.get("name", current["name"])).strip()
+        enabled = bool(patch.get("enabled", current["enabled"]))
+        interval_seconds = patch.get(
+            "interval_seconds",
+            current.get("interval_seconds"),
+        )
+        metadata = patch.get("metadata", current.get("metadata") or {})
+        cadence = str(current.get("cadence") or "manual").casefold()
+        now = _now()
+        next_run_at = current.get("next_run_at")
+        if not enabled:
+            next_run_at = None
+        elif cadence == "interval":
+            seconds = int(interval_seconds or 0)
+            if seconds < 60:
+                raise ValueError("interval routine requires interval_seconds >= 60")
+            next_run_at = (
+                datetime.now(timezone.utc) + timedelta(seconds=seconds)
+            ).isoformat()
+
+        def op() -> None:
+            with self._connect() as db:
+                db.execute(
+                    """UPDATE routines
+                       SET name=?, enabled=?, interval_seconds=?, metadata_json=?,
+                           updated_at=?, next_run_at=?
+                       WHERE id=?""",
+                    (
+                        name,
+                        1 if enabled else 0,
+                        int(interval_seconds) if interval_seconds is not None else None,
+                        json.dumps(metadata or {}, ensure_ascii=False),
+                        now,
+                        next_run_at,
+                        routine_id,
+                    ),
+                )
+
+        await self._run(op)
+        return await self.get_routine(routine_id)
+
+    async def due_routines(
+        self,
+        *,
+        now: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        due_at = now or _now()
+
+        def op() -> list[dict[str, Any]]:
+            with self._connect() as db:
+                rows = db.execute(
+                    """SELECT * FROM routines
+                       WHERE enabled=1
+                         AND cadence='interval'
+                         AND next_run_at IS NOT NULL
+                         AND next_run_at<=?
+                       ORDER BY next_run_at ASC
+                       LIMIT ?""",
+                    (due_at, max(1, int(limit))),
+                ).fetchall()
+                return [self._routine_item(row) for row in rows]
+
+        return await self._run(op)
+
+    async def create_routine_run(
+        self,
+        *,
+        routine_id: str,
+        scheduled_for: str | None,
+        pstack_task_id: str,
+    ) -> dict[str, Any]:
+        run_id = f"rrun-{uuid.uuid4().hex[:16]}"
+        started_at = _now()
+
+        def op() -> None:
+            with self._connect() as db:
+                db.execute(
+                    """INSERT INTO routine_runs
+                       (id, routine_id, scheduled_for, started_at, status,
+                        pstack_task_id, evidence_json)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (
+                        run_id,
+                        routine_id,
+                        scheduled_for,
+                        started_at,
+                        "queued",
+                        pstack_task_id,
+                        "{}",
+                    ),
+                )
+
+        await self._run(op)
+        return await self.get_routine_run(run_id)
+
+    async def get_routine_run(self, run_id: str) -> dict[str, Any]:
+        def op() -> dict[str, Any]:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT * FROM routine_runs WHERE id=?",
+                    (run_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(run_id)
+                item = dict(row)
+                item["evidence"] = json.loads(
+                    item.pop("evidence_json") or "{}"
+                )
+                return item
+
+        return await self._run(op)
+
+    async def list_routine_runs(
+        self,
+        routine_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        def op() -> list[dict[str, Any]]:
+            with self._connect() as db:
+                rows = db.execute(
+                    """SELECT * FROM routine_runs
+                       WHERE routine_id=?
+                       ORDER BY started_at DESC
+                       LIMIT ?""",
+                    (routine_id, max(1, int(limit))),
+                ).fetchall()
+                result: list[dict[str, Any]] = []
+                for row in rows:
+                    item = dict(row)
+                    item["evidence"] = json.loads(
+                        item.pop("evidence_json") or "{}"
+                    )
+                    result.append(item)
+                return result
+
+        return await self._run(op)
+
+    async def bind_routine_run_work(
+        self,
+        *,
+        run_id: str,
+        work_id: str,
+    ) -> dict[str, Any]:
+        now = _now()
+
+        def op() -> None:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT routine_id FROM routine_runs WHERE id=?",
+                    (run_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(run_id)
+                routine = db.execute(
+                    "SELECT cadence, interval_seconds FROM routines WHERE id=?",
+                    (row["routine_id"],),
+                ).fetchone()
+                next_run_at = None
+                if (
+                    routine is not None
+                    and routine["cadence"] == "interval"
+                    and int(routine["interval_seconds"] or 0) >= 60
+                ):
+                    next_run_at = (
+                        datetime.now(timezone.utc)
+                        + timedelta(seconds=int(routine["interval_seconds"]))
+                    ).isoformat()
+                db.execute(
+                    "UPDATE routine_runs SET work_id=?, status='running' WHERE id=?",
+                    (work_id, run_id),
+                )
+                db.execute(
+                    """UPDATE routines
+                       SET last_run_at=?, last_status='running', updated_at=?,
+                           next_run_at=?
+                       WHERE id=?""",
+                    (now, now, next_run_at, row["routine_id"]),
+                )
+
+        await self._run(op)
+        return await self.get_routine_run(run_id)
+
+    async def finish_routine_run(
+        self,
+        *,
+        run_id: str,
+        status: str,
+        evidence: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        status_key = str(status or "").strip().casefold()
+        if status_key not in {"completed", "failed", "cancelled"}:
+            raise ValueError("routine run terminal status required")
+        now = _now()
+
+        def op() -> None:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT routine_id FROM routine_runs WHERE id=?",
+                    (run_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(run_id)
+                routine = db.execute(
+                    "SELECT cadence, interval_seconds FROM routines WHERE id=?",
+                    (row["routine_id"],),
+                ).fetchone()
+                next_run_at = None
+                if (
+                    routine is not None
+                    and routine["cadence"] == "interval"
+                    and int(routine["interval_seconds"] or 0) >= 60
+                ):
+                    next_run_at = (
+                        datetime.now(timezone.utc)
+                        + timedelta(seconds=int(routine["interval_seconds"]))
+                    ).isoformat()
+                db.execute(
+                    """UPDATE routine_runs
+                       SET status=?, finished_at=?, evidence_json=?, error=?
+                       WHERE id=?""",
+                    (
+                        status_key,
+                        now,
+                        json.dumps(evidence or {}, ensure_ascii=False),
+                        error,
+                        run_id,
+                    ),
+                )
+                db.execute(
+                    """UPDATE routines
+                       SET last_run_at=?, last_status=?, updated_at=?, next_run_at=?
+                       WHERE id=?""",
+                    (now, status_key, now, next_run_at, row["routine_id"]),
+                )
+
+        await self._run(op)
+        return await self.get_routine_run(run_id)
 
     async def create_work(self, payload: dict[str, Any], default_server_id: str) -> dict[str, Any]:
         work_id = f"work-{uuid.uuid4().hex[:16]}"
