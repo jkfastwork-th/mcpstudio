@@ -1562,6 +1562,23 @@ def test_gateway_tool_dispatch_requires_existing_pstack_task():
     assert 'goal=f"Engineering work in' not in dispatch
 
 
+def test_gateway_backend_dispatch_is_pstack_gated_and_finalized():
+    import inspect
+
+    source = inspect.getsource(GatewaySessionManager.proxy_existing)
+    start = source.index("backend_pstack_task = None")
+    end = source.index("\n        pstack_task = None", start)
+    backend = source[start:end]
+
+    assert '"PSTACK_TASK_REQUIRED"' in backend
+    assert "pstack_workflow_gate(" in backend
+    assert "await self._record_active_pstack_tool(" in backend
+    assert backend.index("pstack_workflow_gate(") < backend.index(
+        "self.machine_router.call_backend_tool("
+    )
+    assert backend.count("await self._finalize_pstack_tool(") == 3
+
+
 @pytest.mark.asyncio
 async def test_resume_expired_trace_creates_new_task_with_lineage(monkeypatch):
     expired_trace = {

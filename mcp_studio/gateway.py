@@ -6576,6 +6576,9 @@ class GatewaySessionManager:
                 or (self.machine_router is None and self.integrations is not None and self.integrations.is_backend_tool(tool_name))
             )
         ):
+            backend_pstack_task = None
+            backend_pstack_managed = None
+            backend_pstack_tool_class = None
             if not session.get("managed_session_id"):
                 return local_tool_response(
                     {
@@ -6613,6 +6616,88 @@ class GatewaySessionManager:
                         },
                         is_error=True,
                     )
+                backend_pstack_managed = managed_session
+                backend_pstack_tool_class = str(declared_category or "").strip().casefold()
+                if backend_pstack_tool_class not in {"read", "write", "execute", "destructive"}:
+                    backend_pstack_tool_class = classify_tool(tool_name, tool_args)
+                if self.integrations is not None:
+                    backend_pstack_task = await self._active_pstack_gateway_task(
+                        gateway_session_id,
+                        managed_session=backend_pstack_managed,
+                    )
+                    if backend_pstack_task:
+                        backend_lifecycle = ensure_pstack_lifecycle(
+                            backend_pstack_task.get("lifecycle"),
+                            workflow=str(backend_pstack_task.get("workflow") or "feature"),
+                        )
+                        if (
+                            str(backend_pstack_task.get("status") or "").casefold()
+                            == "completed"
+                            or str(backend_lifecycle.get("status") or "").casefold()
+                            == "completed"
+                        ):
+                            backend_pstack_task = None
+                    if not backend_pstack_task:
+                        return local_tool_response(
+                            {
+                                "error": "PSTACK_TASK_REQUIRED",
+                                "message": (
+                                    "HIRDA backend tool dispatch is fail-closed because no active "
+                                    "Pstack task is bound to this workspace."
+                                ),
+                                "tool": tool_name,
+                                "managed_session_id": session.get("managed_session_id"),
+                            },
+                            is_error=True,
+                        )
+                    if backend_pstack_task.get("lifecycle") != backend_lifecycle:
+                        backend_pstack_task = {
+                            **backend_pstack_task,
+                            "lifecycle": backend_lifecycle,
+                        }
+                        await self._persist_active_pstack_task(
+                            gateway_session_id,
+                            backend_pstack_task,
+                        )
+                    backend_gate = pstack_workflow_gate(
+                        backend_lifecycle,
+                        tool_class=backend_pstack_tool_class,
+                    )
+                    if not backend_gate.get("allowed"):
+                        return local_tool_response(
+                            {
+                                "error": backend_gate.get("code")
+                                or "PSTACK_WORKFLOW_BLOCKED",
+                                "message": backend_gate.get("message")
+                                or "Pstack workflow gate blocked this backend tool.",
+                                "tool": tool_name,
+                                "tool_class": backend_pstack_tool_class,
+                                "workflow": backend_pstack_task.get("workflow"),
+                                "current_phase": backend_lifecycle.get("current_phase"),
+                                "lifecycle_status": backend_lifecycle.get("status"),
+                                "trace_id": backend_pstack_task.get("trace_id"),
+                            },
+                            is_error=True,
+                        )
+                    session = await self.db.get_gateway_session(gateway_session_id)
+                    await self._record_active_pstack_tool(
+                        session,
+                        tool_name=tool_name,
+                        status="running",
+                        detail=(
+                            f"HIRDA dispatched backend tool {tool_name} inside the "
+                            "Pstack-bound workspace."
+                        ),
+                        metadata={
+                            "argument_keys": sorted(
+                                str(key) for key in (tool_args or {})
+                            ),
+                            "pstack_required": True,
+                            "pstack_workflow": backend_pstack_task.get("workflow"),
+                            "pstack_phase": backend_lifecycle.get("current_phase"),
+                            "tool_class": backend_pstack_tool_class,
+                        },
+                    )
                 metadata = managed_session.get("metadata") if isinstance(managed_session.get("metadata"), dict) else {}
                 context = {
                     "managed_session_id": managed_session.get("id"),
@@ -6630,14 +6715,52 @@ class GatewaySessionManager:
                     result = await self.integrations.call_backend_tool(
                         tool_name, tool_args, context=context
                     )
+                if backend_pstack_task and backend_pstack_managed is not None:
+                    await self._finalize_pstack_tool(
+                        gateway_session_id,
+                        session=session,
+                        pstack_task=backend_pstack_task,
+                        pstack_managed=backend_pstack_managed,
+                        tool_name=tool_name,
+                        tool_class=backend_pstack_tool_class,
+                        status_code=200,
+                    )
                 await record_reflex_outcome(200, "integration-backend")
                 return local_backend_tool_response(result)
             except (IntegrationError, KeyError) as exc:
+                if backend_pstack_task and backend_pstack_managed is not None:
+                    try:
+                        await self._finalize_pstack_tool(
+                            gateway_session_id,
+                            session=session,
+                            pstack_task=backend_pstack_task,
+                            pstack_managed=backend_pstack_managed,
+                            tool_name=tool_name,
+                            tool_class=backend_pstack_tool_class,
+                            status_code=500,
+                            runtime_error=f"{type(exc).__name__}: {exc}",
+                        )
+                    except Exception:
+                        pass
                 return local_tool_response(
                     {"error": type(exc).__name__, "message": str(exc), "tool": tool_name},
                     is_error=True,
                 )
             except Exception as exc:
+                if backend_pstack_task and backend_pstack_managed is not None:
+                    try:
+                        await self._finalize_pstack_tool(
+                            gateway_session_id,
+                            session=session,
+                            pstack_task=backend_pstack_task,
+                            pstack_managed=backend_pstack_managed,
+                            tool_name=tool_name,
+                            tool_class=backend_pstack_tool_class,
+                            status_code=500,
+                            runtime_error=f"{type(exc).__name__}: {exc}",
+                        )
+                    except Exception:
+                        pass
                 return local_tool_response(
                     {
                         "error": "BACKEND_TOOL_FAILED",
