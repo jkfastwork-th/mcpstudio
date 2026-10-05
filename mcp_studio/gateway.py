@@ -781,6 +781,10 @@ class GatewaySessionManager:
                             "type": "object",
                             "properties": {
                                 "title": {"type": "string", "maxLength": 240},
+                                "facebook_text": {
+                                    "type": ["string", "null"],
+                                    "maxLength": 20000,
+                                },
                                 "channels": {
                                     "type": "array",
                                     "items": {
@@ -806,6 +810,18 @@ class GatewaySessionManager:
                                 "comment_policy": {
                                     "type": "string",
                                     "enum": ["off", "track", "auto"],
+                                },
+                                "asset_policy": {
+                                    "type": "string",
+                                    "enum": ["ask_if_unspecified"],
+                                },
+                                "asset_intent": {
+                                    "type": "string",
+                                    "enum": ["generate", "none", "upload", "unspecified"],
+                                },
+                                "asset_spec": {
+                                    "type": ["object", "null"],
+                                    "additionalProperties": True,
                                 },
                                 "hold_for_asset": {"type": "boolean"},
                                 "correlation_id": {
@@ -4158,9 +4174,12 @@ class GatewaySessionManager:
                         gateway_session_id,
                         active,
                     )
+                active_status = str(active.get("status") or "").casefold()
+                lifecycle_status = str(lifecycle.get("status") or "").casefold()
                 if (
-                    str(active.get("status") or "").casefold() != "completed"
-                    and str(lifecycle.get("status") or "").casefold() != "completed"
+                    active_status
+                    not in {"completed", "failed", "expired", "cancelled", "blocked"}
+                    and lifecycle_status not in {"completed", "blocked"}
                 ):
                     return active
 
@@ -4493,11 +4512,15 @@ class GatewaySessionManager:
 
         allowed = {
             "title",
+            "facebook_text",
             "channels",
             "run_mode",
             "scheduled_at",
             "publish_policy",
             "comment_policy",
+            "asset_policy",
+            "asset_intent",
+            "asset_spec",
             "hold_for_asset",
             "correlation_id",
         }
@@ -4516,6 +4539,74 @@ class GatewaySessionManager:
         if comment_policy not in {"off", "track", "auto"}:
             raise ManagedSessionError("skill_comment_policy_invalid")
 
+        asset_policy = str(
+            parameters.get("asset_policy") or "ask_if_unspecified"
+        ).strip().casefold()
+        if asset_policy != "ask_if_unspecified":
+            raise ManagedSessionError("skill_asset_policy_invalid")
+        explicit_asset_intent = parameters.get("asset_intent")
+        if explicit_asset_intent is None:
+            instruction_key = instruction.casefold()
+            no_asset_phrases = (
+                "ไม่ต้องมีภาพ", "ไม่ต้องมีรูป", "ไม่เอาภาพ", "ไม่เอารูป",
+                "ไม่ต้องสร้างภาพ", "ไม่ต้องสร้างรูป",
+                "ไม่ต้องเจนภาพ", "ไม่ต้องเจนรูป",
+                "text only", "without image", "no image",
+            )
+            upload_asset_phrases = (
+                "ใช้ภาพที่แนบ", "ใช้รูปที่แนบ",
+                "ใช้ภาพที่อัปโหลด", "ใช้รูปที่อัปโหลด",
+                "use attached image", "use uploaded image",
+            )
+            generate_asset_phrases = (
+                "สร้างภาพด้วย", "สร้างรูปด้วย",
+                "เจนภาพด้วย", "เจนรูปด้วย",
+                "เจนภาพเอง", "เจนรูปเอง",
+                "พร้อมสร้างภาพ", "พร้อมสร้างรูป",
+                "สร้างภาพประกอบ", "มีภาพประกอบ", "พร้อมภาพประกอบ",
+                "include an image", "with an image",
+                "generate an image", "create an image for",
+            )
+            if any(phrase in instruction_key for phrase in no_asset_phrases):
+                asset_intent = "none"
+            elif any(phrase in instruction_key for phrase in upload_asset_phrases):
+                asset_intent = "upload"
+            elif any(phrase in instruction_key for phrase in generate_asset_phrases):
+                asset_intent = "generate"
+            elif bool(parameters.get("hold_for_asset", False)):
+                asset_intent = "upload"
+            else:
+                asset_intent = "unspecified"
+        else:
+            asset_intent = str(explicit_asset_intent).strip().casefold()
+        if asset_intent not in {"generate", "none", "upload", "unspecified"}:
+            raise ManagedSessionError("skill_asset_intent_invalid")
+        asset_spec = parameters.get("asset_spec")
+        if asset_spec is not None and not isinstance(asset_spec, dict):
+            raise ManagedSessionError("skill_asset_spec_invalid")
+        if asset_intent == "unspecified":
+            return {
+                "schema": "hirda-skill-run-v1",
+                "skill_id": skill_id,
+                "skill_version": skill.version,
+                "status": "needs_clarification",
+                "needs_clarification": True,
+                "clarification": "โพสต์นี้ต้องการให้สร้างภาพประกอบด้วยไหมคะ?",
+                "asset_policy": asset_policy,
+                "asset_intent": asset_intent,
+                "task_created": False,
+            }
+        if asset_intent == "generate" and asset_spec is None:
+            asset_spec = {
+                "kind": "single_image",
+                "source": "generate",
+                "aspect_ratio": "4:5",
+                "prompt": instruction,
+                "variants": 1,
+            }
+        if asset_intent == "none" and asset_spec:
+            raise ManagedSessionError("skill_asset_spec_not_allowed_for_none")
+
         backend_args = {
             "instructions": instruction,
             "channels": list(parameters.get("channels") or ["facebook"]),
@@ -4523,10 +4614,27 @@ class GatewaySessionManager:
             "scheduled_at": parameters.get("scheduled_at"),
             "publish_policy": publish_policy,
             "comment_policy": comment_policy,
-            "hold_for_asset": bool(parameters.get("hold_for_asset", False)),
+            "asset_policy": asset_policy,
+            "asset_intent": asset_intent,
+            "asset_spec": asset_spec,
+            "hold_for_asset": (
+                asset_intent == "upload"
+                or bool(parameters.get("hold_for_asset", False))
+            ),
         }
         if parameters.get("title") is not None:
             backend_args["title"] = str(parameters["title"])
+        if parameters.get("facebook_text") is not None:
+            facebook_text = parameters["facebook_text"]
+            if (
+                not isinstance(facebook_text, str)
+                or not facebook_text.strip()
+                or len(facebook_text) > 20000
+            ):
+                raise ManagedSessionError("skill_facebook_text_invalid")
+            if "facebook" not in backend_args["channels"]:
+                raise ManagedSessionError("skill_facebook_text_channel_mismatch")
+            backend_args["facebook_text"] = facebook_text
         if parameters.get("correlation_id") is not None:
             backend_args["correlation_id"] = parameters["correlation_id"]
 
@@ -4551,6 +4659,8 @@ class GatewaySessionManager:
                 "status": result.get("status"),
                 "publish_policy": publish_policy,
                 "comment_policy": comment_policy,
+                "asset_policy": asset_policy,
+                "asset_intent": asset_intent,
             },
             stream_id=f"skill:{skill_id}",
             correlation_id=correlation_id or None,
@@ -4563,6 +4673,8 @@ class GatewaySessionManager:
             "required_tools": list(skill.required_tools),
             "publish_policy": publish_policy,
             "comment_policy": comment_policy,
+            "asset_policy": asset_policy,
+            "asset_intent": asset_intent,
             "result": result,
         }
 
@@ -4776,6 +4888,100 @@ class GatewaySessionManager:
             except Exception:
                 pass
             raise
+
+        if bool(result.get("needs_clarification")):
+            clarification = str(result.get("clarification") or "").strip()
+            task_created = result.get("task_created")
+            if not clarification or task_created is not False:
+                await self.db.finish_work(
+                    work["id"],
+                    state="failed",
+                    error="skill_clarification_contract_invalid",
+                    result={
+                        "semantic_completion": {
+                            "status": "failed",
+                            "reason": "clarification_contract_invalid",
+                        },
+                        "action_verification": {
+                            "passed": False,
+                            "provider": "social-hub-task",
+                        },
+                    },
+                )
+                raise ManagedSessionError("skill_clarification_contract_invalid")
+
+            await self.db.finish_work(
+                work["id"],
+                state="completed",
+                result={
+                    "semantic_completion": {
+                        "status": "clarification_required",
+                        "reason": "asset_intent_unresolved",
+                    },
+                    "action_verification": {
+                        "passed": True,
+                        "provider": "social-hub-task",
+                        "status": "needs_clarification",
+                        "task_created": False,
+                    },
+                    "skill_action": result,
+                },
+            )
+            await self._record_pstack_lifecycle_tool_evidence(
+                gateway_session_id,
+                managed_session=managed,
+                tool_name="hirda_skill_run",
+                tool_class="execute",
+                status="passed",
+                detail=(
+                    f"Skill {skill_id} stopped before Social Hub task creation "
+                    "because asset intent requires user clarification."
+                ),
+            )
+            await self._checkpoint_active_pstack_task(
+                gateway_session_id,
+                phase="working",
+                status="passed",
+                evidence=(
+                    f"Deterministic Skill {skill_id} enforced the asset clarification "
+                    "policy without creating governed social work."
+                ),
+            )
+            await self._record_pstack_lifecycle_tool_evidence(
+                gateway_session_id,
+                managed_session=managed,
+                tool_name="hirda_skill_run.verify",
+                tool_class="execute",
+                status="passed",
+                detail=(
+                    "Verified clarification result with task_created=false and "
+                    "no Social Hub task result."
+                ),
+            )
+            await self._checkpoint_active_pstack_task(
+                gateway_session_id,
+                phase="verified",
+                status="passed",
+                evidence=(
+                    f"Skill {skill_id} clarification contract verified; "
+                    "no Social Hub task was created."
+                ),
+            )
+            terminal = await self._checkpoint_active_pstack_task(
+                gateway_session_id,
+                phase="terminal",
+                status="passed",
+                evidence=(
+                    f"Skill {skill_id} completed at clarification boundary; "
+                    "PStack lifecycle is terminal."
+                ),
+            )
+            return {
+                **result,
+                "work_id": work["id"],
+                "invocation": invocation,
+                "pstack_task": terminal,
+            }
 
         action_result = result.get("result")
         action_result = (

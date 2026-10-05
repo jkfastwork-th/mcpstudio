@@ -136,6 +136,7 @@ async def test_social_publish_dispatches_governed_backend_with_safe_defaults(tmp
             "instruction": "เขียนโพสต์สรุป Agent รุ่นใหม่ แล้วเตรียมลง Facebook",
             "parameters": {
                 "channels": ["facebook"],
+                "asset_intent": "none",
                 "correlation_id": "turn-123",
             },
         },
@@ -145,6 +146,8 @@ async def test_social_publish_dispatches_governed_backend_with_safe_defaults(tmp
     assert result["skill_id"] == "social.publish"
     assert result["publish_policy"] == "review"
     assert result["comment_policy"] == "track"
+    assert result["asset_policy"] == "ask_if_unspecified"
+    assert result["asset_intent"] == "none"
     assert result["result"]["status"] == "needs_review"
 
     name, args, context = integrations.calls[0]
@@ -157,6 +160,155 @@ async def test_social_publish_dispatches_governed_backend_with_safe_defaults(tmp
     assert context["parent_request_id"] == "turn-123"
     assert db.events[0][0] == "skill.executed"
 
+
+@pytest.mark.asyncio
+async def test_social_publish_infers_generate_from_explicit_instruction_for_legacy_schema(tmp_path):
+    integrations = FakeIntegrations()
+    manager = GatewaySessionManager(
+        settings(tmp_path), FakeDb(), integrations=integrations, skill_runtime=runtime()
+    )
+    result = await manager._run_action_skill(
+        "gws-test",
+        {
+            "skill_id": "social.publish",
+            "instruction": "เขียนโพสต์ Facebook และเจนรูปด้วย",
+            "parameters": {
+                "channels": ["facebook"],
+                "publish_policy": "review",
+                "correlation_id": "legacy-generate-1",
+            },
+        },
+    )
+    assert result["asset_intent"] == "generate"
+    name, args, _context = integrations.calls[0]
+    assert name == "hirda__social_hub_task__social_task_create"
+    assert args["asset_intent"] == "generate"
+    assert args["asset_spec"]["source"] == "generate"
+    assert args["hold_for_asset"] is False
+
+
+@pytest.mark.asyncio
+async def test_social_publish_infers_none_from_explicit_no_image_instruction(tmp_path):
+    integrations = FakeIntegrations()
+    manager = GatewaySessionManager(
+        settings(tmp_path), FakeDb(), integrations=integrations, skill_runtime=runtime()
+    )
+    result = await manager._run_action_skill(
+        "gws-test",
+        {
+            "skill_id": "social.publish",
+            "instruction": "เขียนโพสต์ Facebook ไม่ต้องมีรูป",
+            "parameters": {
+                "channels": ["facebook"],
+                "publish_policy": "review",
+                "correlation_id": "legacy-no-image-1",
+            },
+        },
+    )
+    assert result["asset_intent"] == "none"
+    _name, args, _context = integrations.calls[0]
+    assert args["asset_intent"] == "none"
+    assert args["asset_spec"] is None
+
+
+@pytest.mark.asyncio
+async def test_social_publish_requires_asset_clarification_before_creating_task(tmp_path):
+    integrations = FakeIntegrations()
+    manager = GatewaySessionManager(
+        settings(tmp_path),
+        FakeDb(),
+        integrations=integrations,
+        skill_runtime=runtime(),
+    )
+
+    result = await manager._run_action_skill(
+        "gws-test",
+        {
+            "skill_id": "social.publish",
+            "instruction": "เขียนบทความเรื่อง AI แล้วเตรียมลง Facebook",
+            "parameters": {
+                "channels": ["facebook"],
+                "correlation_id": "clarify-asset-1",
+            },
+        },
+    )
+
+    assert result["status"] == "needs_clarification"
+    assert result["needs_clarification"] is True
+    assert result["task_created"] is False
+    assert result["asset_intent"] == "unspecified"
+    assert "สร้างภาพ" in result["clarification"]
+    assert integrations.calls == []
+
+
+@pytest.mark.asyncio
+async def test_social_publish_generate_routes_build_asset_contract(tmp_path):
+    integrations = FakeIntegrations()
+    manager = GatewaySessionManager(
+        settings(tmp_path),
+        FakeDb(),
+        integrations=integrations,
+        skill_runtime=runtime(),
+    )
+
+    result = await manager._run_action_skill(
+        "gws-test",
+        {
+            "skill_id": "social.publish",
+            "instruction": "เขียนบทความ AI พร้อมสร้างภาพประกอบเอง",
+            "parameters": {
+                "channels": ["facebook"],
+                "asset_intent": "generate",
+                "asset_spec": {
+                    "kind": "single_image",
+                    "prompt": "AI as a helpful everyday companion",
+                    "aspect_ratio": "4:5",
+                    "variants": 1,
+                },
+                "correlation_id": "generate-asset-1",
+            },
+        },
+    )
+
+    assert result["asset_intent"] == "generate"
+    name, args, _context = integrations.calls[0]
+    assert name == "hirda__social_hub_task__social_task_create"
+    assert args["asset_policy"] == "ask_if_unspecified"
+    assert args["asset_intent"] == "generate"
+    assert args["asset_spec"]["aspect_ratio"] == "4:5"
+    assert args["hold_for_asset"] is False
+
+
+@pytest.mark.asyncio
+async def test_social_publish_propagates_preapproved_exact_facebook_copy(tmp_path):
+    integrations = FakeIntegrations()
+    manager = GatewaySessionManager(
+        settings(tmp_path),
+        FakeDb(),
+        integrations=integrations,
+        skill_runtime=runtime(),
+    )
+    exact = "Title\n\nParagraph\n\nwriter by admin fern"
+
+    result = await manager._run_action_skill(
+        "gws-test",
+        {
+            "skill_id": "social.publish",
+            "instruction": "Publish the supplied approved copy without rewriting.",
+            "parameters": {
+                "channels": ["facebook"],
+                "facebook_text": exact,
+                "publish_policy": "review",
+                "asset_intent": "none",
+                "correlation_id": "exact-copy-1",
+            },
+        },
+    )
+
+    assert result["skill_id"] == "social.publish"
+    name, args, _context = integrations.calls[0]
+    assert name == "hirda__social_hub_task__social_task_create"
+    assert args["facebook_text"] == exact
 
 @pytest.mark.asyncio
 async def test_hirda_skill_run_owns_deterministic_pstack_lifecycle(tmp_path):
@@ -330,6 +482,146 @@ async def test_hirda_skill_run_owns_deterministic_pstack_lifecycle(tmp_path):
         ("checkpoint", "terminal", "passed"),
     ]
     assert ("action",) in calls
+
+
+@pytest.mark.asyncio
+async def test_hirda_skill_run_accepts_clarification_without_social_task(tmp_path):
+    db = FakeDb()
+    work_rows = {}
+
+    async def get_gateway_session(_gateway_session_id):
+        return {"managed_session_id": ""}
+
+    async def create_work(payload, _default_server_id):
+        row = {
+            "id": "work-clarify",
+            "state": "queued",
+            "execution_state": "none",
+            "metadata": payload["metadata"],
+            "result": {},
+        }
+        work_rows[row["id"]] = row
+        return dict(row)
+
+    async def start_deterministic_work(work_id):
+        row = work_rows[work_id]
+        row.update({"state": "running", "execution_state": "running_action"})
+        return dict(row)
+
+    async def finish_work(work_id, *, state, result=None, error=None):
+        row = work_rows[work_id]
+        row.update({
+            "state": state,
+            "execution_state": state,
+            "result": result or {},
+            "error": error,
+        })
+        return dict(row)
+
+    db.get_gateway_session = get_gateway_session
+    db.create_work = create_work
+    db.start_deterministic_work = start_deterministic_work
+    db.finish_work = finish_work
+
+    manager = GatewaySessionManager(
+        settings(tmp_path),
+        db,
+        integrations=FakeIntegrations(),
+        skill_runtime=runtime(),
+    )
+
+    class FakeSkillGateway:
+        def prepare_run(self, **kwargs):
+            return {
+                "invocation": {
+                    "invocation_id": "skill-inv-clarify",
+                    "intent": kwargs["intent"],
+                    "domain": kwargs["domain"],
+                    "skill_ids": [kwargs["skill_id"]],
+                    "priority": kwargs["priority"],
+                    "input": kwargs["input_data"],
+                },
+                "task_overrides": {
+                    "priority": kwargs["priority"],
+                    "skill_invocation": {
+                        "invocation_id": "skill-inv-clarify",
+                    },
+                    "skill_resolution": {},
+                    "capability_resolution": {"resolved": True},
+                    "runtime_constraints": [],
+                },
+            }
+
+    manager.skill_gateway = FakeSkillGateway()
+    task = {
+        "task_id": "TASK-CLARIFY",
+        "trace_id": "TRACE-CLARIFY",
+        "workflow": "feature",
+        "status": "ready_for_hirda",
+        "lifecycle": {"status": "active", "current_phase": "admitted"},
+    }
+
+    async def active(*args, **kwargs):
+        return None
+
+    async def open_task(*args, **kwargs):
+        return dict(task)
+
+    async def persist(*args, **kwargs):
+        return args[1]
+
+    async def record(*args, **kwargs):
+        return dict(task)
+
+    async def checkpoint(*args, **kwargs):
+        phase = kwargs["phase"]
+        return {
+            **task,
+            "work_id": "work-clarify",
+            "status": "completed" if phase == "terminal" else "active",
+            "lifecycle": {
+                "status": "completed" if phase == "terminal" else "active",
+                "current_phase": phase,
+            },
+        }
+
+    async def run_action(*args, **kwargs):
+        return {
+            "schema": "hirda-skill-run-v1",
+            "skill_id": "social.publish",
+            "skill_version": "0.3.0",
+            "status": "needs_clarification",
+            "needs_clarification": True,
+            "clarification": "โพสต์นี้ต้องการให้สร้างภาพประกอบด้วยไหมคะ?",
+            "asset_policy": "ask_if_unspecified",
+            "asset_intent": "unspecified",
+            "task_created": False,
+        }
+
+    manager._active_pstack_gateway_task = active
+    manager._open_pstack_gateway_task = open_task
+    manager._persist_active_pstack_task = persist
+    manager._record_pstack_lifecycle_tool_evidence = record
+    manager._checkpoint_active_pstack_task = checkpoint
+    manager._run_action_skill = run_action
+
+    result = await manager._run_governed_action_skill(
+        "gws-test",
+        {
+            "skill_id": "social.publish",
+            "instruction": "เขียนโพสต์ Facebook",
+            "parameters": {"channels": ["facebook"]},
+        },
+    )
+
+    assert result["status"] == "needs_clarification"
+    assert result["task_created"] is False
+    assert result["pstack_task"]["status"] == "completed"
+    completed = work_rows["work-clarify"]
+    assert completed["state"] == "completed"
+    assert completed["result"]["semantic_completion"]["status"] == "clarification_required"
+    assert completed["result"]["action_verification"]["passed"] is True
+    assert completed["result"]["action_verification"]["task_created"] is False
 
 
 @pytest.mark.asyncio

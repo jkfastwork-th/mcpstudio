@@ -1,7 +1,7 @@
 schema: hirda-skill-v2
 id: social.publish
 name: Social Publish
-version: 0.2.0
+version: 0.3.0
 description: Create a governed Social Hub publish task from a natural-language publishing request.
 scope:
   kind: global
@@ -30,19 +30,29 @@ policy_hints:
   - Create a Social Hub task instead of controlling the browser or social website directly.
   - Default to review before publish unless the user explicitly requests automatic publication.
   - Default comment handling to track only unless the user explicitly requests automatic replies.
+  - Asset policy defaults to ask_if_unspecified. If the user did not explicitly request an image, explicitly reject images, or provide an upload, do not create a task; return a clarification request asking whether an image should be generated.
+  - Resolve asset_intent to exactly one of generate, none, upload, or unspecified before task creation.
+  - asset_intent=generate must enter Social Hub build_asset; do not generate the image in the ChatGPT client and do not shuttle base64 through the conversation.
+  - asset_intent=upload waits for an external asset; asset_intent=none is text-only.
   - Use only the connected owner social identity supported by Social Hub.
+  - Preserve long-form Facebook article structure, including paragraph spacing, bullets, source links, and conclusion, unless the user explicitly asks for summarization.
+  - When the user supplies approved final Facebook copy, pass it as facebook_text so Social Hub uses deterministic exact-copy planning without a model rewrite.
+  - "Fern-authored Facebook posts must end with the attribution footer: writer by admin fern."
   - Preserve correlation and conversation provenance so repeated requests are idempotent.
   - Never infer authority to publish from trigger matching alone; the tool invocation must represent an affirmative user request.
 workflow_steps:
   - Convert the user request into the Social Hub publish task contract.
   - Resolve the requested channels and schedule.
-  - Apply publish and comment policies.
+  - Apply publish, comment, and asset policies.
+  - Resolve asset intent. If it is unspecified, return needs_clarification before creating governed work.
   - Create the idempotent Social Hub task through the governed ingress capability.
+  - If asset_intent is generate, let Social Hub own the build_asset lifecycle and asset provenance.
   - Return the created task identifier and status.
 verification_checks:
   - The Social Hub ingress provider is ready.
   - The created task records the social.publish skill provenance.
-  - Review and comment policies match the user request or the safe defaults.
+  - Review, comment, and asset policies match the user request or the safe defaults.
+  - No Social Hub task is created while asset_intent is unspecified.
   - No direct browser publication occurs inside the skill dispatcher.
 provenance:
   origin: seed
@@ -50,4 +60,4 @@ provenance:
   pilot: social_hub
 metadata:
   domain: social
-  task_contract: social-publish-v2
+  task_contract: social-publish-v3

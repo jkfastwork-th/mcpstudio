@@ -47,6 +47,7 @@ def _tool_descriptors() -> list[dict[str, Any]]:
                 "properties": {
                     "instructions": {"type": "string", "minLength": 1, "maxLength": 12000},
                     "title": {"type": "string", "maxLength": 240},
+                    "facebook_text": {"type": ["string", "null"], "maxLength": 20000},
                     "channels": {
                         "type": "array",
                         "items": {"type": "string", "enum": list(_CHANNELS)},
@@ -68,6 +69,20 @@ def _tool_descriptors() -> list[dict[str, Any]]:
                     },
                     "watch_after_publish": {"type": "boolean"},
                     "auto_reply": {"type": "boolean"},
+                    "asset_policy": {
+                        "type": "string",
+                        "enum": ["ask_if_unspecified"],
+                        "default": "ask_if_unspecified",
+                    },
+                    "asset_intent": {
+                        "type": "string",
+                        "enum": ["generate", "none", "upload", "unspecified"],
+                        "default": "none",
+                    },
+                    "asset_spec": {
+                        "type": ["object", "null"],
+                        "additionalProperties": True,
+                    },
                     "hold_for_asset": {"type": "boolean", "default": False},
                     "correlation_id": {"type": ["string", "null"], "maxLength": 160},
                 },
@@ -285,6 +300,13 @@ class SocialHubTaskIntegration:
             title = arguments.get("title")
             if title is not None and (not isinstance(title, str) or len(title) > 240):
                 raise SocialHubTaskError("social_hub_title_invalid")
+            facebook_text = arguments.get("facebook_text")
+            if facebook_text is not None and (
+                not isinstance(facebook_text, str)
+                or not facebook_text.strip()
+                or len(facebook_text) > 20000
+            ):
+                raise SocialHubTaskError("social_hub_facebook_text_invalid")
             channels = arguments.get("channels", [])
             if (
                 not isinstance(channels, list)
@@ -298,6 +320,8 @@ class SocialHubTaskIntegration:
             scheduled_at = arguments.get("scheduled_at")
             if run_mode not in {"now", "scheduled"}:
                 raise SocialHubTaskError("social_hub_run_mode_invalid")
+            if facebook_text is not None and "facebook" not in channels:
+                raise SocialHubTaskError("social_hub_facebook_text_channel_mismatch")
             if run_mode == "scheduled" and (
                 not isinstance(scheduled_at, str) or not scheduled_at.strip()
             ):
@@ -307,6 +331,23 @@ class SocialHubTaskIntegration:
             for key in ("watch_after_publish", "auto_reply", "hold_for_asset"):
                 if key in arguments and not isinstance(arguments[key], bool):
                     raise SocialHubTaskError("social_hub_boolean_invalid")
+
+            asset_policy = str(
+                arguments.get("asset_policy") or "ask_if_unspecified"
+            ).strip().casefold()
+            if asset_policy != "ask_if_unspecified":
+                raise SocialHubTaskError("social_hub_asset_policy_invalid")
+            asset_intent = str(
+                arguments.get("asset_intent")
+                or ("upload" if arguments.get("hold_for_asset") else "none")
+            ).strip().casefold()
+            if asset_intent not in {"generate", "none", "upload", "unspecified"}:
+                raise SocialHubTaskError("social_hub_asset_intent_invalid")
+            asset_spec = arguments.get("asset_spec")
+            if asset_spec is not None and not isinstance(asset_spec, dict):
+                raise SocialHubTaskError("social_hub_asset_spec_invalid")
+            if asset_intent == "none" and asset_spec:
+                raise SocialHubTaskError("social_hub_asset_spec_not_allowed_for_none")
 
             skill_id = str(context.get("skill_id") or "").strip()
             source_app = "hirda_skill" if skill_id else "chatgpt_web"
@@ -346,11 +387,15 @@ class SocialHubTaskIntegration:
                 task_content = {
                     "instructions": instructions.strip(),
                     "title": title,
+                    "facebook_text": facebook_text,
                     "channels": channels,
                     "run_mode": run_mode,
                     "scheduled_at": scheduled_at,
                     "publish_policy": publish_policy,
                     "comment_policy": comment_policy,
+                    "asset_policy": asset_policy,
+                    "asset_intent": asset_intent,
+                    "asset_spec": asset_spec,
                     "hold_for_asset": arguments.get("hold_for_asset", False),
                 }
                 content_digest = hashlib.sha256(json.dumps(task_content, sort_keys=True,
@@ -359,6 +404,7 @@ class SocialHubTaskIntegration:
                 correlation_id = f"sht-{context_digest}-{content_digest}"
             payload = {
                 "instructions": instructions.strip(),
+                "facebook_text": facebook_text,
                 "channels": channels,
                 "run_mode": run_mode,
                 "scheduled_at": scheduled_at if run_mode == "scheduled" else None,
@@ -368,6 +414,9 @@ class SocialHubTaskIntegration:
                 "comment_policy": comment_policy,
                 "watch_after_publish": watch_after_publish,
                 "auto_reply": auto_reply,
+                "asset_policy": asset_policy,
+                "asset_intent": asset_intent,
+                "asset_spec": asset_spec,
                 "hold_for_asset": arguments.get("hold_for_asset", False),
                 "correlation_id": correlation_id,
                 "source_app": source_app,
