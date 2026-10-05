@@ -333,6 +333,139 @@ async def test_hirda_skill_run_owns_deterministic_pstack_lifecycle(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_hirda_skill_run_allows_workspace_neutral_action(tmp_path):
+    db = FakeDb()
+    captured = {}
+
+    async def get_gateway_session(gateway_session_id):
+        assert gateway_session_id == "gws-test"
+        return {"managed_session_id": None}
+
+    async def create_work(payload, default_server_id):
+        captured["payload"] = dict(payload)
+        return {
+            "id": "work-skill-neutral",
+            "state": "queued",
+            "metadata": dict(payload["metadata"]),
+        }
+
+    async def start_deterministic_work(work_id):
+        assert work_id == "work-skill-neutral"
+        return {"id": work_id, "state": "running"}
+
+    async def finish_work(work_id, *, state, result=None, error=None):
+        return {
+            "id": work_id,
+            "state": state,
+            "result": result or {},
+            "error": error,
+        }
+
+    db.get_gateway_session = get_gateway_session
+    db.create_work = create_work
+    db.start_deterministic_work = start_deterministic_work
+    db.finish_work = finish_work
+
+    manager = GatewaySessionManager(
+        settings(tmp_path),
+        db,
+        integrations=FakeIntegrations(),
+        skill_runtime=runtime(),
+    )
+
+    class FakeSkillGateway:
+        def prepare_run(self, **kwargs):
+            assert kwargs["workspace"] == ""
+            return {
+                "invocation": {
+                    "invocation_id": "skill-inv-neutral",
+                    "priority": kwargs["priority"],
+                },
+                "task_overrides": {
+                    "priority": kwargs["priority"],
+                    "skill_invocation": {
+                        "invocation_id": "skill-inv-neutral",
+                    },
+                    "skill_resolution": {},
+                    "capability_resolution": {"resolved": True},
+                    "runtime_constraints": [],
+                },
+            }
+
+    manager.skill_gateway = FakeSkillGateway()
+    task = {
+        "task_id": "TASK-SKILL-NEUTRAL",
+        "trace_id": "TRACE-SKILL-NEUTRAL",
+        "workflow": "feature",
+        "status": "ready_for_hirda",
+        "lifecycle": {"status": "active", "current_phase": "admitted"},
+    }
+
+    async def active(*args, **kwargs):
+        return None
+
+    async def open_task(*args, **kwargs):
+        managed = kwargs["managed_session"]
+        assert managed["id"] is None
+        assert managed["workspace_key"] == "hirda-action"
+        assert managed["metadata"]["workspace_neutral"] is True
+        return dict(task)
+
+    async def persist(*args, **kwargs):
+        return args[1]
+
+    async def record(*args, **kwargs):
+        return dict(task)
+
+    async def checkpoint(*args, **kwargs):
+        return {
+            **task,
+            "status": "completed" if kwargs["phase"] == "terminal" else "active",
+            "lifecycle": {
+                "status": "completed" if kwargs["phase"] == "terminal" else "active",
+                "current_phase": kwargs["phase"],
+            },
+        }
+
+    async def run_action(*args, **kwargs):
+        return {
+            "schema": "hirda-skill-run-v1",
+            "skill_id": "social.publish",
+            "skill_version": "0.2.0",
+            "publish_policy": "draft",
+            "comment_policy": "off",
+            "result": {
+                "task_id": "task_0123456789abcdef",
+                "status": "draft",
+            },
+        }
+
+    manager._active_pstack_gateway_task = active
+    manager._open_pstack_gateway_task = open_task
+    manager._persist_active_pstack_task = persist
+    manager._record_pstack_lifecycle_tool_evidence = record
+    manager._checkpoint_active_pstack_task = checkpoint
+    manager._run_action_skill = run_action
+
+    result = await manager._run_governed_action_skill(
+        "gws-test",
+        {
+            "skill_id": "social.publish",
+            "instruction": "create draft only",
+            "parameters": {
+                "publish_policy": "draft",
+                "comment_policy": "off",
+                "channels": ["facebook"],
+            },
+        },
+    )
+
+    assert result["result"]["status"] == "draft"
+    assert captured["payload"]["workspace"] == "hirda-action"
+    assert captured["payload"]["session_id"] is None
+
+
+@pytest.mark.asyncio
 async def test_skill_run_fail_closed_for_unregistered_or_unavailable_execution(tmp_path):
     manager = GatewaySessionManager(
         settings(tmp_path),

@@ -4275,11 +4275,10 @@ class GatewaySessionManager:
                 runtime_constraints=task.get("runtime_constraints") or (),
                 pstack_task=True,
             )
-            task = await self._open_pstack_herdr_tab(
-                task,
-                managed_session=managed_session,
-            )
             if bool(task.get("deterministic_action")):
+                # Capability actions are executed by their governed provider,
+                # not inside a HERDR/Serena computer session. Preserve the
+                # PStack lifecycle while avoiding an unnecessary task tab.
                 task = {
                     **task,
                     "work_id": None,
@@ -4287,6 +4286,10 @@ class GatewaySessionManager:
                     "status": "ready_for_hirda",
                 }
             else:
+                task = await self._open_pstack_herdr_tab(
+                    task,
+                    managed_session=managed_session,
+                )
                 task = await self._ensure_pstack_execution_work(
                     gateway_session_id,
                     task,
@@ -4575,11 +4578,22 @@ class GatewaySessionManager:
 
         gateway = await self.db.get_gateway_session(gateway_session_id)
         managed_id = str(gateway.get("managed_session_id") or "").strip()
-        if not managed_id:
-            raise ManagedSessionError(
-                "hirda_skill_run requires an attached managed workspace"
-            )
-        managed = await self.db.get_managed_session(managed_id)
+        if managed_id:
+            managed = await self.db.get_managed_session(managed_id)
+        else:
+            # Deterministic action Skills execute through governed capability
+            # providers and do not require a Serena/code workspace. Keep a
+            # logical workspace identity so PStack/audit records remain scoped
+            # without claiming another connector's managed workspace.
+            managed = {
+                "id": None,
+                "project_path": None,
+                "workspace_key": "hirda-action",
+                "metadata": {
+                    "workspace_neutral": True,
+                    "source": "hirda_skill_run",
+                },
+            }
 
         active = await self._active_pstack_gateway_task(
             gateway_session_id,
@@ -4682,10 +4696,14 @@ class GatewaySessionManager:
         work = await self.db.create_work(
             {
                 "label": f"Skill action · {skill_id}"[:240],
-                "workspace": str(managed.get("project_path") or ""),
+                "workspace": str(
+                    managed.get("project_path")
+                    or managed.get("workspace_key")
+                    or "hirda-action"
+                ),
                 "priority": int(invocation.get("priority") or 50),
                 "lease_mode": "none",
-                "session_id": managed_id,
+                "session_id": managed_id or None,
                 "pane": None,
                 "agent": None,
                 "dispatch_mode": "manual",
