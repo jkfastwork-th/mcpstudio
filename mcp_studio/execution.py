@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -418,6 +419,7 @@ class ExecutionSupervisor:
         self._counter_lock = asyncio.Lock()
         self._active_dispatches = 0
         self._faults: dict[str, dict[str, Any]] = {}
+        self._recovery_poll_after: dict[str, float] = {}
         self.snapshot: dict[str, Any] = {
             "status": "idle",
             "automatic_dispatch": settings.studio.execution_enabled,
@@ -1519,6 +1521,46 @@ class ExecutionSupervisor:
             execution_state=next_state,
         )
 
+    def _poll_interval_for_work(self, work: dict[str, Any]) -> float | None:
+        """Return the minimum supervisor polling interval for actionable Herdr work."""
+        state = str(work.get("execution_state") or "none")
+        if state in {"stalled", "dispatch_uncertain"}:
+            return None
+        if state in {"none", "assigned"}:
+            metadata = self._pstack_execution_metadata(work)
+            if not (
+                self.settings.studio.execution_enabled
+                or metadata.get("pstack_auto_dispatch") is True
+            ):
+                return None
+            return 0.0
+        if state == "waiting_agent":
+            return 0.0
+        if state in {"reconnecting", "recovering"}:
+            return max(
+                10.0,
+                float(getattr(self.settings.studio, "herdr_poll_interval_seconds", 30.0)),
+            )
+        return None
+
+    def _work_poll_eligible(self, work: dict[str, Any]) -> bool:
+        interval = self._poll_interval_for_work(work)
+        work_id = str(work.get("id") or "")
+        state = str(work.get("execution_state") or "none")
+        if interval is None:
+            self._recovery_poll_after.pop(work_id, None)
+            return False
+        if state not in {"reconnecting", "recovering"}:
+            self._recovery_poll_after.pop(work_id, None)
+            return True
+
+        now = time.monotonic()
+        next_poll = self._recovery_poll_after.get(work_id, 0.0)
+        if now < next_poll:
+            return False
+        self._recovery_poll_after[work_id] = now + interval
+        return True
+
     async def _process_one(self, work: dict[str, Any], upstream_snapshot: dict[str, Any]) -> bool:
         state = work.get("execution_state") or "none"
         fault = self._consume_fault(work)
@@ -1589,9 +1631,19 @@ class ExecutionSupervisor:
             return dict(self.snapshot)
         async with self._run_lock:
             await self.db.heartbeat_running_work()
-            snapshot = await self._ensure_fresh_herdr()
             running = await self.db.running_work()
             herdr_work = [w for w in running if w.get("dispatch_mode") == "herdr"]
+            running_ids = {str(w.get("id") or "") for w in herdr_work}
+            for work_id in tuple(self._recovery_poll_after):
+                if work_id not in running_ids:
+                    self._recovery_poll_after.pop(work_id, None)
+            polling_work = [w for w in herdr_work if self._work_poll_eligible(w)]
+            refresh_skipped = not polling_work
+            snapshot = (
+                dict(self.herdr.snapshot)
+                if refresh_skipped
+                else await self._ensure_fresh_herdr()
+            )
             sem = asyncio.Semaphore(max(1, int(self.settings.studio.execution_parallelism)))
 
             async def one(work: dict[str, Any]) -> bool:
@@ -1608,7 +1660,7 @@ class ExecutionSupervisor:
                         )
                         return False
 
-            results = await asyncio.gather(*(one(w) for w in herdr_work)) if herdr_work else []
+            results = await asyncio.gather(*(one(w) for w in polling_work)) if polling_work else []
             processed = sum(1 for x in results if x)
             self.snapshot.update(
                 {
@@ -1617,6 +1669,8 @@ class ExecutionSupervisor:
                     "last_error": snapshot.get("error") if snapshot.get("status") == "down" else None,
                     "ticks": int(self.snapshot.get("ticks") or 0) + 1,
                     "running_herdr_work": len(herdr_work),
+                    "polled_herdr_work": len(polling_work),
+                    "herdr_refresh_skipped": refresh_skipped,
                     "processed": processed,
                     "active_faults": len(self._faults),
                 }

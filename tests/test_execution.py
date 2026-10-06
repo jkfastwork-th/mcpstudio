@@ -69,6 +69,7 @@ class FakeClient:
 class FakeHerdr:
     def __init__(self):
         self.calls = []
+        self.refresh_calls = 0
         self.snapshot = {
             "status": "healthy",
             "panes": {
@@ -92,6 +93,7 @@ class FakeHerdr:
         }
 
     async def refresh(self):
+        self.refresh_calls += 1
         return self.snapshot
 
     def tool(self, name):
@@ -137,6 +139,81 @@ async def create_running_herdr_work(db):
         "serena-8001",
     )
     return await db.assign_work(work["id"], "worker-1", pane="wF:p1", agent="claude")
+
+
+@pytest.mark.asyncio
+async def test_run_once_skips_herdr_refresh_without_actionable_work(tmp_path):
+    db = Database(str(tmp_path / "studio.sqlite3"))
+    await db.init()
+    herdr = FakeHerdr()
+    supervisor = ExecutionSupervisor(studio_settings(), db, herdr, FakeScheduler())
+
+    snapshot = await supervisor.run_once()
+
+    assert herdr.refresh_calls == 0
+    assert snapshot["running_herdr_work"] == 0
+    assert snapshot["polled_herdr_work"] == 0
+    assert snapshot["herdr_refresh_skipped"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_once_skips_manual_assigned_and_stalled_work(tmp_path):
+    db = Database(str(tmp_path / "studio.sqlite3"))
+    await db.init()
+    running = await create_running_herdr_work(db)
+    herdr = FakeHerdr()
+    supervisor = ExecutionSupervisor(studio_settings(automatic=False), db, herdr, FakeScheduler())
+
+    assigned = await supervisor.run_once()
+    assert herdr.refresh_calls == 0
+    assert assigned["running_herdr_work"] == 1
+    assert assigned["polled_herdr_work"] == 0
+
+    await db.update_work_execution(running["id"], execution_state="stalled", failure_class="test")
+    stalled = await supervisor.run_once()
+    assert herdr.refresh_calls == 0
+    assert stalled["polled_herdr_work"] == 0
+    assert stalled["herdr_refresh_skipped"] is True
+
+
+@pytest.mark.asyncio
+async def test_reconnecting_work_uses_bounded_refresh_backoff(tmp_path):
+    db = Database(str(tmp_path / "studio.sqlite3"))
+    await db.init()
+    running = await create_running_herdr_work(db)
+    herdr = FakeHerdr()
+    herdr.snapshot["panes"] = {"panes": []}
+    supervisor = ExecutionSupervisor(studio_settings(), db, herdr, FakeScheduler())
+    await db.update_work_execution(
+        running["id"], execution_state="reconnecting", failure_class="pane_missing"
+    )
+
+    first = await supervisor.run_once()
+    second = await supervisor.run_once()
+
+    assert herdr.refresh_calls == 1
+    assert first["polled_herdr_work"] == 1
+    assert first["herdr_refresh_skipped"] is False
+    assert second["polled_herdr_work"] == 0
+    assert second["herdr_refresh_skipped"] is True
+    assert (await db.get_work(running["id"]))["execution_state"] == "reconnecting"
+
+
+@pytest.mark.asyncio
+async def test_waiting_agent_still_refreshes_each_execution_tick(tmp_path):
+    db = Database(str(tmp_path / "studio.sqlite3"))
+    await db.init()
+    running = await create_running_herdr_work(db)
+    herdr = FakeHerdr()
+    supervisor = ExecutionSupervisor(studio_settings(), db, herdr, FakeScheduler())
+    await supervisor.dispatch(running["id"], explicit=True)
+    herdr.refresh_calls = 0
+
+    snapshot = await supervisor.run_once()
+
+    assert herdr.refresh_calls == 1
+    assert snapshot["polled_herdr_work"] == 1
+    assert snapshot["herdr_refresh_skipped"] is False
 
 
 def test_schema_driven_prompt_mapping():
