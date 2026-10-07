@@ -144,6 +144,13 @@ def test_shell_classifier_keeps_read_write_execute_separate():
     assert classify_shell_command("systemctl restart mcp-studio.service") == "execute"
     assert classify_shell_command("systemctl stop mcp-studio.service") == "destructive"
     assert classify_shell_command("journalctl -u mcp-studio.service -n 20 --no-pager") == "read"
+    assert classify_shell_command("journalctl --disk-usage") == "read"
+    assert classify_shell_command("df -h .") == "read"
+    assert classify_shell_command("du -sh .") == "read"
+    assert classify_shell_command("ps -eo pid,ppid,stat,%cpu,%mem,etime,cmd --sort=-%cpu") == "read"
+    assert classify_shell_command("uptime") == "read"
+    assert classify_shell_command("df -h . && du -sh . && ps -ef && uptime && journalctl --disk-usage") == "read"
+    assert classify_tool("hirda__hirda_native_computer__start_process", {"command": "df -h ."}, declared_category="execute") == "execute"
     assert classify_shell_command("ss -ltnp") == "read"
 
 

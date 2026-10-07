@@ -69,7 +69,7 @@ _WRITE_SHELL = re.compile(
 _READ_COMMANDS = {
     "pwd", "ls", "cat", "grep", "rg", "find", "head", "tail", "wc", "stat",
     "printf", "echo", "which", "type", "realpath", "readlink", "env", "printenv",
-    "sort", "sed", "journalctl", "ss",
+    "sort", "sed", "journalctl", "ss", "df", "du", "ps", "uptime",
 }
 _EXECUTE_COMMANDS = {
     "pytest", "uv", "uvx", "make", "cmake", "ctest", "ninja", "node", "npm", "pnpm", "yarn",
