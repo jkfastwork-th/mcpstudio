@@ -445,6 +445,79 @@ async def test_offline_substrate_recovers_when_executor_returns(
 
 
 @pytest.mark.asyncio
+async def test_live_substrate_probe_tracks_offline_then_healthy(
+    tmp_path, offline_cli, monkeypatch
+):
+    _, _, gateway = await make_boundary(tmp_path, offline_cli, monkeypatch)
+
+    offline = await gateway._probe_pstack_execution_substrate()
+    assert offline["state"] == "offline"
+    assert offline["reason"] == "server_not_running"
+
+    (tmp_path / "available").touch()
+    healthy = await gateway._probe_pstack_execution_substrate()
+    assert healthy["state"] == "healthy"
+    assert healthy["reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_stale_healthy_substrate_is_suspended_when_live_probe_is_offline(
+    tmp_path, offline_cli, monkeypatch
+):
+    db, _, gateway = await make_boundary(tmp_path, offline_cli, monkeypatch)
+    work = await db.create_work(
+        {
+            "label": "stale-healthy",
+            "workspace": str(tmp_path),
+            "lease_mode": "write",
+            "dispatch_mode": "herdr",
+            "instruction": "continue",
+        },
+        "offline",
+    )
+    task = {
+        "task_id": "TASK-P02-STALE-HEALTH",
+        "trace_id": "TRACE-P02-STALE-HEALTH",
+        "status": "running",
+        "execution_state": "waiting_agent",
+        "work_id": work["id"],
+        "workflow_directive": {"prompt": "continue"},
+        "lifecycle": {"status": "active", "revision": 9},
+        "execution_substrate": {
+            "schema": "hirda-execution-substrate-health-v1",
+            "kind": "herdr",
+            "state": "healthy",
+            "reason": None,
+            "observed_at": "2026-10-07T00:00:00+00:00",
+        },
+        "herdr_tab": {
+            "status": "open",
+            "owner": "pstack",
+            "persistent": False,
+            "workspace_id": "wH",
+            "tab_id": "wH:t-stale",
+            "root_pane_id": "wH:p-stale",
+        },
+    }
+
+    ensured = await gateway._ensure_pstack_execution_work(
+        "gws-stale",
+        task,
+        managed_session={"id": "ms-stale", "project_path": str(tmp_path)},
+    )
+
+    assert ensured["task_id"] == task["task_id"]
+    assert ensured["trace_id"] == task["trace_id"]
+    assert ensured["lifecycle"] == task["lifecycle"]
+    assert ensured["work_id"] == work["id"]
+    assert ensured["status"] == "waiting"
+    assert ensured["execution_state"] == "suspended_executor_unavailable"
+    assert ensured["execution_substrate"]["state"] == "offline"
+    assert ensured["execution_substrate"]["reason"] == "server_not_running"
+    assert len(await db.list_work()) == 1
+
+
+@pytest.mark.asyncio
 async def test_timeout_is_degraded_executor_health(
     tmp_path, offline_cli, monkeypatch
 ):

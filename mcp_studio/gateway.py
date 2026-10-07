@@ -3271,6 +3271,26 @@ class GatewaySessionManager:
             return herdr_execution_substrate_health(state, reason=error or None)
         return None
 
+    async def _probe_pstack_execution_substrate(
+        self,
+        task: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        stored = self._pstack_execution_substrate(dict(task or {}))
+        herdr = getattr(self, "herdr", None)
+        probe = getattr(herdr, "probe_execution", None)
+        if not callable(probe):
+            return stored
+        try:
+            await probe()
+        except HerdrUnavailable as exc:
+            state = (
+                "offline"
+                if exc.reason in {"server_not_running", "cli_not_found"}
+                else "degraded"
+            )
+            return herdr_execution_substrate_health(state, reason=exc.reason)
+        return herdr_execution_substrate_health("healthy")
+
     async def _open_pstack_herdr_tab(
         self,
         task: dict[str, Any],
@@ -3905,44 +3925,53 @@ class GatewaySessionManager:
         ):
             return task_value
 
-        substrate = self._pstack_execution_substrate(task_value)
-        if substrate and str(substrate.get("state") or "").casefold() in {
-            "offline",
-            "degraded",
-        }:
-            try:
-                await self.herdr.probe_execution()
-            except HerdrUnavailable as exc:
-                state = (
-                    "offline"
-                    if exc.reason in {"server_not_running", "cli_not_found"}
-                    else "degraded"
-                )
-                substrate = herdr_execution_substrate_health(
-                    state, reason=exc.reason
-                )
-                return {
-                    **task_value,
-                    "status": "waiting",
-                    "execution_state": self._pstack_executor_wait_state(task_value),
-                    "execution_substrate": substrate,
-                }
-            task_value = await self._open_pstack_herdr_tab(
-                {
-                    **task_value,
-                    "execution_substrate": herdr_execution_substrate_health("healthy"),
-                },
-                managed_session=managed_session,
+        stored_substrate = self._pstack_execution_substrate(task_value)
+        substrate = await self._probe_pstack_execution_substrate(task_value)
+        substrate_state = (
+            str(substrate.get("state") or "").casefold()
+            if isinstance(substrate, dict)
+            else ""
+        )
+        if substrate_state in {"offline", "degraded"}:
+            return {
+                **task_value,
+                "status": "waiting",
+                "execution_state": self._pstack_executor_wait_state(task_value),
+                "execution_substrate": substrate,
+            }
+
+        if isinstance(substrate, dict):
+            stored_state = (
+                str(stored_substrate.get("state") or "").casefold()
+                if isinstance(stored_substrate, dict)
+                else ""
             )
-            substrate = self._pstack_execution_substrate(task_value)
-            if substrate and str(substrate.get("state") or "").casefold() in {
-                "offline",
-                "degraded",
-            }:
-                return {
+            tab = task_value.get("herdr_tab")
+            tab = dict(tab) if isinstance(tab, dict) else {}
+            if stored_state in {"offline", "degraded"} or str(
+                tab.get("status") or ""
+            ).casefold() != "open":
+                task_value = await self._open_pstack_herdr_tab(
+                    {
+                        **task_value,
+                        "execution_substrate": substrate,
+                    },
+                    managed_session=managed_session,
+                )
+                substrate = self._pstack_execution_substrate(task_value) or substrate
+                if str(substrate.get("state") or "").casefold() in {
+                    "offline",
+                    "degraded",
+                }:
+                    return {
+                        **task_value,
+                        "status": "waiting",
+                        "execution_state": self._pstack_executor_wait_state(task_value),
+                        "execution_substrate": substrate,
+                    }
+            else:
+                task_value = {
                     **task_value,
-                    "status": "waiting",
-                    "execution_state": self._pstack_executor_wait_state(task_value),
                     "execution_substrate": substrate,
                 }
 
@@ -5808,18 +5837,35 @@ class GatewaySessionManager:
                 task = {**task, "lifecycle": lifecycle}
                 await self._persist_active_pstack_task(gateway_session_id, task)
             substrate = self._pstack_execution_substrate(task)
-            if substrate is None and not bool(task.get("deterministic_action")):
-                substrate = herdr_execution_substrate_health(
-                    "degraded", reason="execution_substrate_health_unknown"
+            projected_status = task.get("status")
+            projected_execution_state = task.get("execution_state")
+            if not bool(task.get("deterministic_action")):
+                live_substrate = await self._probe_pstack_execution_substrate(task)
+                if isinstance(live_substrate, dict):
+                    substrate = live_substrate
+                substrate_state = (
+                    str(substrate.get("state") or "").casefold()
+                    if isinstance(substrate, dict)
+                    else ""
                 )
+                task_status = str(task.get("status") or "").strip().casefold()
+                lifecycle_status = str(lifecycle.get("status") or "").strip().casefold()
+                terminal = {"completed", "expired", "failed", "cancelled"}
+                if (
+                    substrate_state in {"offline", "degraded"}
+                    and task_status not in terminal
+                    and lifecycle_status not in {"completed", "blocked"}
+                ):
+                    projected_status = "waiting"
+                    projected_execution_state = self._pstack_executor_wait_state(task)
             return {
                 "active": True,
                 "task_id": task.get("task_id"),
                 "trace_id": task.get("trace_id"),
                 "goal": task.get("goal"),
                 "workflow": task.get("workflow"),
-                "status": task.get("status"),
-                "execution_state": task.get("execution_state"),
+                "status": projected_status,
+                "execution_state": projected_execution_state,
                 "execution_environment": task.get("execution_environment"),
                 "execution_substrate": substrate,
                 "health": {
