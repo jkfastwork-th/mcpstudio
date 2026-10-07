@@ -18,8 +18,11 @@ def offline_cli(tmp_path):
     cli = tmp_path / "herdr"
     cli.write_text("#!/usr/bin/env python3\n" +
         "import json, socket, sys\n" +
+        "from pathlib import Path\n" +
         f"with open({str(tmp_path / 'calls')!r}, 'a') as calls: calls.write('probe\\n')\n" +
         f"sock = socket.socket(socket.AF_UNIX); path = {str(tmp_path / 'absent.sock')!r}\n" +
+        f"if Path({str(tmp_path / 'available')!r}).exists():\n" +
+        " print(json.dumps({'result':{'tabs':[]}})); sys.exit(0)\n" +
         "try: sock.connect(path)\n" +
         "except FileNotFoundError:\n" +
         " print(json.dumps({'id':'cli:tab:list','error':{'code':'server_not_running','message':'no herdr server'}})); sys.exit(1)\n")
@@ -98,37 +101,79 @@ servers:
     name: offline
     url: http://127.0.0.1:1/mcp
 """)
-    script = """
-import asyncio, httpx
+    seed = """
+import asyncio, json
+from pathlib import Path
 from mcp_studio import main
-async def unexpected_execution_reconciliation():
-    raise AssertionError('execution reconciliation must be skipped while Herdr is offline')
-main.gateway_sessions.reconcile_pstack_execution_work = unexpected_execution_reconciliation
+async def seed():
+    await main.db.init()
+    work = await main.db.create_work({'workspace':'original', 'label':'original work',
+        'dispatch_mode':'herdr', 'metadata':{'pstack_task_id':'TASK-6CD46979BC14'}}, 'offline')
+    task = {'task_id':'TASK-6CD46979BC14', 'trace_id':'trace-original', 'status':'active',
+        'execution_state':'waiting', 'work_id':work['id'],
+        'lifecycle':{'revision':7, 'status':'active', 'current_phase':'coding',
+            'checkpoints':[{'phase':'plan', 'evidence':'original checkpoint'}]},
+        'herdr_tab':{'owner':'pstack', 'status':'open', 'tab_id':'original-tab'}}
+    logical = await main.db.create_session({'client_id':'original', 'server_id':'offline',
+        'metadata':{'active_pstack_task':task}})
+    managed = await main.db.create_managed_session(name='original', workspace_key='original',
+        project_path=str(Path(main.settings.studio.database).parent), server_id='offline',
+        port=18001, desired_state='stopped', metadata={'active_pstack_task':task})
+    await main.db.create_gateway_session(studio_session_id=logical['id'], client_id='original',
+        client_type='chatgpt', server_id='offline', upstream_session_id=None,
+        protocol_version=None, init_payload={}, managed_session_id=managed['id'],
+        metadata={'active_pstack_task':task})
+    await main.db.add_event('pstack.lifecycle.checkpoint', 'original checkpoint',
+        data={'task_id':task['task_id'], 'trace_id':task['trace_id'], 'lifecycle':task['lifecycle']})
+    baseline = {'task':task, 'work':await main.db.list_work(),
+        'checkpoints':await main.db.list_events(kind_prefix='pstack.lifecycle.checkpoint')}
+    Path(main.settings.studio.database + '.baseline').write_text(json.dumps(baseline))
+asyncio.run(seed())
+"""
+    script = """
+import asyncio, json, httpx
+from pathlib import Path
+from mcp_studio import main
+async def assert_preserved():
+    baseline = json.loads(Path(main.settings.studio.database + '.baseline').read_text())
+    for lister in (main.db.list_sessions, main.db.list_gateway_sessions, main.db.list_managed_sessions):
+        rows = await lister()
+        assert len(rows) == 1, rows
+        assert rows[0]['metadata']['active_pstack_task'] == baseline['task'], rows
+    assert await main.db.list_work() == baseline['work']
+    assert await main.db.list_events(kind_prefix='pstack.lifecycle.checkpoint') == baseline['checkpoints']
 async def run():
-    for _ in range(2):
-        async with main.lifespan(main.app):
-            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url='http://local') as client:
-                response = await client.get('/healthz')
-                assert response.status_code == 200, response.text
-                assert response.json()['ok'] is True
+    async with main.lifespan(main.app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url='http://local') as client:
+            for _ in range(3):
+                assert (await client.get('/healthz')).status_code == 200
+                activity = await client.get('/api/pstack/activity')
+                assert activity.status_code == 200, activity.text
+                assert 'TASK-6CD46979BC14' in activity.text
+                assert 'TASK-934E2F1E6CC3' not in activity.text
                 assert main.app.state.herdr_startup_reconciliation == {'status':'deferred', 'reason':'server_not_running'}
-                assert (await client.get('/.well-known/oauth-authorization-server')).status_code != 500
+                await assert_preserved()
+                await asyncio.sleep(0.6)
+    await assert_preserved()
 asyncio.run(run())
 """
     if unexpected:
         script = script.replace("async def run():", "async def broken():\n    raise RuntimeError('unexpected reconciliation bug')\nmain.gateway_sessions.reconcile_pstack_terminal_tabs = broken\nasync def run():")
     env = {**os.environ, "MCP_STUDIO_CONFIG":str(config),
            "PATH":str(offline_cli.parent) + os.pathsep + os.environ["PATH"]}
-    result = subprocess.run([sys.executable, "-c", script], env=env,
-                            capture_output=True, text=True, timeout=60)
-    if unexpected:
-        assert result.returncode != 0
-        assert "unexpected reconciliation bug" in result.stderr
-        return
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert (tmp_path / "calls").read_text().splitlines() == ["probe", "probe"]
-    assert "application startup failed" not in result.stderr.lower()
-    assert result.stderr.count("startup terminal-tab reconciliation deferred") == 2
+    seeded = subprocess.run([sys.executable, "-c", seed], env=env,
+                            capture_output=True, text=True, timeout=30)
+    assert seeded.returncode == 0, seeded.stdout + seeded.stderr
+    for _ in range(1 if unexpected else 3):
+        result = subprocess.run([sys.executable, "-c", script], env=env,
+                                capture_output=True, text=True, timeout=30)
+        if unexpected:
+            assert result.returncode != 0
+            assert "unexpected reconciliation bug" in result.stderr
+            return
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert result.stderr.count("startup terminal-tab reconciliation deferred") == 1
+    assert (tmp_path / "calls").read_text().splitlines() == ["probe"] * 3
 
 
 @pytest.mark.asyncio
@@ -184,3 +229,47 @@ async def test_unexpected_terminal_tab_close_failure_surfaces(tmp_path, monkeypa
     monkeypatch.setattr(herdr, "close_task_tab", broken_close)
     with pytest.raises(ValueError, match="unexpected close invariant"):
         await gateway.reconcile_pstack_terminal_tabs()
+
+
+@pytest.mark.asyncio
+async def test_deferred_terminal_cleanup_can_reconcile_later(tmp_path, offline_cli, monkeypatch):
+    db, _, gateway = await make_boundary(tmp_path, offline_cli, monkeypatch)
+    task = {"task_id":"TASK-6CD46979BC14", "trace_id":"original", "status":"completed",
+            "lifecycle":{"revision":7, "checkpoints":[{"evidence":"preserved"}]},
+            "herdr_tab":{"owner":"pstack", "status":"open", "tab_id":"old-tab"}}
+    session = await db.create_session({"client_id":"original", "server_id":"offline",
+                                      "metadata":{"active_pstack_task":task}})
+    assert (await gateway.reconcile_pstack_terminal_tabs())["status"] == "deferred"
+    assert (await db.get_session(session["id"]))["metadata"]["active_pstack_task"] == task
+    (tmp_path / "available").touch()
+    result = await gateway.reconcile_pstack_terminal_tabs()
+    assert result["terminal_closed"] == 1
+    preserved = (await db.get_session(session["id"]))["metadata"]["active_pstack_task"]
+    assert preserved["task_id"] == task["task_id"]
+    assert preserved["lifecycle"] == task["lifecycle"]
+    assert preserved["herdr_tab"]["status"] == "closed"
+    assert (await gateway.reconcile_pstack_terminal_tabs())["patched"] == 0
+    assert len(await db.list_sessions()) == 1
+    assert await db.list_work() == []
+
+
+@pytest.mark.asyncio
+async def test_missing_cli_is_unavailable(tmp_path, monkeypatch):
+    _, _, gateway = await make_boundary(tmp_path, tmp_path / "missing-cli", monkeypatch)
+    assert await gateway.reconcile_pstack_terminal_tabs() == {
+        "status":"deferred", "reason":"cli_not_found"}
+
+
+@pytest.mark.asyncio
+async def test_cli_timeout_is_unavailable_and_process_reaped(tmp_path, monkeypatch):
+    cli = tmp_path / "hung-cli"
+    pid_file = tmp_path / "pid"
+    cli.write_text("#!/usr/bin/env python3\nimport os, time\n" +
+                   f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n" +
+                   "time.sleep(30)\n")
+    cli.chmod(0o755)
+    _, herdr, _ = await make_boundary(tmp_path, cli, monkeypatch)
+    with pytest.raises(HerdrUnavailable, match="timeout"):
+        await herdr._run_cli_json("tab", "list", timeout_seconds=1)
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)
