@@ -273,3 +273,210 @@ async def test_cli_timeout_is_unavailable_and_process_reaped(tmp_path, monkeypat
         await herdr._run_cli_json("tab", "list", timeout_seconds=1)
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid_file.read_text()), 0)
+
+@pytest.mark.asyncio
+async def test_offline_substrate_waits_without_creating_execution_work(
+    tmp_path, offline_cli, monkeypatch
+):
+    db, _, gateway = await make_boundary(tmp_path, offline_cli, monkeypatch)
+    task = {
+        "task_id": "TASK-P02-OFFLINE",
+        "trace_id": "TRACE-P02-OFFLINE",
+        "goal": "Exercise executor health",
+        "status": "ready_for_hirda",
+        "execution_state": "none",
+        "workflow_directive": {"prompt": "do the work"},
+        "lifecycle": {"status": "active"},
+        "execution_environment": {
+            "schema": "hirda-execution-environment-v1",
+            "status": "planned",
+        },
+    }
+    identity = (task["task_id"], task["trace_id"], dict(task["lifecycle"]))
+
+    opened = await gateway._open_pstack_herdr_tab(
+        task,
+        managed_session={"project_path": str(tmp_path)},
+    )
+
+    assert (opened["task_id"], opened["trace_id"], opened["lifecycle"]) == identity
+    assert opened["status"] == "waiting"
+    assert opened["execution_state"] == "waiting_for_executor"
+    assert opened["execution_substrate"]["state"] == "offline"
+    assert opened["execution_substrate"]["reason"] == "server_not_running"
+    assert opened["execution_environment"]["status"] == "unavailable"
+    assert await db.list_work() == []
+
+    ensured = await gateway._ensure_pstack_execution_work(
+        "gws-offline",
+        opened,
+        managed_session={"id": "ms-offline", "project_path": str(tmp_path)},
+    )
+    assert ensured["status"] == "waiting"
+    assert ensured["execution_state"] == "waiting_for_executor"
+    assert ensured["execution_substrate"]["state"] == "offline"
+    assert await db.list_work() == []
+
+
+@pytest.mark.asyncio
+async def test_existing_work_is_suspended_when_executor_becomes_unavailable(
+    tmp_path, offline_cli, monkeypatch
+):
+    db, _, gateway = await make_boundary(tmp_path, offline_cli, monkeypatch)
+    work = await db.create_work(
+        {
+            "label": "existing",
+            "workspace": str(tmp_path),
+            "lease_mode": "write",
+            "dispatch_mode": "herdr",
+            "instruction": "continue",
+        },
+        "offline",
+    )
+    task = {
+        "task_id": "TASK-P02-SUSPEND",
+        "trace_id": "TRACE-P02-SUSPEND",
+        "status": "running",
+        "execution_state": "waiting_agent",
+        "work_id": work["id"],
+        "workflow_directive": {"prompt": "continue"},
+        "lifecycle": {"status": "active"},
+        "execution_substrate": {
+            "schema": "hirda-execution-substrate-health-v1",
+            "kind": "herdr",
+            "state": "offline",
+            "reason": "server_not_running",
+            "observed_at": "2026-10-07T00:00:00+00:00",
+        },
+    }
+
+    ensured = await gateway._ensure_pstack_execution_work(
+        "gws-offline",
+        task,
+        managed_session={"id": "ms-offline", "project_path": str(tmp_path)},
+    )
+
+    assert ensured["task_id"] == task["task_id"]
+    assert ensured["trace_id"] == task["trace_id"]
+    assert ensured["work_id"] == work["id"]
+    assert ensured["status"] == "waiting"
+    assert ensured["execution_state"] == "suspended_executor_unavailable"
+    assert (await db.get_work(work["id"]))["state"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_offline_substrate_recovers_when_executor_returns(
+    tmp_path, offline_cli, monkeypatch
+):
+    db, herdr, gateway = await make_boundary(tmp_path, offline_cli, monkeypatch)
+    work = await db.create_work(
+        {
+            "label": "recoverable",
+            "workspace": str(tmp_path),
+            "lease_mode": "write",
+            "dispatch_mode": "herdr",
+            "instruction": "continue",
+        },
+        "offline",
+    )
+
+    async def recovered_probe():
+        return None
+
+    async def recovered_tab(_task, *, cwd=None):
+        assert cwd == str(tmp_path)
+        return {
+            "status": "open",
+            "owner": "pstack",
+            "persistent": False,
+            "workspace_id": "wH",
+            "tab_id": "wH:t-recovered",
+            "root_pane_id": "wH:p-recovered",
+        }
+
+    monkeypatch.setattr(herdr, "probe_execution", recovered_probe)
+    monkeypatch.setattr(herdr, "create_task_tab", recovered_tab)
+
+    task = {
+        "task_id": "TASK-P02-RECOVER",
+        "trace_id": "TRACE-P02-RECOVER",
+        "status": "waiting",
+        "execution_state": "suspended_executor_unavailable",
+        "work_id": work["id"],
+        "workflow_directive": {"prompt": "continue"},
+        "lifecycle": {"status": "active", "revision": 7},
+        "execution_substrate": {
+            "schema": "hirda-execution-substrate-health-v1",
+            "kind": "herdr",
+            "state": "offline",
+            "reason": "server_not_running",
+            "observed_at": "2026-10-07T00:00:00+00:00",
+        },
+        "execution_environment": {
+            "schema": "hirda-execution-environment-v1",
+            "mode": "private",
+            "status": "unavailable",
+        },
+        "herdr_tab": {
+            "status": "unavailable",
+            "owner": "pstack",
+            "persistent": False,
+            "error": "HerdrUnavailable: herdr_unavailable: server_not_running",
+        },
+    }
+
+    ensured = await gateway._ensure_pstack_execution_work(
+        "gws-recovered",
+        task,
+        managed_session={"id": "ms-recovered", "project_path": str(tmp_path)},
+    )
+
+    assert ensured["task_id"] == task["task_id"]
+    assert ensured["trace_id"] == task["trace_id"]
+    assert ensured["lifecycle"] == task["lifecycle"]
+    assert ensured["work_id"] == work["id"]
+    assert ensured["execution_substrate"]["state"] == "healthy"
+    assert ensured["herdr_tab"]["status"] == "open"
+    assert ensured["herdr_tab"]["tab_id"] == "wH:t-recovered"
+    assert ensured["execution_environment"]["status"] == "active"
+    assert ensured["status"] == "queued"
+    assert ensured["execution_state"] == "none"
+    assert len(await db.list_work()) == 1
+
+
+@pytest.mark.asyncio
+async def test_timeout_is_degraded_executor_health(
+    tmp_path, offline_cli, monkeypatch
+):
+    _, herdr, gateway = await make_boundary(tmp_path, offline_cli, monkeypatch)
+
+    async def timeout_tab(*_args, **_kwargs):
+        raise HerdrUnavailable("timeout")
+
+    monkeypatch.setattr(herdr, "create_task_tab", timeout_tab)
+    task = {
+        "task_id": "TASK-P02-DEGRADED",
+        "trace_id": "TRACE-P02-DEGRADED",
+        "status": "ready_for_hirda",
+        "execution_state": "none",
+        "lifecycle": {"status": "active"},
+        "execution_environment": {"status": "planned"},
+    }
+
+    opened = await gateway._open_pstack_herdr_tab(
+        task,
+        managed_session={"project_path": str(tmp_path)},
+    )
+
+    assert opened["status"] == "waiting"
+    assert opened["execution_state"] == "waiting_for_executor"
+    assert opened["execution_substrate"]["state"] == "degraded"
+    assert opened["execution_substrate"]["reason"] == "timeout"
+
+
+def test_task_substrate_health_infers_healthy_from_open_tab():
+    health = GatewaySessionManager._pstack_execution_substrate(
+        {"herdr_tab": {"status": "open", "tab_id": "wH:t1"}}
+    )
+    assert health["state"] == "healthy"
+    assert health["kind"] == "herdr"

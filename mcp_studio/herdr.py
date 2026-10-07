@@ -7,7 +7,7 @@ import shutil
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 from .db import Database
 from .health import HealthManager
@@ -439,6 +439,32 @@ class HerdrUnavailable(RuntimeError):
     def __init__(self, reason: str):
         self.reason = reason
         super().__init__(f"herdr_unavailable: {reason}")
+
+
+ExecutionSubstrateState = Literal["healthy", "degraded", "offline"]
+
+
+class ExecutionSubstrateHealth(TypedDict):
+    schema: str
+    kind: str
+    state: ExecutionSubstrateState
+    reason: str | None
+    observed_at: str
+
+
+def herdr_execution_substrate_health(
+    state: ExecutionSubstrateState,
+    *,
+    reason: str | None = None,
+) -> ExecutionSubstrateHealth:
+    """Build the canonical HIRDA view of Herdr execution availability."""
+    return {
+        "schema": "hirda-execution-substrate-health-v1",
+        "kind": "herdr",
+        "state": state,
+        "reason": reason,
+        "observed_at": _now(),
+    }
 
 
 class HerdrManager:

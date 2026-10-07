@@ -20,7 +20,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
-from .herdr import HerdrUnavailable
+from .herdr import HerdrUnavailable, herdr_execution_substrate_health
 from .db import Database
 from .settings import Settings
 from .oauth import OAuthManager
@@ -3237,6 +3237,40 @@ class GatewaySessionManager:
                     await updater(managed_session_id, managed_metadata)
 
 
+    @staticmethod
+    def _pstack_executor_wait_state(task: dict[str, Any]) -> str:
+        execution_state = str(task.get("execution_state") or "").strip().casefold()
+        if task.get("work_id") or execution_state in {
+            "running",
+            "assigned",
+            "dispatching",
+            "waiting_agent",
+            "reconnecting",
+            "recovering",
+        }:
+            return "suspended_executor_unavailable"
+        return "waiting_for_executor"
+
+    @staticmethod
+    def _pstack_execution_substrate(task: dict[str, Any]) -> dict[str, Any] | None:
+        substrate = task.get("execution_substrate")
+        if isinstance(substrate, dict) and substrate.get("state"):
+            return dict(substrate)
+        tab = task.get("herdr_tab")
+        tab = dict(tab) if isinstance(tab, dict) else {}
+        tab_status = str(tab.get("status") or "").strip().casefold()
+        if tab_status == "open":
+            return herdr_execution_substrate_health("healthy")
+        if tab_status == "unavailable":
+            error = str(tab.get("error") or "").strip()
+            state = (
+                "offline"
+                if any(token in error for token in ("server_not_running", "cli_not_found"))
+                else "degraded"
+            )
+            return herdr_execution_substrate_health(state, reason=error or None)
+        return None
+
     async def _open_pstack_herdr_tab(
         self,
         task: dict[str, Any],
@@ -3248,13 +3282,33 @@ class GatewaySessionManager:
             return task
         existing = dict(task.get("herdr_tab") or {})
         if str(existing.get("status") or "").casefold() == "open":
-            return task
+            return {
+                **task,
+                "execution_substrate": herdr_execution_substrate_health("healthy"),
+            }
+        substrate: dict[str, Any] | None = None
         try:
             tab = await herdr.create_task_tab(
                 task,
                 cwd=str(managed_session.get("project_path") or "").strip() or None,
             )
+        except HerdrUnavailable as exc:
+            state = (
+                "offline"
+                if exc.reason in {"server_not_running", "cli_not_found"}
+                else "degraded"
+            )
+            substrate = herdr_execution_substrate_health(state, reason=exc.reason)
+            tab = {
+                "status": "unavailable",
+                "owner": "pstack",
+                "persistent": False,
+                "error": f"{type(exc).__name__}: {exc}"[:1000],
+            }
         except Exception as exc:
+            substrate = herdr_execution_substrate_health(
+                "degraded", reason=f"{type(exc).__name__}: {exc}"[:1000]
+            )
             tab = {
                 "status": "unavailable",
                 "owner": "pstack",
@@ -3292,15 +3346,31 @@ class GatewaySessionManager:
                 correlation_id=str(task.get("trace_id") or ""),
             )
         environment = dict(task.get("execution_environment") or {})
-        if str(tab.get("status") or "").casefold() == "open":
+        tab_status = str(tab.get("status") or "").casefold()
+        if tab_status == "open":
             environment = bind_private_task_tab(environment, tab)
-        elif environment and str(tab.get("status") or "").casefold() == "unavailable":
+            substrate = herdr_execution_substrate_health("healthy")
+        elif environment and tab_status == "unavailable":
             environment = {
                 **environment,
                 "status": "unavailable",
                 "error": tab.get("error"),
             }
-        return {**task, "herdr_tab": tab, "execution_environment": environment}
+        result = {
+            **task,
+            "herdr_tab": tab,
+            "execution_environment": environment,
+            "execution_substrate": substrate
+            or herdr_execution_substrate_health("degraded", reason="tab_unavailable"),
+        }
+        if tab_status == "unavailable":
+            result.update(
+                {
+                    "status": "waiting",
+                    "execution_state": self._pstack_executor_wait_state(task),
+                }
+            )
+        return result
 
     async def _close_pstack_herdr_tab(
         self,
@@ -3835,6 +3905,47 @@ class GatewaySessionManager:
         ):
             return task_value
 
+        substrate = self._pstack_execution_substrate(task_value)
+        if substrate and str(substrate.get("state") or "").casefold() in {
+            "offline",
+            "degraded",
+        }:
+            try:
+                await self.herdr.probe_execution()
+            except HerdrUnavailable as exc:
+                state = (
+                    "offline"
+                    if exc.reason in {"server_not_running", "cli_not_found"}
+                    else "degraded"
+                )
+                substrate = herdr_execution_substrate_health(
+                    state, reason=exc.reason
+                )
+                return {
+                    **task_value,
+                    "status": "waiting",
+                    "execution_state": self._pstack_executor_wait_state(task_value),
+                    "execution_substrate": substrate,
+                }
+            task_value = await self._open_pstack_herdr_tab(
+                {
+                    **task_value,
+                    "execution_substrate": herdr_execution_substrate_health("healthy"),
+                },
+                managed_session=managed_session,
+            )
+            substrate = self._pstack_execution_substrate(task_value)
+            if substrate and str(substrate.get("state") or "").casefold() in {
+                "offline",
+                "degraded",
+            }:
+                return {
+                    **task_value,
+                    "status": "waiting",
+                    "execution_state": self._pstack_executor_wait_state(task_value),
+                    "execution_substrate": substrate,
+                }
+
         existing_work_id = str(task_value.get("work_id") or "").strip()
         if existing_work_id:
             try:
@@ -4146,7 +4257,12 @@ class GatewaySessionManager:
             )
             patch = {
                 key: reconciled.get(key)
-                for key in ("work_id", "status", "execution_state")
+                for key in (
+                    "work_id",
+                    "status",
+                    "execution_state",
+                    "execution_substrate",
+                )
                 if reconciled.get(key) is not None
             }
             if patch:
@@ -5691,6 +5807,11 @@ class GatewaySessionManager:
             if task.get("lifecycle") != lifecycle:
                 task = {**task, "lifecycle": lifecycle}
                 await self._persist_active_pstack_task(gateway_session_id, task)
+            substrate = self._pstack_execution_substrate(task)
+            if substrate is None and not bool(task.get("deterministic_action")):
+                substrate = herdr_execution_substrate_health(
+                    "degraded", reason="execution_substrate_health_unknown"
+                )
             return {
                 "active": True,
                 "task_id": task.get("task_id"),
@@ -5698,6 +5819,16 @@ class GatewaySessionManager:
                 "goal": task.get("goal"),
                 "workflow": task.get("workflow"),
                 "status": task.get("status"),
+                "execution_state": task.get("execution_state"),
+                "execution_environment": task.get("execution_environment"),
+                "execution_substrate": substrate,
+                "health": {
+                    "control_plane": "healthy",
+                    "pstack_control": "healthy",
+                    "execution_substrate": (
+                        substrate.get("state") if isinstance(substrate, dict) else "healthy"
+                    ),
+                },
                 "lifecycle": lifecycle,
             }
         if name == "mcpstudio_pstack_checkpoint":
