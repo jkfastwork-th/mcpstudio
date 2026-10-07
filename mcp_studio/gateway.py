@@ -4,6 +4,7 @@ import asyncio
 import base64
 import asyncio
 import hashlib
+import logging
 import json
 import os
 import re
@@ -19,6 +20,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
+from .herdr import HerdrUnavailable
 from .db import Database
 from .settings import Settings
 from .oauth import OAuthManager
@@ -3303,6 +3305,8 @@ class GatewaySessionManager:
     async def _close_pstack_herdr_tab(
         self,
         task: dict[str, Any],
+        *,
+        strict: bool = False,
     ) -> dict[str, Any]:
         tab = dict(task.get("herdr_tab") or {})
         if not tab:
@@ -3316,6 +3320,8 @@ class GatewaySessionManager:
         try:
             closed = await herdr.close_task_tab(tab)
         except Exception as exc:
+            if strict:
+                raise
             closed = {
                 **tab,
                 "status": "close_failed",
@@ -3386,6 +3392,16 @@ class GatewaySessionManager:
         return lifecycle_status == "completed"
 
     async def reconcile_pstack_terminal_tabs(self) -> dict[str, Any]:
+        try:
+            return await self._reconcile_pstack_terminal_tabs()
+        except HerdrUnavailable as exc:
+            logging.getLogger(__name__).warning(
+                "Herdr unavailable (%s); startup terminal-tab reconciliation deferred",
+                exc.reason,
+            )
+            return {"status": "deferred", "reason": exc.reason}
+
+    async def _reconcile_pstack_terminal_tabs(self) -> dict[str, Any]:
         """Close disposable tabs for terminal tasks and sweep orphan PStack tabs."""
         canonical_rows = list(await self.db.list_sessions(limit=500))
         for lister_name in ("list_gateway_sessions", "list_managed_sessions"):
@@ -3398,12 +3414,16 @@ class GatewaySessionManager:
             metadata = row.get("metadata")
             metadata = metadata if isinstance(metadata, dict) else {}
             task = metadata.get("active_pstack_task")
-            task = dict(task) if isinstance(task, dict) else {}
+            if task is not None and not isinstance(task, dict):
+                raise ValueError("Malformed canonical active_pstack_task")
+            task = dict(task or {})
             task_id = str(task.get("task_id") or "").strip()
             if not task_id:
                 continue
             lifecycle = task.get("lifecycle")
-            lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+            if lifecycle is not None and not isinstance(lifecycle, dict):
+                raise ValueError("Malformed canonical PStack lifecycle")
+            lifecycle = lifecycle or {}
             score = (
                 int(lifecycle.get("revision") or 0),
                 float(lifecycle.get("updated_at") or task.get("opened_at") or 0.0),
@@ -3411,6 +3431,10 @@ class GatewaySessionManager:
             current = tasks.get(task_id)
             if current is None or score > current[0]:
                 tasks[task_id] = (score, task)
+
+        probe = getattr(getattr(self, "herdr", None), "probe_execution", None)
+        if callable(probe):
+            await probe()
 
         terminal_closed = 0
         patched = 0
@@ -3428,7 +3452,7 @@ class GatewaySessionManager:
                 continue
             if self._pstack_task_is_terminal(task):
                 before_status = str(tab.get("status") or "").casefold()
-                closed_task = await self._close_pstack_herdr_tab(task)
+                closed_task = await self._close_pstack_herdr_tab(task, strict=True)
                 closed_tab = dict(closed_task.get("herdr_tab") or {})
                 closed_environment = dict(closed_task.get("execution_environment") or {})
                 if closed_tab != tab or closed_environment != dict(task.get("execution_environment") or {}):

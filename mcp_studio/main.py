@@ -262,8 +262,10 @@ async def lifespan(app: FastAPI):
     await observability.start()
     await scheduler.start()
     await execution.start()
-    await gateway_sessions.reconcile_pstack_execution_work()
-    await gateway_sessions.reconcile_pstack_terminal_tabs()
+    reconciliation = await gateway_sessions.reconcile_pstack_terminal_tabs()
+    app.state.herdr_startup_reconciliation = reconciliation
+    if reconciliation.get("status") != "deferred":
+        await gateway_sessions.reconcile_pstack_execution_work()
     await connectivity.start()
     await db.add_audit("studio.start", actor="system", data={"version": "0.9.10-m6.2.5", "production_mode": settings.studio.production_mode})
     yield

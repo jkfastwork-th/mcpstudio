@@ -433,6 +433,14 @@ def _read_agent_session_error(
     return None
 
 
+class HerdrUnavailable(RuntimeError):
+    """The optional execution substrate cannot currently accept requests."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(f"herdr_unavailable: {reason}")
+
+
 class HerdrManager:
     def __init__(self, settings: Settings, db: Database, health: HealthManager):
         self.settings = settings
@@ -512,19 +520,22 @@ class HerdrManager:
         local = Path.home() / ".local" / "bin" / "herdr"
         if local.is_file():
             return str(local)
-        raise RuntimeError("herdr_cli_not_found")
+        raise HerdrUnavailable("cli_not_found")
 
     async def _run_cli_json(
         self,
         *args: str,
         timeout_seconds: float = 15.0,
     ) -> dict[str, Any]:
-        proc = await asyncio.create_subprocess_exec(
-            self._herdr_cli_binary(),
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self._herdr_cli_binary(),
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as exc:
+            raise HerdrUnavailable("cli_not_found") from exc
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(),
@@ -533,11 +544,22 @@ class HerdrManager:
         except TimeoutError:
             proc.kill()
             await proc.communicate()
-            raise RuntimeError("herdr_cli_timeout") from None
+            raise HerdrUnavailable("timeout") from None
         stdout_text = stdout.decode("utf-8", errors="replace").strip()
         stderr_text = stderr.decode("utf-8", errors="replace").strip()
         if proc.returncode != 0:
             detail = stderr_text or stdout_text or f"exit_{proc.returncode}"
+            # Herdr's CLI emits this stable error code when its socket is absent.
+            if detail.strip() == "server_not_running":
+                raise HerdrUnavailable("server_not_running")
+            try:
+                error_payload = json.loads(detail)
+            except json.JSONDecodeError:
+                error_payload = None
+            error = error_payload.get("error") if isinstance(error_payload, dict) else None
+            code = error.get("code") if isinstance(error, dict) else error
+            if code == "server_not_running":
+                raise HerdrUnavailable("server_not_running")
             raise RuntimeError(f"herdr_cli_failed: {detail[:500]}")
         if not stdout_text:
             return {}
@@ -764,6 +786,10 @@ class HerdrManager:
             "closed_at": _now(),
         }
 
+
+    async def probe_execution(self) -> None:
+        """Check CLI/socket availability before reconciliation mutates tasks."""
+        await self._run_cli_json("tab", "list")
 
     async def reconcile_disposable_task_tabs(
         self,
