@@ -3648,6 +3648,8 @@ class GatewaySessionManager:
         if lifecycle.get("status") == "completed":
             updated = await self._close_pstack_herdr_tab(updated)
         await self._persist_active_pstack_task(gateway_session_id, updated)
+        if self._pstack_task_is_terminal(updated):
+            await self._reconcile_terminal_pstack_work_for_task(updated)
         trace_id = str(updated.get("trace_id") or "")
         phase_key = str(phase or "").strip().casefold()
         status_key = str(status or "").strip().casefold()
@@ -4235,7 +4237,137 @@ class GatewaySessionManager:
             "execution_state": "queued",
         }
 
-    async def reconcile_pstack_execution_work(self) -> dict[str, int]:
+    async def _reconcile_terminal_pstack_work_for_task(
+        self, task: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Retire only never-dispatched execution entries for terminal tasks.
+
+        Dispatched work may still be executing upstream even if the PStack
+        methodology finished. Preserve its worker and lease until separately
+        certified; never infer remote termination from a lifecycle flag.
+        """
+        if not self._pstack_task_is_terminal(task):
+            return {"cancelled": [], "uncertain": []}
+        lifecycle = task.get("lifecycle")
+        lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+        state = str(lifecycle.get("status") or "").strip().casefold()
+        disposition = str(lifecycle.get("terminal_disposition") or "").strip().casefold()
+        task_status = str(task.get("status") or "").strip().casefold()
+        # Blocked tasks may be resumed. Never infer permission to retire them.
+        if state != "completed" and task_status not in {"completed", "expired", "cancelled"}:
+            return {"cancelled": [], "uncertain": []}
+        if disposition and disposition not in {"completed", "expired", "cancelled"}:
+            return {"cancelled": [], "uncertain": []}
+        task_id = str(task.get("task_id") or "").strip()
+        if not task_id:
+            return {"cancelled": [], "uncertain": []}
+        reconciler = getattr(
+            self.db, "reconcile_undispatched_terminal_pstack_work", None
+        )
+        if not callable(reconciler):
+            return {"cancelled": [], "uncertain": []}
+        result = await reconciler(task_id)
+        if result["cancelled"]:
+            await self.db.add_event(
+                "pstack.execution.terminal_reconciled",
+                f"Cancelled undispatched Work for terminal PStack task {task_id}",
+                data={"task_id": task_id, "work_ids": result["cancelled"],
+                      "disposition": state or task_status},
+            )
+            auditor = getattr(self.db, "add_audit", None)
+            if callable(auditor):
+                await auditor(
+                    "pstack.work.terminal_reconciled",
+                    actor="hirda/reconciler",
+                    target_type="pstack_task",
+                    target_id=task_id,
+                    data={
+                        "work_ids": result["cancelled"],
+                        "reason": "canonical_pstack_terminal_undispatched",
+                    },
+                )
+            scheduler = getattr(self, "scheduler", None)
+            if scheduler is not None:
+                scheduler.kick()
+        if result["uncertain"]:
+            await self.db.add_event(
+                "pstack.execution.terminal_uncertain",
+                f"Dispatched Work for PStack {task_id} requires agent verification",
+                severity="warning",
+                data={"task_id": task_id, "work_ids": result["uncertain"],
+                      "reason": "upstream_execution_not_proven_stopped"},
+            )
+        return result
+
+    async def reconcile_pstack_terminal_work(self) -> dict[str, int]:
+        """Startup reconciliation using all surviving canonical task copies.
+
+        Pick the highest lifecycle revision, but fail closed when equally
+        recent replicas disagree on terminal status. Historical gateway
+        sessions allow cleanup even when the managed session now references a
+        different, newer task.
+        """
+        copies: dict[str, list[dict[str, Any]]] = {}
+        for rows in (
+            await self.db.list_gateway_sessions(limit=5000),
+            await self.db.list_managed_sessions(limit=5000),
+            await self.db.list_sessions(limit=5000),
+        ):
+            for record in rows:
+                metadata = record.get("metadata")
+                metadata = metadata if isinstance(metadata, dict) else {}
+                task = metadata.get("active_pstack_task")
+                if not isinstance(task, dict):
+                    continue
+                key = str(task.get("task_id") or "").strip()
+                if key:
+                    copies.setdefault(key, []).append(dict(task))
+        scanned = cancelled = uncertain = 0
+        terminal_task_ids: list[str] = []
+        for _key, tasks in copies.items():
+            def revision(task: dict[str, Any]) -> tuple[int, float]:
+                lifecycle = task.get("lifecycle")
+                lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+                try:
+                    rev = int(lifecycle.get("revision") or 0)
+                    updated = float(lifecycle.get("updated_at") or 0)
+                except (TypeError, ValueError):
+                    return (-1, -1.0)
+                return rev, updated
+
+            most_recent = max(revision(task) for task in tasks)
+            authoritative = [
+                task for task in tasks if revision(task) == most_recent
+            ]
+            if not authoritative or not all(
+                self._pstack_task_is_terminal(task)
+                and (
+                    str((task.get("lifecycle") or {}).get("status") or "").casefold()
+                    == "completed"
+                    or str(task.get("status") or "").casefold()
+                    in {"completed", "expired", "cancelled"}
+                )
+                for task in authoritative
+            ):
+                continue
+            scanned += 1
+            terminal_task_ids.append(_key)
+            result = await self._reconcile_terminal_pstack_work_for_task(
+                authoritative[0]
+            )
+            cancelled += len(result["cancelled"])
+            uncertain += len(result["uncertain"])
+        return {
+            "scanned": scanned,
+            "cancelled": cancelled,
+            "uncertain": uncertain,
+            "terminal_task_ids": sorted(terminal_task_ids),
+        }
+
+
+    async def reconcile_pstack_execution_work(
+        self, *, skip_terminal_task_ids: set[str] | None = None,
+    ) -> dict[str, int]:
         """Queue execution for nonterminal PStack tasks that predate the bridge."""
         scanned = 0
         queued = 0
@@ -4248,6 +4380,11 @@ class GatewaySessionManager:
             task_id = str(task.get("task_id") or "").strip()
             trace_id = str(task.get("trace_id") or "").strip()
             if not task_id or not trace_id:
+                continue
+            # A managed-session mirror may lag behind a terminal checkpoint
+            # already persisted in an older gateway session. Do not recreate
+            # cancelled Work from that stale mirror during startup.
+            if task_id in (skip_terminal_task_ids or set()):
                 continue
             scanned += 1
             lifecycle = task.get("lifecycle")

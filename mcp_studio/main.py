@@ -273,12 +273,23 @@ async def lifespan(app: FastAPI):
     await operations.start()
     await observability.start()
     await system_monitor.start()
+    # Cancel stale PStack-backed queued Work *before* Scheduler admission.
+    # Dispatched Work remains leased pending proof of upstream termination.
+    app.state.pstack_terminal_work_reconciliation = (
+        await gateway_sessions.reconcile_pstack_terminal_work()
+    )
     await scheduler.start()
     await execution.start()
     reconciliation = await gateway_sessions.reconcile_pstack_terminal_tabs()
     app.state.herdr_startup_reconciliation = reconciliation
     if reconciliation.get("status") != "deferred":
-        await gateway_sessions.reconcile_pstack_execution_work()
+        await gateway_sessions.reconcile_pstack_execution_work(
+            skip_terminal_task_ids=set(
+                app.state.pstack_terminal_work_reconciliation.get(
+                    "terminal_task_ids", []
+                )
+            )
+        )
     await connectivity.start()
     await db.add_audit("studio.start", actor="system", data={"version": "0.9.10-m6.2.5", "production_mode": settings.studio.production_mode})
     yield

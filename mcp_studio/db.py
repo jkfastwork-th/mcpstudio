@@ -2600,9 +2600,32 @@ class Database:
                             continue
                         if str(task.get("task_id") or "").strip() != task_key:
                             continue
+                        lifecycle = task.get("lifecycle")
+                        lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+                        # A late execution callback must not resurrect a
+                        # terminal methodology task as running/queued/waiting.
+                        # Explicit lifecycle changes go through the governed
+                        # checkpoint path rather than this execution mirror.
+                        terminal = (
+                            str(lifecycle.get("status") or "").casefold() == "completed"
+                            or str(task.get("status") or "").casefold()
+                            in {"completed", "expired", "cancelled"}
+                        )
+                        # Post-terminal cleanup still needs to mark disposable
+                        # tabs/lease descriptors closed. Only those resource
+                        # status fields may update a terminal task snapshot.
+                        effective = (
+                            {
+                                k: v for k, v in patch_value.items()
+                                if k in {"herdr_tab", "execution_environment"}
+                            }
+                            if terminal else patch_value
+                        )
+                        if not effective:
+                            continue
                         metadata["active_pstack_task"] = {
                             **task,
-                            **patch_value,
+                            **effective,
                         }
                         db.execute(
                             f"UPDATE {table} SET metadata_json=? WHERE id=?",
@@ -4404,6 +4427,67 @@ class Database:
                     },
                 }
         return await self._run(op)
+
+    async def reconcile_undispatched_terminal_pstack_work(
+        self, task_id: str,
+    ) -> dict[str, Any]:
+        """Cancel only unstarted Work records owned by a completed PStack task.
+
+        The decision and update share one SQLite transaction so the Scheduler
+        cannot assign a worker between the check and cancellation. Dispatched
+        work retains its worker/lease until upstream completion is proven.
+        """
+        key = str(task_id or "").strip()
+        if not key:
+            return {"cancelled": [], "uncertain": []}
+        now = _now()
+
+        def op() -> dict[str, list[str]]:
+            cancelled: list[str] = []
+            uncertain: list[str] = []
+            with self._connect() as db:
+                rows = db.execute(
+                    "SELECT * FROM work_items WHERE state IN ('queued','running')"
+                ).fetchall()
+                for row in rows:
+                    try:
+                        metadata = json.loads(row["metadata_json"] or "{}")
+                    except (ValueError, TypeError):
+                        continue
+                    if not isinstance(metadata, dict) or (
+                        str(metadata.get("pstack_task_id") or "").strip() != key
+                    ):
+                        continue
+                    safe = (
+                        row["state"] == "queued"
+                        and row["worker_id"] is None
+                        and not row["dispatch_attempts"]
+                        and not row["dispatched_at"]
+                        and str(row["execution_state"] or "").casefold()
+                        in {"none", "queued"}
+                    )
+                    if not safe:
+                        uncertain.append(row["id"])
+                        continue
+                    updated = db.execute(
+                        """UPDATE work_items
+                           SET state='cancelled', execution_state='cancelled',
+                               finished_at=?, updated_at=?,
+                               cancel_requested_at=?, last_execution_poll_at=?
+                           WHERE id=? AND state='queued' AND worker_id IS NULL
+                             AND COALESCE(dispatch_attempts,0)=0
+                             AND dispatched_at IS NULL
+                             AND execution_state IN ('none','queued')""",
+                        (now, now, now, now, row["id"]),
+                    )
+                    if updated.rowcount == 1:
+                        cancelled.append(row["id"])
+                    else:
+                        uncertain.append(row["id"])
+            return {"cancelled": cancelled, "uncertain": uncertain}
+
+        return await self._run(op)
+
 
     async def request_cancel_work(self, work_id: str) -> tuple[dict[str, Any], str]:
         """Request cancellation without claiming an already-sent upstream prompt stopped.
