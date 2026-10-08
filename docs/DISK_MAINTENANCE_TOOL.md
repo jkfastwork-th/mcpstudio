@@ -66,3 +66,50 @@ by the feature itself.
 - Before live certification, add integration tests running under the
   production FastAPI environment and test the authenticated API workflow;
   do not enable `apply` based only on unit tests.
+
+
+## OpenClaw systemd permission issue (HTTP 409 during Apply)
+
+If an approved plan is rejected by `apply` with
+`cleanup interrupted; inspect audited completed targets`, inspect
+the **local maintenance audit** before submitting any fresh plan.
+The original approval is single-use. Never replay its token.
+
+The production unit uses `ProtectHome=read-only` and
+`ProtectSystem=strict`. The local Codex release directories are not
+part of its existing `ReadWritePaths`, so the service can scan them
+but cannot remove them even with an owner-approved maintenance policy.
+
+Owner operator only, from a privileged terminal:
+
+```bash
+cd /home/alfred/mcp-studio
+sudo install -D -m 0644 systemd/mcp-studio-disk-maintenance.conf \
+  /etc/systemd/system/mcp-studio.service.d/50-disk-maintenance.conf
+sudo systemctl daemon-reload
+sudo systemctl restart mcp-studio.service
+systemctl is-active mcp-studio.service
+systemctl show mcp-studio.service -p ProtectHome -p ProtectSystem -p ReadWritePaths
+```
+
+Verify that both explicit `/home/alfred/.codex/packages/*/releases` paths
+are present in `ReadWritePaths`; `ProtectHome` must remain
+`read-only`, `ProtectSystem` must remain `strict`. The HIRDA
+machine's global `destructive` permission stays `false`.
+A service restart is required for systemd to apply the new mount rules.
+
+Before any retry, re-create a **fresh** plan via the existing owner
+terminal client. Do not reuse a previous approval token. The local
+owner reviews the new candidate manifest and explicitly confirms
+the fingerprint.
+
+To roll back **only this exception** (owner only):
+
+```bash
+sudo rm /etc/systemd/system/mcp-studio.service.d/50-disk-maintenance.conf
+sudo systemctl daemon-reload
+sudo systemctl restart mcp-studio.service
+```
+
+Do not use `systemctl revert` here; this machine already has other
+unrelated service drop-ins that must be preserved.
