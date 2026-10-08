@@ -548,6 +548,7 @@ def test_machine_public_snapshot_exposes_policy_without_secrets(tmp_path: Path):
         "write": True,
         "execute": False,
         "destructive": False,
+        "maintenance": False,
         "fail_closed_unknown": True,
     }
     assert "token" not in remote["providers"]["desktop_commander"]

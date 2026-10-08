@@ -28,6 +28,8 @@ class StudioConfig:
     herdr_poll_interval_seconds: int = 30
     scheduler_interval_seconds: float = 1.0
     scheduler_max_queue: int = 1000
+    # Requires separate per-machine maintenance=true policy and owner token.
+    disk_maintenance_enabled: bool = False
 
     # M3 execution supervisor. Automatic prompt dispatch remains opt-in so an
     # upgrade cannot unexpectedly send work to a live agent. Explicit dispatch

@@ -35,6 +35,7 @@ from .models import (
     RoutineCreate, RoutineUpdate, AIQualityCertificationSubmit, SkillDistillationRunRequest,
     SessionReclaim, OAuthClientCreate, TunnelRegister, ManagedWorkspaceRegister, ManagedSessionCreate, ManagedSessionRename, ManagedSessionPermissionsUpdate, ManagedSessionMachineUpdate, MachineCapabilityRouteRequest, MachineEnrollmentApprove, MachineEnrollmentReject, DevicePairingStart, DevicePairingVerify, DevicePairingApprove, DevicePairingReject, DeviceRevoke,
     GraftConfigureRequest, GraftQueryRequest, GraftRollbackRequest, ComputerRepairRequest, ManagedGatewayAttach, GatewayContextUsageReport, SessionHandoffPrepareRequest,
+    DiskMaintenancePlanRequest, DiskMaintenanceApprovalRequest, DiskMaintenanceApplyRequest,
     CapsuleCreate, CapsuleStageUpdate, CapsuleHandoff, CapsuleHandoffAck, CapsuleContractUpdate,
     CapsuleHandoffValidation, CapsuleHandoffApproval, CapsuleHandoffCompletion, LaneStateUpdate, CapsuleComplete,
 )
@@ -59,6 +60,7 @@ from .graft import GraftManager, GraftError
 from .integrations import IntegrationError, build_integration_manager
 from .machine_registry import MachineRegistryError
 from .node_registry import NodeRegistry
+from .disk_maintenance import DiskMaintenance, DiskMaintenanceError
 from .node_hardware import refresh_local_node_hardware
 from .node_backends import refresh_local_node_backends
 from .node_models import refresh_local_node_models
@@ -161,6 +163,7 @@ refresh_local_node_models(
 refresh_local_node_capabilities(
     machine_registry, settings.studio.node_backend_probes
 )
+disk_maintenance = DiskMaintenance(Path.home())
 node_health_monitor = NodeHealthMonitor(
     machine_registry,
     settings.studio.node_backend_probes,
@@ -3209,6 +3212,80 @@ async def device_pairing_revoke(
         raise HTTPException(status_code=404, detail="Unknown trusted device")
     except DevicePairingError as exc:
         raise _device_pairing_error(exc)
+
+
+def _require_disk_maintenance_owner(request: Request) -> None:
+    # Header token only: cookie-authenticated state changes are vulnerable to CSRF.
+    if not oauth.verify_owner_token(request.headers.get("x-hirda-owner-token", "")):
+        raise HTTPException(status_code=403, detail="Explicit owner token is required")
+
+
+@app.get("/api/maintenance/disk/status")
+async def disk_maintenance_status(request: Request):
+    _require_disk_maintenance_owner(request)
+    machine = machine_registry.get_node(machine_registry.local_machine_id)
+    policy = machine_registry.authorize_session({}, "maintenance")
+    return {
+        "enabled": bool(settings.studio.disk_maintenance_enabled),
+        "machine_id": machine.machine_id,
+        "machine_local": machine.local,
+        "maintenance_permission": policy.allowed,
+        "arbitrary_paths_supported": False,
+    }
+
+
+@app.post("/api/maintenance/disk/plan")
+async def disk_maintenance_plan(payload: DiskMaintenancePlanRequest, request: Request):
+    _require_disk_maintenance_owner(request)
+    try:
+        result = await disk_maintenance.plan(payload.targets)
+    except DiskMaintenanceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    await db.add_audit(
+        "maintenance.disk.plan", actor="owner/api",
+        data={"plan_id": result["plan_id"], "fingerprint": result["fingerprint"],
+              "targets": payload.targets, "estimated_bytes": result["estimated_bytes"]},
+    )
+    return result
+
+
+@app.post("/api/maintenance/disk/approve")
+async def disk_maintenance_approve(payload: DiskMaintenanceApprovalRequest, request: Request):
+    _require_disk_maintenance_owner(request)
+    try:
+        result = await disk_maintenance.approve(payload.plan_id, payload.fingerprint)
+    except DiskMaintenanceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    await db.add_audit("maintenance.disk.approve", actor="owner/api",
+                       data={"plan_id": payload.plan_id, "fingerprint": payload.fingerprint})
+    return result
+
+
+@app.post("/api/maintenance/disk/apply")
+async def disk_maintenance_apply(payload: DiskMaintenanceApplyRequest, request: Request):
+    _require_disk_maintenance_owner(request)
+    machine = machine_registry.get_node(machine_registry.local_machine_id)
+    permission = machine_registry.authorize_session({}, "maintenance")
+    if not machine.local or not machine.enabled or not permission.allowed or not settings.studio.disk_maintenance_enabled:
+        await db.add_audit("maintenance.disk.denied", actor="owner/api",
+                           data={"plan_id": payload.plan_id, "reason": "maintenance_policy_disabled"})
+        raise HTTPException(status_code=403, detail="Scoped machine maintenance policy is disabled")
+    await db.add_audit("maintenance.disk.apply_attempt", actor="owner/api",
+                       data={"plan_id": payload.plan_id})
+    try:
+        result = await disk_maintenance.apply(
+            payload.plan_id, payload.approval_token,
+            enabled=settings.studio.disk_maintenance_enabled,
+            machine_maintenance_permission=permission.allowed,
+        )
+    except DiskMaintenanceError as exc:
+        await db.add_audit("maintenance.disk.apply_blocked", actor="owner/api",
+                           data={"plan_id": payload.plan_id, "reason": str(exc),
+                                 "completed": list(getattr(exc, "completed", []))})
+        raise HTTPException(status_code=409, detail=str(exc))
+    await db.add_audit("maintenance.disk.applied", actor="owner/api",
+                       data={"plan_id": payload.plan_id, "result": result})
+    return result
 
 
 @app.get("/api/machines")
