@@ -32,6 +32,20 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class DiskMaintenancePlanRequest(BaseModel):
+    targets: list[str]
+
+
+class DiskMaintenanceApprovalRequest(BaseModel):
+    plan_id: str
+    fingerprint: str
+
+
+class DiskMaintenanceApplyRequest(BaseModel):
+    plan_id: str
+    approval_token: str
+
+
 class LayerStatus(BaseModel):
     name: str
     status: Status = "unknown"

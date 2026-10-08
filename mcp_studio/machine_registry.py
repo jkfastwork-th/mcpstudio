@@ -20,12 +20,13 @@ class MachineRegistryError(RuntimeError):
     pass
 
 
-_MACHINE_PERMISSION_KEYS = ("read", "write", "execute", "destructive")
+_MACHINE_PERMISSION_KEYS = ("read", "write", "execute", "destructive", "maintenance")
 _DEFAULT_MACHINE_POLICY: dict[str, Any] = {
     "read": True,
     "write": True,
     "execute": True,
     "destructive": False,
+    "maintenance": False,
     "fail_closed_unknown": True,
 }
 _DYNAMIC_DEVICE_POLICY: dict[str, Any] = {
@@ -33,6 +34,7 @@ _DYNAMIC_DEVICE_POLICY: dict[str, Any] = {
     "write": False,
     "execute": False,
     "destructive": False,
+    "maintenance": False,
     "fail_closed_unknown": True,
 }
 

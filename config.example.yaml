@@ -19,6 +19,7 @@ studio:
 
   scheduler_interval_seconds: 1.0
   scheduler_max_queue: 1000
+  #disk_maintenance_enabled: false  # requires machine policy maintenance: true
 
   # Declarative procedural Skills registry; enable only for trusted YAML manifests.
   #skill_registry_enabled: false
