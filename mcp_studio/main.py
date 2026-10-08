@@ -3280,7 +3280,8 @@ async def disk_maintenance_apply(payload: DiskMaintenanceApplyRequest, request: 
         )
     except DiskMaintenanceError as exc:
         await db.add_audit("maintenance.disk.apply_blocked", actor="owner/api",
-                           data={"plan_id": payload.plan_id, "reason": str(exc)})
+                           data={"plan_id": payload.plan_id, "reason": str(exc),
+                                 "completed": list(getattr(exc, "completed", []))})
         raise HTTPException(status_code=409, detail=str(exc))
     await db.add_audit("maintenance.disk.applied", actor="owner/api",
                        data={"plan_id": payload.plan_id, "result": result})

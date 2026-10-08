@@ -131,3 +131,51 @@ async def test_symlinked_cache_root_is_rejected(tmp_path, monkeypatch):
     with pytest.raises(DiskMaintenanceError, match="unsafe"):
         await service.plan(["npm.cacache"])
     assert external.exists()
+
+@pytest.mark.asyncio
+async def test_fd_guard_blocks_parent_symlink_replacement(tmp_path, monkeypatch):
+    home, releases = setup_home(tmp_path, monkeypatch)
+    service = DiskMaintenance(home)
+    target = releases / "0.100.0-x86_64-unknown-linux-musl"
+    external = tmp_path / "important"
+    external.mkdir()
+    (external / target.name).mkdir()
+    # Replace the directory parent with a symlink to protected outside data.
+    release_parent = releases.parent
+    releases.rename(release_parent / "releases-original")
+    releases.symlink_to(external, target_is_directory=True)
+    with pytest.raises(DiskMaintenanceError, match="unsafe"):
+        service._remove_with_parent_fd(target)
+    assert (external / target.name).exists()
+
+
+@pytest.mark.asyncio
+async def test_partial_apply_failure_is_reported_without_replay(tmp_path, monkeypatch):
+    home, releases = setup_home(tmp_path, monkeypatch)
+    # One old version in each Codex package family.
+    other = home / ".codex/packages/app-server-daemon/releases"
+    for version in ("0.100.0", "0.101.0", "0.102.0", "0.103.0"):
+        entry = other / (version + "-x86_64-unknown-linux-musl")
+        entry.mkdir(parents=True)
+        (entry / "binary").write_bytes(b"abc")
+    service = DiskMaintenance(home)
+    plan = await service.plan(["codex.old_releases"])
+    assert len(plan["candidates"]) == 2
+    token = (await service.approve(plan["plan_id"], plan["fingerprint"]))["approval_token"]
+    real_remove = service._remove_with_parent_fd
+    removed = []
+
+    def partial(path):
+        if removed:
+            raise OSError("injected cleanup failure")
+        real_remove(path)
+        removed.append(path)
+
+    monkeypatch.setattr(service, "_remove_with_parent_fd", partial)
+    with pytest.raises(module.DiskMaintenanceApplyError) as caught:
+        await service.apply(plan["plan_id"], token, enabled=True,
+                            machine_maintenance_permission=True)
+    assert len(caught.value.completed) == 1
+    with pytest.raises(DiskMaintenanceError, match="not approved"):
+        await service.apply(plan["plan_id"], token, enabled=True,
+                            machine_maintenance_permission=True)

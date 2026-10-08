@@ -26,6 +26,12 @@ class DiskMaintenanceError(ValueError):
     pass
 
 
+class DiskMaintenanceApplyError(DiskMaintenanceError):
+    def __init__(self, message: str, *, completed: list[str]) -> None:
+        super().__init__(message)
+        self.completed = list(completed)
+
+
 @dataclass(frozen=True)
 class _Candidate:
     key: str
@@ -104,6 +110,15 @@ class DiskMaintenance:
                 raise DiskMaintenanceError("cannot inspect all process references") from exc
             if command:
                 result.append(command)
+            # A process can have a short argv (e.g. "codex") yet still execute
+            # a binary from an old release. Preserve those active binaries.
+            for field in ("exe", "cwd"):
+                try:
+                    reference = os.readlink(item / field)
+                except (FileNotFoundError, ProcessLookupError, PermissionError):
+                    continue
+                if reference:
+                    result.append(reference)
         return result
 
     def _candidates(self, targets: frozenset[str]) -> tuple[list[_Candidate], list[dict[str, str]]]:
@@ -171,7 +186,7 @@ class DiskMaintenance:
     async def plan(self, targets: list[str]) -> dict[str, Any]:
         chosen = self._validate_targets(targets)
         async with self._lock:
-            candidates, skipped = self._candidates(chosen)
+            candidates, skipped = await asyncio.to_thread(self._candidates, chosen)
             manifest = "\n".join(
                 f"{c.key}\x00{c.fingerprint}\x00{c.bytes}" for c in candidates
             )
@@ -203,6 +218,24 @@ class DiskMaintenance:
             plan["approved"] = hashlib.sha256(token.encode()).hexdigest()
             return {"plan_id": plan_id, "approval_token": token, "single_use": True}
 
+    def _remove_with_parent_fd(self, path: Path) -> None:
+        if not self._protected_path(path) or path == self.home:
+            raise DiskMaintenanceError("unsafe maintenance path")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        directory_fd = os.open(self.home, flags)
+        try:
+            parent = path.parent.relative_to(self.home)
+            for part in parent.parts:
+                next_fd = os.open(part, flags, dir_fd=directory_fd)
+                os.close(directory_fd)
+                directory_fd = next_fd
+            current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+            if not stat.S_ISDIR(current.st_mode):
+                raise DiskMaintenanceError("maintenance target changed before removal")
+            shutil.rmtree(path.name, dir_fd=directory_fd)
+        finally:
+            os.close(directory_fd)
+
     async def apply(
         self,
         plan_id: str,
@@ -222,7 +255,7 @@ class DiskMaintenance:
             expected = hashlib.sha256(approval_token.encode()).hexdigest()
             if not secrets.compare_digest(expected, plan["approved"]):
                 raise DiskMaintenanceError("invalid approval token")
-            current, _ = self._candidates(plan["targets"])
+            current, _ = await asyncio.to_thread(self._candidates, plan["targets"])
             expected_items = [(c.key, c.path, c.fingerprint) for c in plan["candidates"]]
             current_items = [(c.key, c.path, c.fingerprint) for c in current]
             if expected_items != current_items:
@@ -230,13 +263,21 @@ class DiskMaintenance:
 
             freed_estimate = 0
             completed: list[str] = []
-            for candidate in plan["candidates"]:
-                if not self._protected_path(candidate.path):
-                    raise DiskMaintenanceError("cleanup path changed")
-                fingerprint, _ = _signature(candidate.path)
-                if fingerprint != candidate.fingerprint:
-                    raise DiskMaintenanceError("cleanup target changed; operation halted")
-                shutil.rmtree(candidate.path)
-                completed.append(candidate.key)
-                freed_estimate += candidate.bytes
+            try:
+                for candidate in plan["candidates"]:
+                    if not self._protected_path(candidate.path):
+                        raise DiskMaintenanceError("cleanup path changed")
+                    fingerprint, _ = await asyncio.to_thread(_signature, candidate.path)
+                    if fingerprint != candidate.fingerprint:
+                        raise DiskMaintenanceError("cleanup target changed; operation halted")
+                    # Open each parent with O_NOFOLLOW and remove relative to its
+                    # file descriptor. Never follow a swapped ancestor symlink.
+                    await asyncio.to_thread(self._remove_with_parent_fd, candidate.path)
+                    completed.append(candidate.key)
+                    freed_estimate += candidate.bytes
+            except (OSError, DiskMaintenanceError) as exc:
+                raise DiskMaintenanceApplyError(
+                    "cleanup interrupted; inspect audited completed targets",
+                    completed=completed,
+                ) from exc
             return {"completed": completed, "estimated_bytes_removed": freed_estimate}
