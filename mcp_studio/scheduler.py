@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from .db import Database, LeaseConflict
+from .db import Database, LeaseConflict, PStackPreDispatchBlocked
 from .health import HealthManager
 from .herdr import HerdrManager
 from .settings import Settings
@@ -215,6 +215,53 @@ class Scheduler:
             score += 5
         return score
 
+    async def _sweep_pstack_admission(self) -> None:
+        """Reject dead PStack work before any worker capacity/health gates."""
+        checker = getattr(self.db, "pstack_pre_dispatch_gate", None)
+        if not callable(checker):
+            return  # Legacy scheduler test doubles have no PStack ledger.
+        for work in await self.db.queued_work(limit=1000):
+            meta = work.get("metadata")
+            if not isinstance(meta, dict) or not meta.get("pstack_task_id"):
+                continue
+            gate = await checker(work["id"])
+            if gate["allowed"]:
+                continue
+            reason = str(gate["reason"])
+            if reason == "pstack_terminal":
+                # No worker or upstream prompt exists for a queued Work.
+                try:
+                    item, disposition = await self.db.request_cancel_work(work["id"])
+                except (KeyError, ValueError):
+                    continue
+                if disposition == "cancelled":
+                    await self.db.add_event(
+                        "pstack.predispatch.retired",
+                        f"{work['id']} cancelled: canonical PStack terminal",
+                        server_id=work["server_id"],
+                        data={"work_id": work["id"], "task_id":gate["task_id"],
+                              "reason": reason},
+                    )
+                    await self.db.add_audit(
+                        "pstack.predispatch.retired",
+                        actor="hirda/scheduler", target_type="work",
+                        target_id=work["id"],
+                        data={"task_id": gate["task_id"], "reason": reason},
+                    )
+                continue
+            wait_state = f"pstack_gate_{reason}"
+            if work.get("execution_state") != wait_state:
+                await self.db.update_queued_work_wait(
+                    work["id"], execution_state=wait_state, wait_detail=gate
+                )
+                await self.db.add_event(
+                    "pstack.predispatch.blocked",
+                    f"{work['id']} prevented from admission: {reason}",
+                    severity="warning", server_id=work["server_id"],
+                    data={"work_id": work["id"], "task_id":gate["task_id"],
+                          "reason": reason},
+                )
+
     async def schedule_once(self) -> dict[str, int]:
         async with self._schedule_lock:
             routines = getattr(self, "routines", None)
@@ -227,6 +274,7 @@ class Scheduler:
                     await enqueue_due()
 
             await self.db.heartbeat_running_work()
+            await self._sweep_pstack_admission()
 
             if not self._upstream_available():
                 return {"started": 0, "queued": (await self.db.work_summary())["queue"]}
@@ -264,6 +312,11 @@ class Scheduler:
                     break
                 if work.get("server_id") != self.settings.studio.worker_server_id:
                     continue
+                checker = getattr(self.db, "pstack_pre_dispatch_gate", None)
+                if callable(checker):
+                    admission = await checker(work["id"])
+                    if not admission["allowed"]:
+                        continue
 
                 eligible, gate = await self._scheduler_gate(
                     work,
@@ -297,6 +350,9 @@ class Scheduler:
                         work["id"], worker["id"], pane=pane, agent=agent
                     )
                 except LeaseConflict:
+                    continue
+                except PStackPreDispatchBlocked:
+                    # Lifecycle changed between queue snapshot and atomic assign.
                     continue
                 except ValueError:
                     continue

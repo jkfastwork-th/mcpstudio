@@ -137,6 +137,15 @@ def _workspace_key(value: str) -> str:
     return os.path.abspath(os.path.normpath(expanded)) if os.path.isabs(expanded) else os.path.normpath(expanded)
 
 
+class PStackPreDispatchBlocked(ValueError):
+    """A canonical PStack lifecycle does not permit worker admission."""
+
+    def __init__(self, task_id: str, reason: str):
+        self.task_id = task_id
+        self.reason = reason
+        super().__init__(f"PSTACK_PRE_DISPATCH_BLOCKED: {task_id}: {reason}")
+
+
 class LeaseConflict(RuntimeError):
     def __init__(self, workspace: str, worker_id: str):
         self.workspace = workspace
@@ -3459,6 +3468,92 @@ class Database:
 
         return await self._run(op)
 
+    @staticmethod
+    def _pstack_pre_dispatch_gate_locked(
+        conn: sqlite3.Connection, work: sqlite3.Row,
+    ) -> dict[str, Any]:
+        """Read authoritative task copies in the same transaction as assignment.
+
+        Only real PStack-backed Work is gated; unrelated manual Work is
+        unaffected. Never treat missing lifecycle metadata as permission.
+        """
+        metadata = json.loads(work["metadata_json"] or "{}")
+        task_id = str(metadata.get("pstack_task_id") or "").strip()
+        if not task_id:
+            return {"allowed": True, "reason": "not_pstack", "task_id": None}
+
+        replicas: list[dict[str, Any]] = []
+        for table in ("gateway_sessions", "sessions", "managed_sessions"):
+            # Filter inside SQLite to avoid unmarshalling every session on
+            # every scheduler tick. CASE protects legacy malformed JSON.
+            rows = conn.execute(
+                f"""SELECT metadata_json FROM {table}
+                    WHERE CASE WHEN json_valid(metadata_json)
+                      THEN json_extract(metadata_json, '$.active_pstack_task.task_id')
+                      ELSE NULL END = ?""",
+                (task_id,),
+            )
+            for row in rows:
+                envelope = json.loads(row["metadata_json"])
+                task = envelope.get("active_pstack_task")
+                if isinstance(task, dict):
+                    replicas.append(task)
+        if not replicas:
+            return {"allowed": False, "reason": "pstack_missing", "task_id": task_id}
+
+        def classification(task: dict[str, Any]) -> str:
+            lifecycle = task.get("lifecycle")
+            lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+            state = str(lifecycle.get("status") or "").strip().casefold()
+            status = str(task.get("status") or "").strip().casefold()
+            if status in {"completed", "expired", "cancelled", "failed"} or state in {
+                "completed", "expired", "cancelled", "failed"
+            }:
+                return "pstack_terminal"
+            if status == "blocked" or state == "blocked":
+                return "pstack_blocked"
+            if state == "active" and status in {
+                "active", "waiting", "queued", "running"
+            }:
+                return "active"
+            return "pstack_unverified"
+
+        # A terminal marker is irreversible: an older completed replica
+        # should never be ignored in favour of a newly resurrected 'active'.
+        if any(classification(task) == "pstack_terminal" for task in replicas):
+            return {"allowed": False, "reason": "pstack_terminal", "task_id": task_id}
+
+        def freshness(task: dict[str, Any]) -> tuple[int, float]:
+            lifecycle = task.get("lifecycle")
+            lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+            try:
+                return (
+                    int(lifecycle.get("revision") or 0),
+                    float(lifecycle.get("updated_at") or 0),
+                )
+            except (TypeError, ValueError):
+                return (-1, -1.0)
+
+        most_recent = max(freshness(task) for task in replicas)
+        leading = [task for task in replicas if freshness(task) == most_recent]
+        decisions = {classification(task) for task in leading}
+        if decisions == {"active"}:
+            return {"allowed": True, "reason": "active", "task_id": task_id}
+        reason = next(iter(decisions)) if len(decisions) == 1 else "pstack_conflict"
+        return {"allowed": False, "reason": reason, "task_id": task_id}
+
+    async def pstack_pre_dispatch_gate(self, work_id: str) -> dict[str, Any]:
+        def op() -> dict[str, Any]:
+            with self._connect() as conn:
+                work = conn.execute(
+                    "SELECT * FROM work_items WHERE id=?", (work_id,)
+                ).fetchone()
+                if work is None:
+                    raise KeyError(work_id)
+                return self._pstack_pre_dispatch_gate_locked(conn, work)
+
+        return await self._run(op)
+
     async def assign_work(
         self,
         work_id: str,
@@ -3471,11 +3566,19 @@ class Database:
 
         def op() -> None:
             with self._connect() as db:
+                # Lock before reading the lifecycle; otherwise a checkpoint
+                # could commit after the SELECT and before lease acquisition.
+                db.execute("BEGIN IMMEDIATE")
                 work = db.execute("SELECT * FROM work_items WHERE id=?", (work_id,)).fetchone()
                 if work is None:
                     raise KeyError(work_id)
                 if work["state"] != "queued":
                     raise ValueError(f"work {work_id} is not queued")
+                pstack_gate = self._pstack_pre_dispatch_gate_locked(db, work)
+                if not pstack_gate["allowed"]:
+                    raise PStackPreDispatchBlocked(
+                        pstack_gate["task_id"], pstack_gate["reason"]
+                    )
                 worker = db.execute(
                     "SELECT * FROM workers WHERE id=? AND enabled=1", (worker_id,)
                 ).fetchone()
@@ -3618,11 +3721,20 @@ class Database:
 
         def op() -> None:
             with self._connect() as db:
+                if increment_dispatch:
+                    # Guard and dispatch-attempt marker share a write lock.
+                    db.execute("BEGIN IMMEDIATE")
                 row = db.execute("SELECT * FROM work_items WHERE id=?", (work_id,)).fetchone()
                 if row is None:
                     raise KeyError(work_id)
                 if row["state"] != "running":
                     raise ValueError(f"work {work_id} is not running")
+                if increment_dispatch:
+                    pstack_gate = self._pstack_pre_dispatch_gate_locked(db, row)
+                    if not pstack_gate["allowed"]:
+                        raise PStackPreDispatchBlocked(
+                            pstack_gate["task_id"], pstack_gate["reason"]
+                        )
                 execution = json.loads(row["execution_json"] or "{}")
                 if execution_patch:
                     execution.update(execution_patch)

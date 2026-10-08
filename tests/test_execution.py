@@ -408,6 +408,15 @@ async def test_pstack_claude_bootstrap_enforces_accept_edits_launch_contract(tmp
         },
         "serena-8001",
     )
+    # Production PStack dispatch now requires a canonical active lifecycle.
+    await db.create_session({
+        "client_id": "pstack-launch-contract",
+        "server_id": "serena-8001",
+        "metadata": {"active_pstack_task": {
+            "task_id": "TASK-LAUNCH", "status": "active",
+            "lifecycle": {"status": "active", "revision": 1, "updated_at": 1.0},
+        }},
+    })
     running = await db.assign_work(
         work["id"],
         "worker-1",

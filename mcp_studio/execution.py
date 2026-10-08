@@ -10,7 +10,7 @@ from typing import Any, cast
 
 import httpx
 
-from .db import Database
+from .db import Database, PStackPreDispatchBlocked
 from .herdr import HerdrManager, _decode_text_content
 from .settings import Settings
 from .execution_environments import close_execution_environment
@@ -995,6 +995,41 @@ class ExecutionSupervisor:
         )
         return readiness
 
+    async def _reject_stale_pstack_work(
+        self, work: dict[str, Any], gate: dict[str, Any],
+    ) -> None:
+        """Never send a prompt to a PStack task without active authority."""
+        work_id = work["id"]
+        current = await self.db.get_work(work_id)
+        was_dispatched = bool(
+            int(current.get("dispatch_attempts") or 0)
+            or current.get("dispatched_at")
+        )
+        if current.get("state") == "running" and not was_dispatched:
+            # No remote prompt was sent, so it is safe to return the logical
+            # worker lease. This is not evidence that the PStack task passed.
+            try:
+                await self.db.finish_work(
+                    work_id, state="cancelled",
+                    error=f"Pre-dispatch PStack guard: {gate['reason']}",
+                )
+            except ValueError:
+                pass
+        await self.db.add_event(
+            "pstack.predispatch.blocked",
+            f"{work_id} withheld from HERDR prompt: {gate['reason']}",
+            severity="warning", server_id=work["server_id"],
+            data={"work_id": work_id, "task_id": gate.get("task_id"),
+                  "reason": gate["reason"], "prior_dispatch":was_dispatched},
+        )
+        await self.db.add_audit(
+            "pstack.predispatch.blocked",
+            actor="hirda/execution", target_type="work",
+            target_id=work_id,
+            data={"task_id": gate.get("task_id"), "reason":gate["reason"],
+                  "prior_dispatch":was_dispatched},
+        )
+
     async def dispatch(
         self,
         work_id: str,
@@ -1016,6 +1051,15 @@ class ExecutionSupervisor:
                 raise ValueError("work has already had a dispatch attempt; redispatch requires explicit acknowledgement")
             if not explicit and not self.settings.studio.execution_enabled:
                 raise ValueError("automatic execution dispatch is disabled")
+
+            checker = getattr(self.db, "pstack_pre_dispatch_gate", None)
+            if callable(checker):
+                admission = await checker(work_id)
+                if not admission["allowed"]:
+                    await self._reject_stale_pstack_work(work, admission)
+                    raise PStackPreDispatchBlocked(
+                        admission["task_id"], admission["reason"]
+                    )
 
             snapshot = await self._ensure_fresh_herdr() if refresh else self.herdr.snapshot
             if snapshot.get("status") == "down":
@@ -1133,23 +1177,44 @@ class ExecutionSupervisor:
                 "saw_activity": False,
                 "dispatch_args": {k: "<instruction>" if v == dispatch_instruction else v for k, v in args.items()},
             }
-            await self.db.update_work_execution(
-                work_id,
-                execution_state="dispatching",
-                pane=pane.get("pane_id"),
-                agent=work.get("agent") or pane.get("agent"),
-                last_agent_status=str(pane.get("agent_status") or "unknown"),
-                failure_class=None,
-                execution_patch=baseline,
-                increment_dispatch=True,
-            )
             try:
                 async with self._dispatch_slot():
+                    # Re-check immediately before dispatch, after readiness
+                    # checks that may have taken time or launched an agent.
+                    if callable(checker):
+                        admission = await checker(work_id)
+                        if not admission["allowed"]:
+                            await self._reject_stale_pstack_work(work, admission)
+                            raise PStackPreDispatchBlocked(
+                                admission["task_id"], admission["reason"]
+                            )
+                    try:
+                        # SQLite checks canonical PStack again in this same
+                        # atomic dispatch-attempt transaction.
+                        await self.db.update_work_execution(
+                            work_id,
+                            execution_state="dispatching",
+                            pane=pane.get("pane_id"),
+                            agent=work.get("agent") or pane.get("agent"),
+                            last_agent_status=str(pane.get("agent_status") or "unknown"),
+                            failure_class=None,
+                            execution_patch=baseline,
+                            increment_dispatch=True,
+                        )
+                    except PStackPreDispatchBlocked as exc:
+                        await self._reject_stale_pstack_work(
+                            work, {"task_id": exc.task_id, "reason": exc.reason}
+                        )
+                        raise
                     result = await self.herdr.client().call_tool(
                         "herdr_prompt_agent",
                         args,
                         client_name=f"mcp-studio-{work.get('worker_id') or 'worker'}",
                     )
+            except PStackPreDispatchBlocked:
+                # No prompt was sent. Do not misclassify policy denial as an
+                # unknown remote dispatch and do not attempt recovery.
+                raise
             except Exception as exc:
                 failure = classify_failure(exc)
                 state = "dispatch_uncertain" if failure == "dispatch_uncertain" else "recovering"
