@@ -53,6 +53,7 @@ from .connectivity import ConnectivityManager
 from .oauth import OAuthManager, OAuthError
 from .operations import OperationsManager
 from .observability import ObservabilityManager
+from .system_monitor import SystemHealthSampler
 from .computer import ComputerUseManager
 from .graft import GraftManager, GraftError
 from .integrations import IntegrationError, build_integration_manager
@@ -190,6 +191,14 @@ gateway_sessions.execution = execution
 gateway_sessions.skill_gateway = skill_gateway
 operations = OperationsManager(settings, db)
 observability = ObservabilityManager(settings, db)
+_system_monitor_db_path = Path(settings.studio.database)
+if not _system_monitor_db_path.is_absolute():
+    _system_monitor_db_path = settings.config_path.parent / _system_monitor_db_path
+system_monitor = SystemHealthSampler(
+    database_path=_system_monitor_db_path,
+    interval_seconds=10.0,
+    history_limit=360,
+)
 reflex_metrics = ReflexMetrics(settings.studio)
 action_provider_registry = build_action_provider_registry(settings.studio)
 hermes_groups = HermesGroupClient(settings.studio)
@@ -260,6 +269,7 @@ async def lifespan(app: FastAPI):
     await managed_sessions.start()
     await operations.start()
     await observability.start()
+    await system_monitor.start()
     await scheduler.start()
     await execution.start()
     reconciliation = await gateway_sessions.reconcile_pstack_terminal_tabs()
@@ -277,6 +287,7 @@ async def lifespan(app: FastAPI):
     await connectivity.stop()
     await execution.stop()
     await scheduler.stop()
+    await system_monitor.stop()
     await observability.stop()
     await operations.stop()
     await managed_sessions.stop()
@@ -3962,6 +3973,11 @@ async def observability_status():
     if not settings.studio.observability_enabled:
         raise HTTPException(status_code=404, detail="Observability disabled")
     return await observability.report()
+
+
+@app.get("/api/system-monitor")
+async def system_monitor_status():
+    return system_monitor.snapshot()
 
 
 @app.post("/api/observability/run")

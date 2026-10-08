@@ -7,6 +7,7 @@ let actionProviders = [];
 let currentActionProvider = null;
 let latestActionJudgment = null;
 let latestData = null;
+let systemMonitorTimer = null;
 
 
 const SUPPORTED_LANGUAGES=['en','th'];
@@ -636,6 +637,7 @@ function setView(view, updateHash=true){
   document.getElementById('viewSubtitle').textContent=tr(sub);
   if(updateHash && location.hash !== `#${view}`) history.replaceState(null,'',`#${view}`);
   if(view==='computer') setTimeout(refreshComputerView,0);
+  if(view==='system') startSystemMonitorPolling(); else stopSystemMonitorPolling();
   if(view==='pstack'){
     setTimeout(()=>uiAction(refreshPstackActivity),0);
     startPstackActivityStream();
@@ -1758,6 +1760,113 @@ function renderWorkers(data){
   document.getElementById('workPanel').innerHTML=live.length?`<div class="work-row header"><span>WORK</span><span>STATE</span><span>PRIORITY</span><span>WORKSPACE</span><span>WORKER</span><span>AGENT / PANE</span></div>${live.map(x=>`<div class="work-row"><div><strong>${esc(x.label||x.id)}</strong><small>${esc(shortId(x.id,14))}</small></div>${badge(x.state)}<strong>${esc(x.priority)}</strong><div><strong>${esc(x.workspace||'—')}</strong></div><div>${esc(x.worker_id||'QUEUE')}</div><div>${esc(x.agent||'—')}<small>${esc(x.pane||x.requested_pane||'—')}</small></div></div>`).join('')}`:'<div class="empty good">No queued or running work.</div>';
 }
 
+
+function systemMonitorNumber(value,digits=1){
+  const n=Number(value);
+  return Number.isFinite(n)?n.toFixed(digits):'—';
+}
+function systemMonitorSparkline(values,{height=72,unit='',warn=null,critical=null}={}){
+  const clean=values.map(v=>Number(v)).filter(Number.isFinite);
+  if(clean.length<2)return '<div class="system-monitor-empty-chart">Waiting for history…</div>';
+  const width=320,pad=5;
+  let min=Math.min(...clean),max=Math.max(...clean);
+  if(max===min)max=min+1;
+  const points=clean.map((v,i)=>{
+    const x=pad+(i/(clean.length-1))*(width-pad*2);
+    const y=pad+(1-(v-min)/(max-min))*(height-pad*2);
+    return x.toFixed(1)+','+y.toFixed(1);
+  }).join(' ');
+  const latest=clean[clean.length-1];
+  const tone=critical!=null&&latest>=critical?'critical':warn!=null&&latest>=warn?'warning':'normal';
+  return '<svg class="system-monitor-spark '+tone+'" viewBox="0 0 '+width+' '+height+'" preserveAspectRatio="none" role="img" aria-label="Recent history"><polyline points="'+points+'"/></svg><div class="system-monitor-chart-scale"><span>'+esc(systemMonitorNumber(min,1)+unit)+'</span><strong>'+esc(systemMonitorNumber(latest,1)+unit)+'</strong><span>'+esc(systemMonitorNumber(max,1)+unit)+'</span></div>';
+}
+function renderSystemMonitor(data){
+  const monitor=data?.systemMonitorData||{};
+  const current=monitor.current||{};
+  const proc=current.process||{},host=current.host||{},disk=current.disk||{},dbm=current.database||{},allocator=current.allocator||{};
+  const history=Array.isArray(monitor.history)?monitor.history:[];
+  const currentAlerts=current.alerts||[];
+  const statusEl=document.getElementById('systemMonitorStatus');
+  const updatedEl=document.getElementById('systemMonitorUpdated');
+  if(statusEl){
+    const hasCritical=currentAlerts.some(a=>a.severity==='critical');
+    const hasWarning=currentAlerts.some(a=>a.severity==='warning');
+    const state=hasCritical?'down':hasWarning?'degraded':(monitor.status||'unknown');
+    statusEl.className='pill '+state;
+    statusEl.textContent=String(state).toUpperCase();
+  }
+  if(updatedEl)updatedEl.textContent=current.observed_at?'Sampled '+when(current.observed_at):'Waiting for sample…';
+
+  const summary=document.getElementById('systemMonitorSummary');
+  if(summary){
+    const memRatio=host.memory_available_ratio==null?'—':systemMonitorNumber(host.memory_available_ratio*100,1)+'%';
+    summary.innerHTML=[
+      overviewCard('HIRDA CPU',proc.cpu_percent==null?'—':systemMonitorNumber(proc.cpu_percent,1)+'%','PID '+(proc.pid??'—'),Number(proc.cpu_percent)>=80?'danger':Number(proc.cpu_percent)>=50?'warning':''),
+      overviewCard('RSS + Swap',systemMonitorNumber(proc.rss_plus_swap_mib,0)+' MiB','RSS '+systemMonitorNumber(proc.rss_mib,0)+' · swap '+systemMonitorNumber(proc.swap_mib,0),Number(proc.rss_plus_swap_mib)>=1536?'danger':Number(proc.rss_plus_swap_mib)>=1024?'warning':''),
+      overviewCard('VmData',systemMonitorNumber(proc.data_mib,0)+' MiB',(proc.threads??'—')+' threads'),
+      overviewCard('Host memory',memRatio,systemMonitorNumber(host.memory_available_mib,0)+' MiB available',host.memory_available_ratio!=null&&Number(host.memory_available_ratio)<=0.1?'danger':host.memory_available_ratio!=null&&Number(host.memory_available_ratio)<=0.2?'warning':''),
+      overviewCard('Root disk',systemMonitorNumber(disk.free_gib,1)+' GiB',disk.free_ratio==null?'—':systemMonitorNumber(disk.free_ratio*100,1)+'% free',disk.free_ratio!=null&&Number(disk.free_ratio)<=0.05?'danger':disk.free_ratio!=null&&Number(disk.free_ratio)<=0.1?'warning':''),
+      overviewCard('SQLite',systemMonitorNumber(dbm.main_mib,0)+' MiB','WAL '+systemMonitorNumber(dbm.wal_mib,1)+' MiB')
+    ].join('');
+  }
+
+  const charts=document.getElementById('systemMonitorCharts');
+  if(charts){
+    charts.innerHTML=
+      '<div class="system-monitor-chart"><div><strong>HIRDA CPU</strong><small>process %</small></div>'+systemMonitorSparkline(history.map(x=>x.process_cpu_percent),{unit:'%',warn:50,critical:80})+'</div>'+
+      '<div class="system-monitor-chart"><div><strong>RSS + Swap</strong><small>MiB</small></div>'+systemMonitorSparkline(history.map(x=>x.rss_plus_swap_mib),{unit:' MiB',warn:1024,critical:1536})+'</div>'+
+      '<div class="system-monitor-chart"><div><strong>Host CPU</strong><small>total %</small></div>'+systemMonitorSparkline(history.map(x=>x.host_cpu_percent),{unit:'%',warn:75,critical:90})+'</div>';
+  }
+  const historyLabel=document.getElementById('systemMonitorHistoryLabel');
+  if(historyLabel)historyLabel.textContent=history.length+' / '+(monitor.history_limit||'—')+' samples · '+(monitor.interval_seconds||10)+'s interval';
+
+  const allocatorEl=document.getElementById('systemMonitorAllocator');
+  if(allocatorEl){
+    const totals=history.map(x=>Number(x.rss_plus_swap_mib)).filter(Number.isFinite);
+    const peak=totals.length?Math.max(...totals):Number(proc.rss_plus_swap_mib||0);
+    const mode=allocator.experiment||'A';
+    allocatorEl.innerHTML='<div class="system-monitor-ab-badge mode-'+esc(String(mode).toLowerCase())+'"><span>Experiment '+esc(mode)+'</span><strong>'+esc(allocator.label||'Allocator state unknown')+'</strong></div>'+
+      '<div class="metrics"><div><span>Current total</span><strong>'+esc(systemMonitorNumber(proc.rss_plus_swap_mib,0))+' MiB</strong></div><div><span>History peak</span><strong>'+esc(systemMonitorNumber(peak,0))+' MiB</strong></div><div><span>VmData</span><strong>'+esc(systemMonitorNumber(proc.data_mib,0))+' MiB</strong></div></div>'+
+      '<div class="keyline"><span>MALLOC_ARENA_MAX</span><code>'+esc(allocator.malloc_arena_max??'default')+'</code></div>';
+  }
+
+  const processes=document.getElementById('systemMonitorProcesses');
+  if(processes){
+    const rows=current.children||[];
+    processes.innerHTML=rows.length?'<div class="system-monitor-process-row header"><span>PROCESS</span><span>RSS</span><span>SWAP</span><span>THREADS</span></div>'+
+      rows.map(p=>'<div class="system-monitor-process-row"><div><strong>'+esc(p.name||p.pid)+'</strong><small>'+esc(p.cmdline||('PID '+p.pid))+'</small></div><span>'+esc(systemMonitorNumber(p.rss_mib,0))+' MiB</span><span>'+esc(systemMonitorNumber(p.swap_mib,0))+' MiB</span><span>'+esc(p.threads??'—')+'</span></div>').join('')
+      :'<div class="empty good">No direct child processes.</div>';
+  }
+
+  const alerts=document.getElementById('systemMonitorAlerts');
+  if(alerts){
+    alerts.innerHTML=currentAlerts.length?currentAlerts.map(a=>'<div class="system-monitor-alert '+esc(a.severity||'warning')+'"><div><strong>'+esc((a.kind||'pressure').replaceAll('_',' '))+'</strong><small>'+esc(a.message||'')+'</small></div>'+badge(a.severity==='critical'?'down':'degraded')+'</div>').join('')
+      :'<div class="empty good">No pressure thresholds are currently breached.</div>';
+  }
+}
+async function refreshSystemMonitor(){
+  if((location.hash||'#home')!=='#system')return;
+  try{
+    const monitor=await getJson('/api/system-monitor');
+    if(!latestData)latestData={};
+    latestData.systemMonitorData=monitor;
+    renderSystemMonitor(latestData);
+  }catch(err){
+    const status=document.getElementById('systemMonitorStatus');
+    if(status){status.className='pill down';status.textContent='ERROR';}
+    const updated=document.getElementById('systemMonitorUpdated');
+    if(updated)updated.textContent=err.message;
+  }
+}
+function startSystemMonitorPolling(){
+  stopSystemMonitorPolling();
+  refreshSystemMonitor();
+  systemMonitorTimer=setInterval(refreshSystemMonitor,10000);
+}
+function stopSystemMonitorPolling(){
+  if(systemMonitorTimer){clearInterval(systemMonitorTimer);systemMonitorTimer=null;}
+}
+
 function renderTunnels(data){
   const {status}=data; const tmap=status.tunnel_sessions?.by_tunnel||{};
   document.getElementById('tunnelsPanel').innerHTML=(status.tunnels||[]).length?(status.tunnels||[]).map(t=>{const ts=tmap[t.id]||{counts:{},total:0,reconnects:0};return `<article class="tunnel-card"><div class="tunnel-head"><div><h3>${esc(t.name)}</h3><small>${esc(t.provider)} · ${esc(t.managed?'managed':'external/direct')}</small></div>${badge(t.status||'unknown')}</div><div class="tunnel-metrics"><div><span>CONNECTED</span><strong>${esc(ts.counts?.connected||0)}</strong></div><div><span>SESSIONS</span><strong>${esc(ts.total||0)}</strong></div><div><span>RECONNECTS</span><strong>${esc(ts.reconnects||0)}</strong></div></div><div class="endpoint">${esc(t.endpoint||t.origin||'—')}</div><button class="text-button" data-tunnel-session="${esc(t.id)}" type="button">View sessions →</button>${detailBlock([['tunnel id',t.id],['desired state',t.desired_state||'—'],['server id',t.metadata?.server_id||'—']])}</article>`}).join(''):'<div class="empty">No tunnels configured.</div>';
@@ -1791,13 +1900,13 @@ function renderDebug(data){
 
 async function load(){
   try{
-    const [status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,machinesData,machineEnrollmentsData,openaiCompat,operationsData,observabilityData,alertsData,auditData,events,capsulesData,agentRuntimesData,laneStatesData,reflexMetricsData]=await Promise.all([
-      getJson('/api/status'),getJson('/api/workers'),getJson('/api/work?limit=100'),getJson('/api/sessions'),getJson('/api/gateway/sessions'),getJson('/api/managed/sessions'),getJson('/api/managed/workspaces'),getJson('/api/machines'),getJson('/api/machines/enrollments').catch(()=>({enabled:false,pending:[],approved:[],rejected:[],pending_count:0})),getJson('/api/openai/compatibility'),getJson('/api/operations'),getJson('/api/observability'),getJson('/api/alerts?status=open&limit=20'),getJson('/api/audit?limit=30'),getJson('/api/events?limit=40'),getJson('/api/capsules?limit=100'),getJson('/api/agents/runtimes'),getJson('/api/lanes'),getJson(`/api/reflex/metrics?window=${encodeURIComponent(reflexWindow)}&recent=20`).catch(()=>null)
+    const [status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,machinesData,machineEnrollmentsData,openaiCompat,operationsData,observabilityData,systemMonitorData,alertsData,auditData,events,capsulesData,agentRuntimesData,laneStatesData,reflexMetricsData]=await Promise.all([
+      getJson('/api/status'),getJson('/api/workers'),getJson('/api/work?limit=100'),getJson('/api/sessions'),getJson('/api/gateway/sessions'),getJson('/api/managed/sessions'),getJson('/api/managed/workspaces'),getJson('/api/machines'),getJson('/api/machines/enrollments').catch(()=>({enabled:false,pending:[],approved:[],rejected:[],pending_count:0})),getJson('/api/openai/compatibility'),getJson('/api/operations'),getJson('/api/observability'),getJson('/api/system-monitor'),getJson('/api/alerts?status=open&limit=20'),getJson('/api/audit?limit=30'),getJson('/api/events?limit=40'),getJson('/api/capsules?limit=100'),getJson('/api/agents/runtimes'),getJson('/api/lanes'),getJson(`/api/reflex/metrics?window=${encodeURIComponent(reflexWindow)}&recent=20`).catch(()=>null)
     ]);
-    latestData={status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,machinesData,machineEnrollmentsData,openaiCompat,operationsData,observabilityData,alertsData,auditData,events,capsulesData,agentRuntimesData,laneStatesData,reflexMetricsData};
+    latestData={status,workerData,workData,sessions,gatewaySessions,managedSessions,managedWorkspaces,machinesData,machineEnrollmentsData,openaiCompat,operationsData,observabilityData,systemMonitorData,alertsData,auditData,events,capsulesData,agentRuntimesData,laneStatesData,reflexMetricsData};
     const studio=document.getElementById('studioStatus'); studio.className=`pill ${status.studio.status}`; studio.textContent=String(status.studio.status||'unknown').toUpperCase();
     document.getElementById('lastUpdated').textContent=`Updated ${new Date().toLocaleTimeString()} · ${status.studio.version}`;
-    renderOverview(latestData); renderReflexMetrics(latestData); renderCapsuleLedger(latestData); renderMachineEnrollment(latestData); renderManagedSessions(latestData); renderSessions(latestData); renderWorkspaces(latestData); renderWorkers(latestData); renderTunnels(latestData); renderReliability(latestData); renderActivity(latestData); renderDebug(latestData); captureAndTranslateText(document);
+    renderOverview(latestData); renderReflexMetrics(latestData); renderCapsuleLedger(latestData); renderMachineEnrollment(latestData); renderManagedSessions(latestData); renderSessions(latestData); renderWorkspaces(latestData); renderWorkers(latestData); renderTunnels(latestData); renderReliability(latestData); renderSystemMonitor(latestData); renderActivity(latestData); renderDebug(latestData); captureAndTranslateText(document);
   }catch(err){
     const studio=document.getElementById('studioStatus'); studio.className='pill down'; studio.textContent='UI ERROR';
     document.getElementById('lastUpdated').textContent=err.message;

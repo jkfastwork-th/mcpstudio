@@ -457,6 +457,34 @@
 <div class="toolbar"><button class="button secondary small" data-proxy-click="refreshBtn" type="button">Refresh status</button><button class="button secondary small" data-help="Run an immediate health poll of registered MCP servers." id="pollBtn" type="button">Poll health</button><button class="button secondary small" data-help="Refresh Herdr agent and pane inventory." id="herdrBtn" type="button">Refresh Herdr</button></div>
 </div>
 
+<section class="system-monitor-shell" aria-labelledby="systemMonitorTitle">
+<div class="system-monitor-head">
+  <div><span class="eyebrow">LIVE HOST TELEMETRY</span><h3 id="systemMonitorTitle">System Monitor</h3><p>Lightweight in-memory sampling of HIRDA and host pressure. No event-ledger scan or metrics persistence.</p></div>
+  <div class="system-monitor-meta"><span class="pill unknown" id="systemMonitorStatus">LOADING</span><small id="systemMonitorUpdated">Waiting for sample…</small></div>
+</div>
+<div class="system-monitor-summary" id="systemMonitorSummary"></div>
+<div class="system-monitor-grid">
+  <article class="panel-card system-monitor-chart-card">
+    <div class="panel-head"><div><span class="eyebrow">PRESSURE</span><h3>CPU &amp; memory history</h3></div><small id="systemMonitorHistoryLabel">Recent samples</small></div>
+    <div class="system-monitor-charts" id="systemMonitorCharts"></div>
+  </article>
+  <article class="panel-card system-monitor-experiment-card">
+    <div class="panel-head"><div><span class="eyebrow">ALLOCATOR A/B</span><h3>Memory experiment</h3></div></div>
+    <div id="systemMonitorAllocator"></div>
+  </article>
+</div>
+<div class="system-monitor-grid">
+  <article class="panel-card">
+    <div class="panel-head"><div><span class="eyebrow">PROCESS TREE</span><h3>HIRDA children</h3></div></div>
+    <div id="systemMonitorProcesses"></div>
+  </article>
+  <article class="panel-card">
+    <div class="panel-head"><div><span class="eyebrow">GUARDRAILS</span><h3>Pressure alerts</h3></div></div>
+    <div id="systemMonitorAlerts"></div>
+  </article>
+</div>
+</section>
+
 <div class="system-essentials">
 <article class="panel-card"><div class="panel-head"><div><span class="eyebrow">INGRESS</span><h3>Tunnels</h3></div></div><div class="tunnel-grid" id="tunnelsPanel"></div></article>
 <article class="panel-card"><div class="panel-head"><div><span class="eyebrow">RELIABILITY</span><h3>Alerts &amp; SLO</h3></div></div><div id="sloPanel"></div></article>
