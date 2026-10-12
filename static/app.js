@@ -1718,6 +1718,16 @@ function renderManagedHistory(payload){
   const gui=machineProviderReady(machine,'computer_use');
   panel.hidden=false;
   panel.innerHTML=`<div class="history-head"><div><span class="eyebrow">SESSION HISTORY</span><h3>${esc(session.name||session.id)}</h3><p>${esc(session.workspace_key||'')} · ${esc(session.project_path||'')}</p></div><button class="text-button" data-managed-history-close type="button">Close</button></div><div class="session-machine-detail"><div><span>Machine</span><strong class="machine-health ${machine.online?'online':'offline'}"><i></i>${esc(machine.name||machine.id)}</strong><small>${esc(machine.os||'unknown')} · ${esc(machine.address||'local')}</small></div><div><span>Providers</span><strong>Native ${native?'ready':'unavailable'} · Desktop Commander ${dc?'ready':'unavailable'} · Computer Use ${gui?'ready':'unavailable'}</strong>${machineCapabilityBadges(machine)}</div><div><span>Effective permissions</span>${machinePermissionBadges(effective,'large')}<small>session policy ∩ machine policy · ${esc(effective.scope||'workspace')}</small></div></div><div class="history-grid"><div><h4>Lifecycle</h4>${audit.length?audit.slice(0,30).map(a=>`<div class="history-item"><strong>${esc(a.action)}</strong><small>${esc(ago(a.created_at))} · ${esc(a.actor||'system')}</small></div>`).join(''):'<div class="empty">No lifecycle audit yet.</div>'}</div><div><h4>Transport history</h4>${transports.length?transports.slice(0,30).map(t=>`<div class="history-item"><strong>${esc(t.ingress_provider||t.last_tunnel_id||'direct')}</strong><small>${esc(t.status)} · ${esc(ago(t.last_seen_at))} · ${esc(shortId(t.id,14))}</small></div>`).join(''):'<div class="empty">No transport history yet.</div>'}</div></div>`;
+  const inspection=payload.inspection||{};
+  const observed=esc(inspection.herdr_snapshot_status||'unknown');
+  const bindings=Array.isArray(inspection.bindings)?inspection.bindings:[];
+  const bindingRows=bindings.map(b=>{
+    const location=[b.herdr_workspace_id,b.tab_id,b.pane_id].filter(Boolean).map(esc).join(' / ')||'No Herdr location recorded';
+    const lease=b.write_lease_active===true?' · WRITE LEASE':b.write_lease_active===false?' · no write lease':'';
+    const who=esc(b.agent||b.observation?.agent||b.worker_id||b.task_id||'—');
+    return '<div class="history-item"><strong>'+esc(b.source||'binding')+' · '+who+'</strong><small>'+location+' · '+esc(b.observation?.state||'unverified')+lease+'</small></div>';
+  }).join('')||'<div class="empty">No Herdr/worker binding recorded for this managed session.</div>';
+  panel.insertAdjacentHTML('beforeend','<div class="history-grid"><div><h4>Herdr bindings (read-only)</h4><small>Snapshot: '+observed+' · '+esc(inspection.herdr_observed_at||'not refreshed')+'</small>'+bindingRows+'</div></div>');
   panel.scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 
