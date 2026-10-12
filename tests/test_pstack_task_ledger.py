@@ -1258,6 +1258,50 @@ async def test_terminal_reconciliation_closes_terminal_and_sweeps_stale_tabs():
 
 
 @pytest.mark.asyncio
+async def test_terminal_reconciliation_repairs_stale_managed_session_status():
+    gateway = object.__new__(GatewaySessionManager)
+    gateway.settings = SimpleNamespace(
+        studio=SimpleNamespace(worker_server_id="serena-8001")
+    )
+    gateway.db = _GatewayDb()
+    gateway.integrations = _GatewayIntegrations()
+    gateway.herdr = _GatewayHerdr()
+
+    terminal = {
+        "task_id": "TASK-SYNC",
+        "trace_id": "TRACE-SYNC",
+        "status": "completed",
+        "lifecycle": {
+            "status": "completed", "current_phase": "terminal",
+            "revision": 9, "updated_at": 100.0,
+        },
+        "herdr_tab": {
+            "status": "closed", "owner": "pstack", "persistent": False,
+            "workspace_id": "wH", "tab_id": "wH:t-sync",
+        },
+    }
+    stale = {
+        **terminal,
+        "status": "running",
+        "lifecycle": {
+            "status": "active", "current_phase": "working",
+            "revision": 10, "updated_at": 110.0,
+        },
+        "herdr_tab": {**terminal["herdr_tab"], "status": "open"},
+    }
+    gateway.db.metadata["active_pstack_task"] = dict(terminal)
+    gateway.db.logical_metadata["active_pstack_task"] = dict(terminal)
+    gateway.db.managed_metadata["active_pstack_task"] = dict(stale)
+
+    result = await gateway.reconcile_pstack_terminal_tabs()
+    assert result["patched"] >= 1
+    repaired = gateway.db.managed_metadata["active_pstack_task"]
+    assert repaired["status"] == "completed"
+    assert repaired["lifecycle"]["status"] == "completed"
+    assert repaired["herdr_tab"]["status"] == "closed"
+
+
+@pytest.mark.asyncio
 async def test_gateway_pstack_failed_tool_persists_terminal_status():
     gateway = object.__new__(GatewaySessionManager)
     gateway.settings = SimpleNamespace(

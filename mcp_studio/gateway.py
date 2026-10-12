@@ -3519,7 +3519,8 @@ class GatewaySessionManager:
             if callable(lister):
                 canonical_rows.extend(await lister(limit=500))
 
-        tasks: dict[str, tuple[tuple[int, float], dict[str, Any]]] = {}
+        tasks: dict[str, tuple[tuple[int, int, float], dict[str, Any]]] = {}
+        task_replicas: dict[str, list[dict[str, Any]]] = {}
         for row in canonical_rows:
             metadata = row.get("metadata")
             metadata = metadata if isinstance(metadata, dict) else {}
@@ -3534,7 +3535,11 @@ class GatewaySessionManager:
             if lifecycle is not None and not isinstance(lifecycle, dict):
                 raise ValueError("Malformed canonical PStack lifecycle")
             lifecycle = lifecycle or {}
+            task_replicas.setdefault(task_id, []).append(task)
+            # A canonical completed lifecycle cannot be undone by a stale
+            # replica stamped with a later execution-only revision.
             score = (
+                int(self._pstack_task_is_terminal(task)),
                 int(lifecycle.get("revision") or 0),
                 float(lifecycle.get("updated_at") or task.get("opened_at") or 0.0),
             )
@@ -3565,12 +3570,22 @@ class GatewaySessionManager:
                 closed_task = await self._close_pstack_herdr_tab(task, strict=True)
                 closed_tab = dict(closed_task.get("herdr_tab") or {})
                 closed_environment = dict(closed_task.get("execution_environment") or {})
-                if closed_tab != tab or closed_environment != dict(task.get("execution_environment") or {}):
+                replicas_stale = any(
+                    not self._pstack_task_is_terminal(replica)
+                    for replica in task_replicas.get(task_id, ())
+                )
+                if (
+                    closed_tab != tab
+                    or closed_environment != dict(task.get("execution_environment") or {})
+                    or replicas_stale
+                ):
                     patched += await self.db.patch_pstack_task(
                         task_id,
                         {
                             "herdr_tab": closed_tab,
                             "execution_environment": closed_environment,
+                            "status": closed_task.get("status"),
+                            "lifecycle": closed_task.get("lifecycle"),
                         },
                     )
                 if (
