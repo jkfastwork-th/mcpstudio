@@ -1510,6 +1510,47 @@ async def test_gateway_opens_new_task_after_completed_same_goal():
 
 
 @pytest.mark.asyncio
+async def test_gateway_opens_new_task_after_blocked_same_goal():
+    gateway = object.__new__(GatewaySessionManager)
+    gateway.db = _GatewayDb()
+    gateway.integrations = _GatewayIntegrations()
+    gateway.db.metadata["active_pstack_task"] = {
+        "task_id": "TASK-BLOCKED",
+        "trace_id": "TRACE-BLOCKED",
+        "goal": "Repeatable engineering task",
+        "workflow": "feature",
+        "workspace_key": "mcp-studio",
+        "managed_session_id": "ms-1",
+        "status": "blocked",
+        "lifecycle": {
+            "schema": "hirda-pstack-lifecycle-v2",
+            "workflow": "feature",
+            "status": "blocked",
+            "current_phase": "working",
+            "revision": 4,
+            "stages": [
+                {"phase": "admitted", "status": "passed", "evidence": []},
+                {"phase": "working", "status": "failed", "evidence": []},
+                {"phase": "verified", "status": "pending", "evidence": []},
+                {"phase": "terminal", "status": "pending", "evidence": []},
+            ],
+        },
+    }
+
+    task = await gateway._open_pstack_gateway_task(
+        "gws-1",
+        managed_session={"id": "ms-1", "workspace_key": "mcp-studio"},
+        goal="Repeatable engineering task",
+    )
+
+    assert task is not None
+    assert task["task_id"] != "TASK-BLOCKED"
+    assert task["trace_id"] == "TRACE-GW"
+    assert task["lifecycle"]["status"] == "active"
+    assert task["lifecycle"]["current_phase"] == "admitted"
+
+
+@pytest.mark.asyncio
 async def test_gateway_resumed_task_creates_new_lineage_without_reusing_lifecycle():
     gateway = object.__new__(GatewaySessionManager)
     gateway.db = _GatewayDb()
