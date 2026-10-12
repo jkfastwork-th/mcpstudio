@@ -713,7 +713,7 @@ class CognitiveRouter:
         while True:
             try:
                 await self.herdr.refresh()
-                runtime_snapshot = self.runtimes.snapshot(force=True)
+                runtime_snapshot = self.runtimes.snapshot(force=False)
                 lane_states = await self.capsules.lane_states()
                 await self._reconcile_runtime_lane_health(runtime_snapshot, lane_states)
             except asyncio.CancelledError:
@@ -2465,7 +2465,7 @@ class CognitiveRouter:
             }
         request = normalize_cognitive_request(payload)
         await self.herdr.refresh()
-        runtime_snapshot = self.runtimes.snapshot(force=True)
+        runtime_snapshot = self.runtimes.snapshot(force=False)
         lane_states = (
             await self.capsules.lane_states()
             if self.capsules is not None
@@ -2621,7 +2621,7 @@ class CognitiveRouter:
         start the selected runtime inside a task-scoped pane.
         """
         request = normalize_cognitive_request(payload)
-        runtime_snapshot = self.runtimes.snapshot(force=True)
+        runtime_snapshot = self.runtimes.snapshot(force=False)
         lane_states = (
             await self.capsules.lane_states()
             if self.capsules is not None
