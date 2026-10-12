@@ -80,6 +80,55 @@ async def test_start_agent_in_pane_forwards_runtime_agent_args():
     assert result["agent_args"] == ["--permission-mode", "acceptEdits"]
 
 
+@pytest.mark.asyncio
+async def test_herdr_direct_launch_without_policy_does_not_auto_accept():
+    manager = object.__new__(HerdrManager)
+    cli_calls = []
+    pane = {"pane_id": "wH:pM", "agent": "claude", "agent_status": "idle"}
+
+    async def run_cli(*args, timeout_seconds=15.0):
+        cli_calls.append(args)
+        return {"ok": True}
+
+    async def refresh():
+        return {"status": "healthy"}
+
+    manager._run_cli_json = run_cli
+    manager.refresh = refresh
+    manager.find_pane = lambda **kwargs: pane
+    launched = await manager.start_agent_in_pane(
+        name="trusted-manual", kind="claude", pane_id="wH:pM"
+    )
+    assert launched["agent_args"] == []
+    assert "--permission-mode" not in cli_calls[0]
+    assert launched["permission_contract"]["permission_policy"] == "manual"
+
+
+@pytest.mark.asyncio
+async def test_herdr_explicit_auto_accept_uses_scoped_claude_mode():
+    manager = object.__new__(HerdrManager)
+    cli_calls = []
+    pane = {"pane_id": "wH:pA", "agent": "claude", "agent_status": "idle"}
+
+    async def run_cli(*args, timeout_seconds=15.0):
+        cli_calls.append(args)
+        return {"ok": True}
+
+    async def refresh():
+        return {"status": "healthy"}
+
+    manager._run_cli_json = run_cli
+    manager.refresh = refresh
+    manager.find_pane = lambda **kwargs: pane
+    launched = await manager.start_agent_in_pane(
+        name="trusted-auto", kind="claude", pane_id="wH:pA",
+        permission_policy="auto_accept",
+    )
+    assert launched["agent_args"] == ["--permission-mode", "auto"]
+    assert cli_calls[0][-3:] == ("--", "--permission-mode", "auto")
+    assert launched["permission_contract"]["permission_bypass"] is False
+
+
 def test_pane_list_enriches_agent_name_and_session_from_agent_inventory():
     snapshot = {
         "panes": {

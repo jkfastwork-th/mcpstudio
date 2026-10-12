@@ -382,7 +382,7 @@ async def test_dispatch_bootstraps_hirda_selected_runtime_before_prompt(tmp_path
 
     assert herdr.starts
     assert herdr.starts[0][1:4] == ("claude", "wF:p1", 30000)
-    assert herdr.starts[0][4] == []
+    assert herdr.starts[0][4] == ["--permission-mode", "auto"]
     assert herdr.calls[0][0] == "herdr_read_agent"
     assert herdr.calls[1][0] == "herdr_prompt_agent"
     assert dispatched["execution_state"] == "waiting_agent"
@@ -390,7 +390,7 @@ async def test_dispatch_bootstraps_hirda_selected_runtime_before_prompt(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_pstack_claude_bootstrap_enforces_accept_edits_launch_contract(tmp_path):
+async def test_pstack_claude_bootstrap_enforces_auto_accept_launch_contract(tmp_path):
     db = Database(str(tmp_path / "studio.sqlite3"))
     await db.init()
     await db.ensure_workers(1, "serena-8001")
@@ -434,7 +434,7 @@ async def test_pstack_claude_bootstrap_enforces_accept_edits_launch_contract(tmp
                         "text": (
                             "Claude Code v2.1.289\n"
                             "cx/gpt-6-luna[1m] with medium effort\n"
-                            "accept edits on\n"
+                            "auto mode on\n"
                         ),
                     }]
                 }
@@ -488,13 +488,13 @@ async def test_pstack_claude_bootstrap_enforces_accept_edits_launch_contract(tmp
 
     dispatched = await supervisor.dispatch(running["id"], explicit=True)
 
-    assert herdr.starts[0][4] == ["--permission-mode", "acceptEdits"]
+    assert herdr.starts[0][4] == ["--permission-mode", "auto"]
     readiness = dispatched["execution"]["runtime_readiness"]
-    assert readiness["permission_mode"] == "acceptEdits"
+    assert readiness["permission_mode"] == "auto"
     assert readiness["auto_edit_enabled"] is True
     assert readiness["ready"] is True
     launch = dispatched["execution"]["runtime_launch_contract"]
-    assert launch["permission_mode"] == "acceptEdits"
+    assert launch["permission_mode"] == "auto"
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,7 @@ import httpx
 from .execution import ToolSchemaError, build_tool_arguments
 from .herdr import HerdrManager, _decode_text_content
 from .hermes_groups import HermesGroupClient, HermesGroupError
+from .agent_permissions import resolve_agent_permissions
 
 
 COGNITIVE_REQUEST_SCHEMA = "hirda-cognitive-request-v1"
@@ -1394,7 +1395,12 @@ class CognitiveRouter:
             args.extend(["--provider", provider, "--model", model])
         if reasoning:
             args.extend(["--reasoning", reasoning])
-        return args
+        permissions = resolve_agent_permissions(
+            runtime_id,
+            permission_policy="auto_accept",
+            agent_args=args,
+        )
+        return list(permissions["agent_args"])
 
 
     def _request_principal_id(
