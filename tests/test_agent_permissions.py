@@ -7,7 +7,11 @@ from mcp_studio.agent_permissions import resolve_agent_permissions
 
 def test_claude_default_is_reviewed_auto_not_unbounded_bypass():
     plan = resolve_agent_permissions("claude")
-    assert plan["agent_args"] == ["--permission-mode", "auto"]
+    assert plan["agent_args"] == [
+        "--permission-mode", "auto", "--settings",
+        '{"skillOverrides":{"auto-mode-setup":"off"}}',
+    ]
+    assert plan["auto_mode_onboarding_suppressed"] is True
     assert plan["effective_permission_mode"] == "auto"
     assert plan["auto_accept_enabled"] is True
     assert plan["permission_bypass"] is False
