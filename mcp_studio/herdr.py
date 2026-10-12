@@ -12,6 +12,7 @@ from typing import Any, Literal, TypedDict
 from .db import Database
 from .health import HealthManager
 from .mcp_client import MCPClient
+from .agent_permissions import resolve_agent_permissions
 from .settings import Settings
 
 
@@ -896,6 +897,7 @@ class HerdrManager:
         pane_id: str,
         timeout_ms: int = 30000,
         agent_args: list[str] | None = None,
+        permission_policy: str | None = None,
     ) -> dict[str, Any]:
         """Start one HIRDA-selected runtime inside an existing HERDR pane."""
         agent_name = str(name or "").strip()
@@ -904,11 +906,24 @@ class HerdrManager:
         if not agent_name or not runtime_kind or not target_pane:
             raise ValueError("agent name, runtime kind, and pane id are required")
         bounded_timeout = max(1000, min(int(timeout_ms or 30000), 300000))
-        clean_args = [
-            str(item)
-            for item in (agent_args or [])
-            if str(item or "").strip()
-        ]
+        # A raw Herdr call without an HIRDA approval contract stays manual.
+        # Bootstrap callers explicitly pass scoped launch flags after HIRDA gate.
+        given_args = list(agent_args or [])
+        requested_policy = permission_policy or (
+            "auto_accept"
+            if any(
+                given_args[i : i + 2]
+                in (["--permission-mode", "auto"], ["--ask-for-approval", "never"])
+                for i in range(len(given_args) - 1)
+            )
+            else "manual"
+        )
+        permission_contract = resolve_agent_permissions(
+            runtime_kind,
+            permission_policy=requested_policy,
+            agent_args=given_args,
+        )
+        clean_args = list(permission_contract["agent_args"])
         command = [
             "agent",
             "start",
@@ -943,6 +958,7 @@ class HerdrManager:
             "agent_session": pane.get("agent_session"),
             "agent_status": pane.get("agent_status"),
             "agent_args": clean_args,
+            "permission_contract": permission_contract,
             "payload": payload,
         }
 

@@ -14,6 +14,7 @@ from .db import Database, PStackPreDispatchBlocked
 from .herdr import HerdrManager, _decode_text_content
 from .settings import Settings
 from .execution_environments import close_execution_environment
+from .agent_permissions import resolve_agent_permissions
 
 
 TERMINAL_AGENT_STATES = {"idle", "done"}
@@ -97,7 +98,7 @@ def _parse_runtime_readiness(
     accept_edits_match = re.search(r"\baccept edits on\b", text, re.I)
     if mode_match:
         mode = mode_match.group(1).casefold()
-        permission_mode = mode
+        permission_mode = "default" if mode == "manual" else mode
         auto_mode_enabled = mode == "auto"
     elif accept_edits_match:
         mode = "acceptEdits"
@@ -804,12 +805,10 @@ class ExecutionSupervisor:
         }
         if runtime_id == "claude" and task_id:
             permission_mode = str(
-                requirements.get("permission_mode")
-                or "acceptEdits"
+                requirements.get("permission_mode") or ""
             ).strip()
             if permission_mode:
                 agent_args.extend(["--permission-mode", permission_mode])
-                launch_contract["permission_mode"] = permission_mode
             expected_model = str(requirements.get("model") or "").strip()
             if expected_model:
                 agent_args.extend(["--model", expected_model])
@@ -822,6 +821,23 @@ class ExecutionSupervisor:
             if effort:
                 agent_args.extend(["--effort", effort])
                 launch_contract["reasoning_effort"] = effort
+
+        permission_contract = resolve_agent_permissions(
+            runtime_id,
+            permission_policy=str(
+                requirements.get("permission_policy") or "auto_accept"
+            ),
+            agent_args=agent_args,
+        )
+        agent_args = list(permission_contract["agent_args"])
+        launch_contract["permission_policy"] = permission_contract["permission_policy"]
+        launch_contract["permission_mode"] = permission_contract["effective_permission_mode"]
+        launch_contract["permission_bypass"] = False
+        launch_contract["auto_accept_enabled"] = permission_contract["auto_accept_enabled"]
+        if permission_contract.get("sandbox"):
+            launch_contract["sandbox"] = permission_contract["sandbox"]
+        if permission_contract.get("unsupported_reason"):
+            launch_contract["permission_warning"] = permission_contract["unsupported_reason"]
 
         starter_fn = cast(Callable[..., Awaitable[dict[str, Any]]], starter)
         started = await starter_fn(
@@ -896,13 +912,19 @@ class ExecutionSupervisor:
         require_auto_edit = (
             bool(explicit_auto_edit)
             if explicit_auto_edit is not None
-            else bool(metadata.get("pstack_task_id") and runtime_id == "claude")
+            else bool(
+                metadata.get("pstack_task_id")
+                and runtime_id == "claude"
+                and str(requirements.get("permission_policy") or "auto_accept")
+                == "auto_accept"
+            )
         )
         expected_permission_mode = (
             str(requirements.get("permission_mode") or "").strip()
             or (
-                "acceptEdits"
+                "auto"
                 if metadata.get("pstack_task_id") and runtime_id == "claude"
+                and str(requirements.get("permission_policy") or "auto_accept") == "auto_accept"
                 else None
             )
         )
