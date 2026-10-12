@@ -94,6 +94,25 @@ CONTROL_TOOL_NAMES = (
 )
 
 
+# An intentionally narrow, server-owned exception for workspace-scoped direct reads.
+# Tool declarations must agree with the effective permission decision; callers
+# cannot select their own dispatch class to avoid an engineering task.
+_DIRECT_BACKEND_READ_TOOLS = frozenset({
+    "hirda__hirda_native_computer__list_directory",
+    "hirda__hirda_native_computer__read_file",
+})
+
+
+def _backend_requires_pstack_task(
+    tool_name: str, declared_category: str | None, effective_category: str
+) -> bool:
+    return not (
+        tool_name in _DIRECT_BACKEND_READ_TOOLS
+        and declared_category == "read"
+        and effective_category == "read"
+    )
+
+
 HOP_BY_HOP = {
     "connection",
     "keep-alive",
@@ -7181,7 +7200,9 @@ class GatewaySessionManager:
                             == "completed"
                         ):
                             backend_pstack_task = None
-                    if not backend_pstack_task:
+                    if not backend_pstack_task and _backend_requires_pstack_task(
+                        tool_name, str(declared_category or "").strip().casefold(), decision.category
+                    ):
                         return local_tool_response(
                             {
                                 "error": "PSTACK_TASK_REQUIRED",
@@ -7194,54 +7215,55 @@ class GatewaySessionManager:
                             },
                             is_error=True,
                         )
-                    if backend_pstack_task.get("lifecycle") != backend_lifecycle:
-                        backend_pstack_task = {
-                            **backend_pstack_task,
-                            "lifecycle": backend_lifecycle,
-                        }
-                        await self._persist_active_pstack_task(
-                            gateway_session_id,
-                            backend_pstack_task,
+                    if backend_pstack_task:
+                        if backend_pstack_task.get("lifecycle") != backend_lifecycle:
+                            backend_pstack_task = {
+                                **backend_pstack_task,
+                                "lifecycle": backend_lifecycle,
+                            }
+                            await self._persist_active_pstack_task(
+                                gateway_session_id,
+                                backend_pstack_task,
+                            )
+                        backend_gate = pstack_workflow_gate(
+                            backend_lifecycle,
+                            tool_class=backend_pstack_tool_class,
                         )
-                    backend_gate = pstack_workflow_gate(
-                        backend_lifecycle,
-                        tool_class=backend_pstack_tool_class,
-                    )
-                    if not backend_gate.get("allowed"):
-                        return local_tool_response(
-                            {
-                                "error": backend_gate.get("code")
-                                or "PSTACK_WORKFLOW_BLOCKED",
-                                "message": backend_gate.get("message")
-                                or "Pstack workflow gate blocked this backend tool.",
-                                "tool": tool_name,
-                                "tool_class": backend_pstack_tool_class,
-                                "workflow": backend_pstack_task.get("workflow"),
-                                "current_phase": backend_lifecycle.get("current_phase"),
-                                "lifecycle_status": backend_lifecycle.get("status"),
-                                "trace_id": backend_pstack_task.get("trace_id"),
-                            },
-                            is_error=True,
-                        )
-                    session = await self.db.get_gateway_session(gateway_session_id)
-                    await self._record_active_pstack_tool(
-                        session,
-                        tool_name=tool_name,
-                        status="running",
-                        detail=(
-                            f"HIRDA dispatched backend tool {tool_name} inside the "
-                            "Pstack-bound workspace."
-                        ),
-                        metadata={
-                            "argument_keys": sorted(
-                                str(key) for key in (tool_args or {})
+                        if not backend_gate.get("allowed"):
+                            return local_tool_response(
+                                {
+                                    "error": backend_gate.get("code")
+                                    or "PSTACK_WORKFLOW_BLOCKED",
+                                    "message": backend_gate.get("message")
+                                    or "Pstack workflow gate blocked this backend tool.",
+                                    "tool": tool_name,
+                                    "tool_class": backend_pstack_tool_class,
+                                    "workflow": backend_pstack_task.get("workflow"),
+                                    "current_phase": backend_lifecycle.get("current_phase"),
+                                    "lifecycle_status": backend_lifecycle.get("status"),
+                                    "trace_id": backend_pstack_task.get("trace_id"),
+                                },
+                                is_error=True,
+                            )
+                        session = await self.db.get_gateway_session(gateway_session_id)
+                        await self._record_active_pstack_tool(
+                            session,
+                            tool_name=tool_name,
+                            status="running",
+                            detail=(
+                                f"HIRDA dispatched backend tool {tool_name} inside the "
+                                "Pstack-bound workspace."
                             ),
-                            "pstack_required": True,
-                            "pstack_workflow": backend_pstack_task.get("workflow"),
-                            "pstack_phase": backend_lifecycle.get("current_phase"),
-                            "tool_class": backend_pstack_tool_class,
-                        },
-                    )
+                            metadata={
+                                "argument_keys": sorted(
+                                    str(key) for key in (tool_args or {})
+                                ),
+                                "pstack_required": True,
+                                "pstack_workflow": backend_pstack_task.get("workflow"),
+                                "pstack_phase": backend_lifecycle.get("current_phase"),
+                                "tool_class": backend_pstack_tool_class,
+                            },
+                        )
                 metadata = managed_session.get("metadata") if isinstance(managed_session.get("metadata"), dict) else {}
                 context = {
                     "managed_session_id": managed_session.get("id"),
