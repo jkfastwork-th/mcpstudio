@@ -382,7 +382,10 @@ async def test_dispatch_bootstraps_hirda_selected_runtime_before_prompt(tmp_path
 
     assert herdr.starts
     assert herdr.starts[0][1:4] == ("claude", "wF:p1", 30000)
-    assert herdr.starts[0][4] == ["--permission-mode", "auto"]
+    assert herdr.starts[0][4] == [
+        "--permission-mode", "auto", "--settings",
+        '{"skillOverrides":{"auto-mode-setup":"off"}}',
+    ]
     assert herdr.calls[0][0] == "herdr_read_agent"
     assert herdr.calls[1][0] == "herdr_prompt_agent"
     assert dispatched["execution_state"] == "waiting_agent"
@@ -488,7 +491,10 @@ async def test_pstack_claude_bootstrap_enforces_auto_accept_launch_contract(tmp_
 
     dispatched = await supervisor.dispatch(running["id"], explicit=True)
 
-    assert herdr.starts[0][4] == ["--permission-mode", "auto"]
+    assert herdr.starts[0][4] == [
+        "--permission-mode", "auto", "--settings",
+        '{"skillOverrides":{"auto-mode-setup":"off"}}',
+    ]
     readiness = dispatched["execution"]["runtime_readiness"]
     assert readiness["permission_mode"] == "auto"
     assert readiness["auto_edit_enabled"] is True

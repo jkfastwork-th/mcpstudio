@@ -9,6 +9,9 @@ from __future__ import annotations
 from typing import Any
 
 _POLICY_VALUES = frozenset({"auto_accept", "manual"})
+# Scoped to HIRDA-owned Claude auto-mode launches. This removes only the
+# optional first-run setup offer, not the classifier or permissions.ask/deny.
+_CLAUDE_AUTO_ONBOARDING_SETTINGS = '{"skillOverrides":{"auto-mode-setup":"off"}}'
 _CLAUDE_MODES = frozenset({"auto", "acceptEdits", "default", "plan", "dontAsk"})
 _FORBIDDEN_FLAGS = frozenset({
     "--yolo", "--dangerously-skip-permissions",
@@ -68,10 +71,15 @@ def resolve_agent_permissions(
             args.extend(["--permission-mode", mode])
         else:
             mode = "default"
+        onboarding_suppressed = False
+        if policy == "auto_accept" and mode == "auto" and "--settings" not in args:
+            args.extend(["--settings", _CLAUDE_AUTO_ONBOARDING_SETTINGS])
+            onboarding_suppressed = True
         contract.update({
             "effective_permission_mode": mode,
             "auto_accept_enabled": mode in {"auto", "acceptEdits"},
             "manual_approval_possible": True,
+            "auto_mode_onboarding_suppressed": onboarding_suppressed,
         })
     elif kind == "codex":
         if "--sandbox" in args:

@@ -124,8 +124,14 @@ async def test_herdr_explicit_auto_accept_uses_scoped_claude_mode():
         name="trusted-auto", kind="claude", pane_id="wH:pA",
         permission_policy="auto_accept",
     )
-    assert launched["agent_args"] == ["--permission-mode", "auto"]
-    assert cli_calls[0][-3:] == ("--", "--permission-mode", "auto")
+    assert launched["agent_args"] == [
+        "--permission-mode", "auto", "--settings",
+        '{"skillOverrides":{"auto-mode-setup":"off"}}',
+    ]
+    assert cli_calls[0][-5:] == (
+        "--", "--permission-mode", "auto", "--settings",
+        '{"skillOverrides":{"auto-mode-setup":"off"}}',
+    )
     assert launched["permission_contract"]["permission_bypass"] is False
 
 
