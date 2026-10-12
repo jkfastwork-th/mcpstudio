@@ -26,6 +26,7 @@ from .settings import Settings
 from .oauth import OAuthManager
 from .managed_sessions import ManagedSessionManager, ManagedSessionError, ManagedSessionConflict, WorkspaceNotAllowed
 from .tool_permissions import decide_tool_call, classify_tool
+from .session_inspection import inspect_session_from_db
 from .pstack_lifecycle import (
     PstackLifecycleError,
     checkpoint as pstack_checkpoint,
@@ -5608,7 +5609,13 @@ class GatewaySessionManager:
         if name == "mcpstudio_list_sessions":
             return {"sessions": await self.managed_sessions.list_sessions(**principal_kwargs)}
         if name == "mcpstudio_get_session":
-            return {"session": await self._resolve_managed_session(str(args.get("session") or ""), principal_id=principal_id)}
+            target = await self._resolve_managed_session(str(args.get("session") or ""), principal_id=principal_id)
+            return {
+                "session": target,
+                "inspection": await inspect_session_from_db(
+                    self.db, target, getattr(self.herdr, "snapshot", None)
+                ),
+            }
         if name == "mcpstudio_rename_session":
             target = await self._resolve_managed_session(str(args.get("session") or ""), principal_id=principal_id)
             return {"session": await self.managed_sessions.rename_session(
@@ -5740,7 +5747,13 @@ class GatewaySessionManager:
                 return await self.graft.rearm(workspace_key, actor="chatgpt/mcp")
         if name == "mcpstudio_session_history":
             target = await self._resolve_managed_session(str(args.get("session") or ""), principal_id=principal_id)
-            return await self.managed_sessions.history(target["id"])
+            history = await self.managed_sessions.history(target["id"])
+            return {
+                **history,
+                "inspection": await inspect_session_from_db(
+                    self.db, target, getattr(self.herdr, "snapshot", None)
+                ),
+            }
         if name == "mcpstudio_create_session":
             created = await self.managed_sessions.create_session(
                 name=str(args.get("name") or ""), workspace_key=str(args.get("workspace") or ""), actor="chatgpt/mcp",
@@ -6171,6 +6184,11 @@ class GatewaySessionManager:
                 "gateway_session_id": gateway_session_id,
                 "managed_session": managed,
                 "machine": machine,
+                "inspection": (
+                    await inspect_session_from_db(
+                        self.db, managed, getattr(self.herdr, "snapshot", None)
+                    ) if managed is not None else None
+                ),
                 "context": self.context_status_from_gateway(gateway),
             }
         if name == "mcpstudio_detach_session":

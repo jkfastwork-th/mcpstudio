@@ -27,6 +27,7 @@ from .gateway import GatewaySessionManager, make_gateway_router
 from .managed_sessions import ManagedSessionManager, ManagedSessionError, ManagedSessionConflict, WorkspaceNotAllowed
 from .health import HealthManager
 from .herdr import HerdrManager
+from .session_inspection import inspect_session_from_db
 from .capsules import CapsuleService, CapsuleNotFound, CapsuleDeliveryError
 from .agent_runtimes import AgentRuntimeInventory
 from .models import (
@@ -3397,7 +3398,12 @@ async def managed_session_permissions_update(session_id: str, payload: ManagedSe
 @app.get("/api/managed/sessions/{session_id}/history")
 async def managed_session_history(session_id: str):
     try:
-        return await managed_sessions.history(session_id)
+        session = await managed_sessions.get_session(session_id)
+        history = await managed_sessions.history(session_id)
+        return {
+            **history,
+            "inspection": await inspect_session_from_db(db, session, herdr.snapshot),
+        }
     except KeyError:
         raise HTTPException(status_code=404, detail="Unknown managed session")
 
